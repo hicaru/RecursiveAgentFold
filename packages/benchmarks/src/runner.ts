@@ -133,15 +133,16 @@ export async function runTasks(tasks: BenchTask[], cfg: RunConfig): Promise<Task
   let done = 0;
 
   await Promise.all(
-    [...groups.values()].map((group) =>
-      limit(async () => {
-        const store = cfg.method === 'direct' ? undefined : buildStore(group[0]!.documents);
-        // One llm_query engine per document group: memo + chunk cache shared across its questions.
-        const queryEngine =
-          toolPreset(cfg).llm_query && cfg.query && store && cfg.shareQueryMemo !== false
-            ? new LLMQueryEngine(cfg.query, store, new UsageTracker(), cfg.llmQuery)
-            : undefined;
-        for (const task of group) {
+    [...groups.values()].map((group) => {
+      const store = cfg.method === 'direct' ? undefined : buildStore(group[0]!.documents);
+      // One llm_query engine per document group: memo + chunk cache shared across its questions.
+      const queryEngine =
+        toolPreset(cfg).llm_query && cfg.query && store && cfg.shareQueryMemo !== false
+          ? new LLMQueryEngine(cfg.query, store, new UsageTracker(), cfg.llmQuery)
+          : undefined;
+      return Promise.all(
+        group.map((task) =>
+          limit(async () => {
           const usage = new UsageTracker();
           const tracePath = join(cfg.outDir, 'traces', `${task.id.replace(/[^\w.-]/g, '_')}.jsonl`);
           writeFileSync(tracePath, '');
@@ -204,10 +205,11 @@ export async function runTasks(tasks: BenchTask[], cfg: RunConfig): Promise<Task
               `steps=${r.steps} ${r.terminated} tokens=${result.total.promptTokens}/${result.total.completionTokens} cache=${(result.total.cacheHitRate * 100).toFixed(1)}%` +
               (r.error ? ` error=${r.error.slice(0, 200)}` : ''),
           );
-        }
-      }),
-    ),
-  );
+        }),
+      ),
+    );
+  }),
+);
   return results;
 }
 
