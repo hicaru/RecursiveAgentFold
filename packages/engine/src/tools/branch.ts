@@ -25,12 +25,12 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
   return {
     name: 'branch',
     description:
-      'Delegate a self-contained sub-task to a sub-agent with its own fresh context and the same document tools (incl. llm_query). Returns only its final result. Give it everything it needs: goal, relevant document ids/line ranges, and the exact output format you want back.',
+      '把自包含子任务交给拥有全新上下文和相同文档工具（含 llm_query）的子代理，只返回其最终结果。必须交代目标、相关文档 id/行区间和期望的输出格式。',
     parameters: {
       type: 'object',
       properties: {
-        task: { type: 'string', description: 'Complete, self-contained instruction for the sub-agent.' },
-        max_steps: { type: 'integer', description: `Step budget (default ${opts.maxBranchSteps ?? 20}).` },
+        task: { type: 'string', description: '完整、自包含的子代理指令。' },
+        max_steps: { type: 'integer', description: `步数预算（默认 ${opts.maxBranchSteps ?? 20}）。` },
       },
       required: ['task'],
     },
@@ -38,9 +38,9 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
       const task = argString(args, 'task')!;
       const maxSteps = Math.min(argNumber(args, 'max_steps') ?? opts.maxBranchSteps ?? 20, opts.maxBranchSteps ?? 20);
       const r = await run(task, { depth: ctx.depth + 1, maxSteps, parent: ctx.agentName, signal: ctx.signal });
-      const status = `branch finished: ${r.terminated} after ${r.steps} step(s)${r.error ? ` (error: ${r.error})` : ''}`;
-      const body = r.answer ?? '(no answer produced)';
-      return truncateToTokens(`${status}\nResult:\n${body}`, opts.maxResultTokens ?? 3000).text;
+      const status = `branch 完成：${r.terminated}，共 ${r.steps} 步${r.error ? `（错误：${r.error}）` : ''}`;
+      const body = r.answer ?? '（未产生答案）';
+      return truncateToTokens(`${status}\n结果：\n${body}`, opts.maxResultTokens ?? 3000).text;
     },
   };
 }

@@ -75,7 +75,7 @@ describe('RecursiveAgentFold end-to-end (scripted)', () => {
     const reader = scriptedReader();
     const root = new ScriptedLLM((req) => {
       const user = req.messages[1]!.content;
-      const step = Number(/This is step (\d+)/.exec(user)![1]);
+      const step = Number(/当前是第 (\d+) 步/.exec(user)![1]);
       switch (step) {
         case 0:
           return '<motivation>Locate first.</motivation><tool_call>{"name":"llm_query","arguments":{"query":"Find the vault passcode for project Orion","mode":"locate"}}</tool_call>';
@@ -91,7 +91,7 @@ describe('RecursiveAgentFold end-to-end (scripted)', () => {
     }, { name: 'root', contextWindow: 64_000 });
     const branch = new ScriptedLLM((req) => {
       const user = req.messages[1]!.content;
-      return /This is step 0/.test(user)
+      return /当前是第 0 步/.test(user)
         ? '<motivation>grep</motivation><tool_call>{"name":"grep","arguments":{"pattern":"passcode"}}</tool_call>'
         : '<folding>{"range":[0,0],"summary":"grep found 1 line"}</folding><answer>7341 (ctx:21007)</answer>';
     });
@@ -123,8 +123,8 @@ describe('RecursiveAgentFold end-to-end (scripted)', () => {
       n++;
       const user = req.messages[1]!.content;
       if (n === 1) return 'I forgot the format';
-      if (/step limit/.test(user)) return '<answer>beta</answer>';
-      const step = Number(/This is step (\d+)/.exec(user)![1]);
+      if (/步数上限/.test(user)) return '<answer>beta</answer>';
+      const step = Number(/当前是第 (\d+) 步/.exec(user)![1]);
       return step === 0
         ? '<motivation>x</motivation><tool_call>{"name":"grep","arguments":{"pattern":"beta"}}</tool_call>'
         : '<motivation>again</motivation><tool_call>{"name":"grep","arguments":{"pattern":"beta"}}</tool_call>'; // missing folding → auto fold

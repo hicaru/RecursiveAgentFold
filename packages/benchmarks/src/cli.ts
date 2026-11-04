@@ -16,7 +16,7 @@ Usage: pnpm bench <command> [options]
 
 Commands:
   models                         List models exposed by the configured endpoint
-  prompt-check                   Live check of root / llm_query prompts + tiny e2e run
+  prompt-check                   Live check of the Chinese prompts: per-tool probes, folding, reader, e2e
   fetch-oolong                   Download + cache OOLONG-synth rows (HTTP range reads)
   oolong                         Run OOLONG-synth (trec_coarse@131K etc.)
   needle                         Run the synthetic mega-context needle/count benchmark
@@ -36,6 +36,7 @@ Common options:
   --out <dir>                    results directory (default results/<timestamp>-<bench>-<method>)
   --mock                         offline scripted models (harness dry-run, scores meaningless)
   --no-share-memo                do not share the llm_query memo across questions of one context
+  --only <name>                  prompt-check only: a tool name, folding, reader or e2e
 
 oolong / fetch-oolong:
   --dataset <name>               default trec_coarse
@@ -82,6 +83,7 @@ async function main() {
       windows: { type: 'string' },
       'no-hint': { type: 'boolean', default: false },
       'no-share-memo': { type: 'boolean', default: false },
+      only: { type: 'string' },
       mock: { type: 'boolean', default: false },
       tools: { type: 'string' },
       resume: { type: 'boolean', default: false },
@@ -120,7 +122,7 @@ async function main() {
 
   if (cmd === 'prompt-check') {
     mkdirSync(outDir, { recursive: true });
-    const ok = await promptCheck(createModels(modelOverrides), outDir);
+    const ok = await promptCheck(createModels(modelOverrides), outDir, console.log, values.only);
     process.exitCode = ok ? 0 : 1;
     return;
   }

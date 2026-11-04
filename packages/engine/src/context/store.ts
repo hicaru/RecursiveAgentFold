@@ -94,7 +94,7 @@ export class ContextStore {
 
   get(id: string): StoredDocument {
     const d = this.docs.get(id);
-    if (!d) throw new Error(`unknown document "${id}". Available: ${[...this.docs.keys()].join(', ') || '(none)'}`);
+    if (!d) throw new Error(`未知文档 "${id}"。可用：${[...this.docs.keys()].join('、') || '（无）'}`);
     return d;
   }
 
@@ -110,9 +110,9 @@ export class ContextStore {
 
   /** Stable manifest rendered into the agent prompt (part of the cached prefix). */
   manifest(): string {
-    if (this.docs.size === 0) return '(no documents loaded)';
+    if (this.docs.size === 0) return '（未加载文档）';
     return this.list()
-      .map((d) => `- id: \`${d.id}\` — ${d.title} — ~${d.tokens.toLocaleString('en-US')} tokens, ${d.lines.length.toLocaleString('en-US')} lines`)
+      .map((d) => `- id: \`${d.id}\` — ${d.title} — 约 ${d.tokens.toLocaleString('en-US')} token，${d.lines.length.toLocaleString('en-US')} 行`)
       .join('\n');
   }
 

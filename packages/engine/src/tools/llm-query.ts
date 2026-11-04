@@ -141,7 +141,7 @@ export class LLMQueryEngine {
     const chunks = this.selectChunks(docIds, chunkTokens, args.startLine, args.endLine);
     const scan = chunks.reduce((a, c) => a + c.tokens, 0);
     if (scan > (this.opts.maxScanTokens ?? 4_000_000)) {
-      throw new ToolArgumentError(`llm_query would scan ~${scan} tokens (limit ${this.opts.maxScanTokens ?? 4_000_000}); restrict documents or line range`);
+      throw new ToolArgumentError(`llm_query 将扫描约 ${scan} token（上限 ${this.opts.maxScanTokens ?? 4_000_000}）；请缩小文档或行范围`);
     }
     const usage = args.usage ?? this.usage;
     const findings = await Promise.all(chunks.map((c) => this.limit(() => this.runChunk(c, args.query, mode, usage, args.signal))));
@@ -201,37 +201,37 @@ export class LLMQueryEngine {
       const ev = f.evidence
         .slice(0, 5)
         .map((e) => `L${e.line ?? '?'} "${e.quote.length > 160 ? `${e.quote.slice(0, 160)}…` : e.quote}"`)
-        .join('; ');
-      return `#${f.chunk.index + 1} [${f.chunk.docId} L${f.chunk.startLine}-${f.chunk.endLine}] ${f.answer.replace(/\s+/g, ' ').trim()}${ev ? ` | evidence: ${ev}` : ''}`;
+        .join('；');
+      return `#${f.chunk.index + 1} [${f.chunk.docId} L${f.chunk.startLine}-${f.chunk.endLine}] ${f.answer.replace(/\s+/g, ' ').trim()}${ev ? ` | 证据：${ev}` : ''}`;
     };
     const lines: string[] = [];
     lines.push(
-      `llm_query (${mode}, model ${this.llm.profile.name}) scanned ${findings.length} chunk(s) of ~${chunkTokens.toLocaleString('en-US')} tokens; relevant: ${relevant.length}; errors: ${errors.length}; cached results: ${findings.filter((f) => f.memoHit).length}`,
+      `llm_query（${mode}，模型 ${this.llm.profile.name}）扫描 ${findings.length} 个分块（约 ${chunkTokens.toLocaleString('en-US')} token）；相关 ${relevant.length}；错误 ${errors.length}；缓存 ${findings.filter((f) => f.memoHit).length}`,
     );
-    lines.push(`query: ${query}`);
+    lines.push(`查询：${query}`);
     if (mode === 'extract') {
-      lines.push('Per-chunk results (aggregate them yourself):');
-      for (const f of findings) lines.push(f.error ? `#${f.chunk.index + 1} [${f.chunk.docId} L${f.chunk.startLine}-${f.chunk.endLine}] ERROR: ${f.error}` : fmt(f));
+      lines.push('各分块结果（请自行汇总）：');
+      for (const f of findings) lines.push(f.error ? `#${f.chunk.index + 1} [${f.chunk.docId} L${f.chunk.startLine}-${f.chunk.endLine}] 错误：${f.error}` : fmt(f));
       const totals = sumCounts(findings);
       if (totals) {
         const withCounts = findings.filter((f) => f.counts).length;
         lines.push(
-          `Summed "counts" over ${withCounts}/${findings.length} chunk(s): ` +
+          `"counts" 已汇总（${withCounts}/${findings.length} 块）：` +
             Object.entries(totals)
               .sort((a, b) => b[1] - a[1])
               .map(([k, v]) => `${k}=${v}`)
               .join(', ') +
-            (withCounts < findings.length ? ' (WARNING: some chunks reported no counts)' : ''),
+            (withCounts < findings.length ? '（警告：部分分块未给出 counts）' : ''),
         );
       }
     } else {
       if (relevant.length) {
-        lines.push('Relevant chunks:');
+        lines.push('相关分块：');
         for (const f of relevant) lines.push(fmt(f));
-      } else lines.push('No chunk reported relevant content.');
+      } else lines.push('没有分块报告相关内容。');
       const irrelevant = findings.filter((f) => !f.relevant && !f.error).map((f) => f.chunk.index);
-      if (irrelevant.length) lines.push(`Not relevant: ${compressIndexRanges(irrelevant)}`);
-      for (const f of errors) lines.push(`#${f.chunk.index + 1} [${f.chunk.docId} L${f.chunk.startLine}-${f.chunk.endLine}] ERROR: ${f.error}`);
+      if (irrelevant.length) lines.push(`不相关：${compressIndexRanges(irrelevant)}`);
+      for (const f of errors) lines.push(`#${f.chunk.index + 1} [${f.chunk.docId} L${f.chunk.startLine}-${f.chunk.endLine}] 错误：${f.error}`);
     }
     return truncateToTokens(lines.join('\n'), this.opts.maxReportTokens ?? 6000).text;
   }
@@ -241,7 +241,7 @@ function normalizeFinding(text: string): Omit<ChunkFinding, 'chunk' | 'memoHit'>
   const obj = tryParseLooseJSON<Record<string, unknown>>(text);
   if (!obj || typeof obj !== 'object') {
     const t = text.trim();
-    const negative = /^(no|none|not relevant|irrelevant)\b/i.test(t) || t === '';
+    const negative = /^(no|none|not relevant|irrelevant)\b/i.test(t) || /^(无|没有|否|不相关)/.test(t) || t === '';
     return { relevant: !negative, answer: t.slice(0, 2000), evidence: [] };
   }
   const relevantRaw = obj.relevant;
@@ -287,30 +287,28 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
   return {
     name: 'llm_query',
     description:
-      `Scan large documents with a fast non-reasoning reader model (${engine.llm.profile.name}, ${engine.llm.profile.contextWindow.toLocaleString('en-US')}-token window). ` +
-      `Documents are split into fixed chunks of ~${engine.defaultChunkTokens.toLocaleString('en-US')} tokens; the query runs on every chunk in parallel and per-chunk findings (with line numbers) are returned. ` +
-      `mode "locate": find where something is. mode "extract": map an extraction/classification/count over all chunks (you aggregate).`,
+      `用快速非推理阅读器模型（${engine.llm.profile.name}，${engine.llm.profile.contextWindow.toLocaleString('en-US')} token 窗口）扫描大文档。文档按约 ${engine.defaultChunkTokens.toLocaleString('en-US')} token 固定分块，查询并行作用于每个分块，返回带行号的各块发现。mode "locate"：定位内容；mode "extract"：在全部块上做抽取/分类/计数（由你汇总）。`,
     parameters: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Self-contained instruction applied to each chunk, including the desired output form.' },
-        mode: { type: 'string', enum: ['locate', 'extract'], default: 'locate' },
-        documents: { type: 'array', items: { type: 'string' }, description: 'Document ids (default: all).' },
-        start_line: { type: 'integer', description: 'Optional: only chunks overlapping this line range (single document).' },
+        query: { type: 'string', description: '自包含指令，作用于每个分块，并写明所需输出形式。' },
+        mode: { type: 'string', enum: ['locate', 'extract'], default: 'locate', description: 'locate=定位；extract=抽取/分类/计数。' },
+        documents: { type: 'array', items: { type: 'string' }, description: '文档 id（默认：全部）。' },
+        start_line: { type: 'integer', description: '可选：只扫描与此行区间重叠的分块（仅限单个文档）。' },
         end_line: { type: 'integer' },
-        chunk_tokens: { type: 'integer', description: `Optional smaller chunk size for dense tasks (power of two, max ${engine.defaultChunkTokens}).` },
+        chunk_tokens: { type: 'integer', description: `可选：密集任务用更小的分块（2 的幂，最大 ${engine.defaultChunkTokens}）。` },
       },
       required: ['query'],
     },
     async execute(args, ctx) {
       const query = argString(args, 'query')!;
       const modeRaw = argString(args, 'mode', false) ?? 'locate';
-      if (modeRaw !== 'locate' && modeRaw !== 'extract') throw new ToolArgumentError('mode must be "locate" or "extract"');
+      if (modeRaw !== 'locate' && modeRaw !== 'extract') throw new ToolArgumentError('mode 必须是 "locate" 或 "extract"');
       const documents = argStringList(args, 'documents');
       const startLine = argNumber(args, 'start_line');
       const endLine = argNumber(args, 'end_line');
       if ((startLine !== undefined || endLine !== undefined) && (documents?.length ?? engine.store.list().length) !== 1) {
-        throw new ToolArgumentError('start_line/end_line require exactly one document');
+        throw new ToolArgumentError('start_line/end_line 要求恰好一个文档');
       }
       const res = await engine.query({
         query,

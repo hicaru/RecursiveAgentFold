@@ -47,7 +47,7 @@ console.log(answer, usage.byRole()); // per-role tokens + cache hit rate
 
 ## Results
 
-Vanilla AgentFold (`--method agentfold`: `grep`, `read`, `calculator` only — no `llm_query`, no `branch`, no `tally`) against GLM-5.3 (`thinking` enabled, temperature 0, 1M context window).
+Vanilla AgentFold (`--method agentfold`: `grep`, `read`, `calculator` only — no `llm_query`, no `branch`, no `tally`) against GLM-5.3 (`thinking` enabled, temperature 0, 1M context window). The tables below are the **pre-Chinese-prompt baseline**; the bounded re-run with the current prompts is in [Current prompts](#current-prompts-compact-chinese-2026-11-05). `steps` and `wall` are per task.
 
 | benchmark | tasks | correct | mean score | score excl. filtered | errors | steps | wall | cache hit | tokens (prompt / cached / completion) | cost |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -69,18 +69,31 @@ All 50 tasks share two context windows (131 072 tokens each); the 8 `filtered` t
 
 Exact counting is the hard limit of the vanilla setup: the model estimates instead of tallying (gold 571 → answer 456, gold 544 → answer 552). That is what `llm_query` chunk scanning and `tally` exist for in the full RAF method.
 
+### Current prompts (compact Chinese, 2026-11-05)
+
+The table above was measured before the prompts moved to Chinese. This bounded re-run uses the current prompts and the same models. OOLONG is 10 tasks with `--max-steps 10 --concurrency 3`; a full 50-task run takes about 9 h at the observed latency. Needle is the standard 4 tasks at 1M tokens. Two OOLONG tasks were content-filtered (Z.ai 1301), so the score excluding them is 0.750 (6/8); there were 16 format-repair events over 92 root calls.
+
+| benchmark | tasks | correct | mean score | score excl. filtered | errors | steps | wall | cache hit | tokens (prompt / cached / completion) | cost |
+|---|---|---|---|---|---|---|---|---|---|---|
+| OOLONG `trec_coarse` @131K (bounded) | 10 | 6/10 | **0.6000** | 0.7500 (6/8) | 0 | 8.3 | 494.5 s | 52.7% | 321 204 / 169 408 / 354 325 | $1.82 |
+| needle @1M | 4 | 4/4 | **1.0000** | 1.0000 (4/4) | 0 | 2.5 | 17.3 s | 68.2% | 12 474 / 8 512 / 4 278 | $0.03 |
+
+By task type: `LEAST_FREQ` 1/1.000, `RELATIVE_FREQ` 8/0.625, `MOST_FREQ` 1/0.000. Results: `results/2026-11-05-agentfold-cn-oolong-trec10`, `results/2026-11-05-agentfold-cn-needle-1m`.
+
 ## Benchmarks
 
 ```bash
 pnpm bench --help
-pnpm prompt-check                                           # live: reachability, llm_query JSON contract, tiny e2e run
+pnpm prompt-check                                           # live: per-tool probes, folding, reader contract, tiny e2e
 pnpm bench fetch-oolong --dataset trec_coarse --context-len 131072   # HTTP range reads from HF parquet → .cache/
 pnpm bench oolong --method raf --limit 10 --max-chunk-tokens 16384
-pnpm bench oolong --method agentfold --limit 10             # plain AgentFold (grep/read/tally, no llm_query)
+pnpm bench oolong --method agentfold --limit 10 --max-steps 10 --concurrency 3   # bounded plain AgentFold (grep/read/calculator)
 pnpm bench oolong --method direct --limit 10                # single-call baseline (official OOLONG prompt layout)
 pnpm bench needle --method raf --tokens 1000000 --tasks 4   # synthetic mega-context lookup + count
 pnpm bench oolong --mock --limit 4                          # offline harness dry-run (no network)
 ```
+
+The agent and reader system prompts plus all tool descriptions are Chinese and compact (agent system text 4,076 → 1,181 characters; reader 1,033 → 385). `prompt-check` sends the real root system prompt once per tool (all default tools available) and fails unless the model chooses that tool, passes valid arguments, and the call executes. It also checks folding at step 1, the `llm_query` JSON/counts contract, and one tiny end-to-end run. Use `--only <tool|folding|reader|e2e>` to run a single check.
 
 Each run writes `results/<stamp>-<bench>-<method>/` containing:
 

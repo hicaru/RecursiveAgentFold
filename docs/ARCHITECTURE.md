@@ -12,10 +12,10 @@ C_t = (Q, T, S_{t-2}, I_{t-1})
 
 | Part | Meaning | Rendering |
 |---|---|---|
-| Q | user question (never changes) | `### Question` |
-| T | tool schemas (never change) | system prompt `# Available tools` |
-| S | multi-scale state summaries: a contiguous, gap-free partition of steps `0..t-2` | `**[Compressed Step x]**` / `**[Compressed Step x to y]**` |
-| I | latest interaction at full fidelity: motivation, tool call, tool response | `**[Step n]**` + `**Motivation:**` / `**Tool call:**` / `**Tool response:**` |
+| Q | user question (never changes) | `### 任务` |
+| T | tool schemas (never change) | system prompt `# 可用工具` |
+| S | multi-scale state summaries: a contiguous, gap-free partition of steps `0..t-2` | `**[压缩步骤 x]**` / `**[压缩步骤 x 至 y]**` |
+| I | latest interaction at full fidelity: motivation, tool call, tool response | `**[步骤 n]**` + `**动机：**` / `**工具调用：**` / `**工具结果：**` |
 
 **Response** (Fig. 7/9 of the paper):
 

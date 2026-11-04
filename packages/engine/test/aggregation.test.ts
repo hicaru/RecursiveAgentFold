@@ -12,7 +12,7 @@ describe('aggregation helpers', () => {
     const r = store.tally('User: (\\d+)');
     expect(r.counts).toEqual([['1', 2], ['2', 1]]);
     const out = await createTallyTool().execute({ pattern: 'User: (\\d+)' }, { store } as never);
-    expect(out).toContain('3 match(es), 2 distinct');
+    expect(out).toContain('3 个匹配，2 个不同值');
   });
 
   it('llm_query extract sums reader counts across chunks', async () => {

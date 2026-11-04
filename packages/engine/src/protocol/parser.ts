@@ -58,24 +58,24 @@ function parseFolding(raw: string, warnings: string[], errors: string[]): FoldDi
   try {
     obj = parseLooseJSON<Record<string, unknown>>(raw);
   } catch (e) {
-    errors.push(`<folding> is not valid JSON: ${(e as Error).message}`);
+    errors.push(`<folding> 不是合法 JSON：${(e as Error).message}`);
     return undefined;
   }
   let range = obj.range;
   if (typeof range === 'string') {
     const nums = range.match(/-?\d+/g)?.map(Number) ?? [];
     range = nums.length === 1 ? [nums[0], nums[0]] : nums;
-    warnings.push('folding.range was a string');
+    warnings.push('folding.range 是字符串');
   }
   if (typeof range === 'number') range = [range, range];
   if (!Array.isArray(range) || range.length < 1 || range.some((x) => typeof x !== 'number' && isNaN(Number(x)))) {
-    errors.push('folding.range must be [start, end]');
+    errors.push('folding.range 必须是 [start, end]');
     return undefined;
   }
   const start = Number(range[0]);
   const end = Number(range[range.length - 1]);
   const summary = typeof obj.summary === 'string' ? obj.summary : obj.summary !== undefined ? JSON.stringify(obj.summary) : '';
-  if (!summary.trim()) errors.push('folding.summary is empty');
+  if (!summary.trim()) errors.push('folding.summary 为空');
   return { range: [start, end], summary };
 }
 
@@ -84,14 +84,14 @@ function parseToolCall(raw: string, errors: string[]): ToolAction | undefined {
   try {
     obj = parseLooseJSON<Record<string, unknown>>(raw);
   } catch (e) {
-    errors.push(`<tool_call> is not valid JSON: ${(e as Error).message}`);
+    errors.push(`<tool_call> 不是合法 JSON：${(e as Error).message}`);
     return undefined;
   }
   // Accept OpenAI-style {"function": {"name", "arguments": "<json>"}} as well.
   const fn = (obj.function ?? obj) as Record<string, unknown>;
   const name = fn.name ?? fn.tool ?? fn.tool_name;
   if (typeof name !== 'string' || !name) {
-    errors.push('tool_call.name is missing');
+    errors.push('tool_call.name 缺失');
     return undefined;
   }
   let args = fn.arguments ?? fn.args ?? fn.parameters ?? fn.input;
@@ -104,12 +104,12 @@ function parseToolCall(raw: string, errors: string[]): ToolAction | undefined {
     try {
       args = parseLooseJSON(args);
     } catch {
-      errors.push('tool_call.arguments is a string that is not valid JSON');
+      errors.push('tool_call.arguments 是字符串，但不是合法 JSON');
       return undefined;
     }
   }
   if (typeof args !== 'object' || args === null || Array.isArray(args)) {
-    errors.push('tool_call.arguments must be an object');
+    errors.push('tool_call.arguments 必须是对象');
     return undefined;
   }
   return { name, arguments: args as Record<string, unknown> };
@@ -133,7 +133,7 @@ export function parseAgentResponse(text: string, opts: ParseOptions): ParsedResp
 
   const foldRaw = extractTag(body, 'folding');
   if (foldRaw !== undefined) out.folding = parseFolding(foldRaw, warnings, errors);
-  else if (opts.expectFolding) warnings.push('missing <folding> directive');
+  else if (opts.expectFolding) warnings.push('缺少 <folding>');
 
   const motivation = extractTag(body, 'motivation') ?? extractTag(body, 'explanation' as Tag);
   if (motivation !== undefined) out.motivation = motivation;
@@ -142,7 +142,7 @@ export function parseAgentResponse(text: string, opts: ParseOptions): ParsedResp
   const toolRaw = extractTag(body, 'tool_call');
   if (answer !== undefined) {
     out.answer = answer;
-    if (toolRaw !== undefined) warnings.push('both <answer> and <tool_call> present; using <answer>');
+    if (toolRaw !== undefined) warnings.push('同时出现 <answer> 和 <tool_call>，采用 <answer>');
   } else if (toolRaw !== undefined) {
     out.toolCall = parseToolCall(toolRaw, errors);
   } else {
@@ -150,11 +150,11 @@ export function parseAgentResponse(text: string, opts: ParseOptions): ParsedResp
     const bare = extractBalanced(normalizeQuotes(body));
     if (bare && /"name"\s*:/.test(bare) && /"arguments"\s*:/.test(bare)) {
       out.toolCall = parseToolCall(bare, errors);
-      warnings.push('tool call without <tool_call> tags');
+      warnings.push('工具调用没有 <tool_call> 标签');
     } else {
-      errors.push('response has neither <tool_call> nor <answer>');
+      errors.push('回复既没有 <tool_call> 也没有 <answer>');
     }
   }
-  if (!out.motivation && !out.answer) warnings.push('missing <motivation>');
+  if (!out.motivation && !out.answer) warnings.push('缺少 <motivation>');
   return out;
 }

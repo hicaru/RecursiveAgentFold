@@ -70,8 +70,8 @@ export class AgentFoldAgent {
     this.estimator = cfg.estimator ?? defaultEstimator;
     this.toolMap = new Map(cfg.tools.map((t) => [t.name, t]));
     this.systemPrompt =
-      `${buildAgentSystemPrompt(cfg.tools.map((t) => t.name))}\n\n# Available tools\n${renderToolSchemas(cfg.tools)}` +
-      (cfg.systemPromptExtra ? `\n\n# Additional instructions\n${cfg.systemPromptExtra}` : '');
+      `${buildAgentSystemPrompt(cfg.tools.map((t) => t.name))}\n\n# 可用工具\n${renderToolSchemas(cfg.tools)}` +
+      (cfg.systemPromptExtra ? `\n\n# 附加说明\n${cfg.systemPromptExtra}` : '');
   }
 
   private emit(e: AgentEvent) {
@@ -81,12 +81,12 @@ export class AgentFoldAgent {
   /** Build C_t = (Q, T, S, I). Exposed for tests and cache analysis. */
   buildMessages(question: string, state: FoldState, extraUserTail?: string): ChatMessage[] {
     const parts: string[] = [];
-    parts.push(`### Question\n${question.trim()}`);
-    parts.push(`### Documents\n${this.cfg.store.manifest()}`);
+    parts.push(`### 任务\n${question.trim()}`);
+    parts.push(`### 文档\n${this.cfg.store.manifest()}`);
     const blocks = state.blocks;
     const latest = state.latest;
     if (blocks.length || latest) {
-      const prev: string[] = ['### Previous Steps'];
+      const prev: string[] = ['### 历史步骤'];
       for (const b of blocks) prev.push(`**${renderBlockLabel(b)}** ${b.summary}`);
       if (latest) prev.push(renderLatest(latest));
       parts.push(prev.join('\n'));
@@ -170,9 +170,9 @@ export class AgentFoldAgent {
         if (state.latest) state.applyFold({ range: [state.latest.step, state.latest.step], summary: fallbackSummary(state.latest) });
         state.setLatest({
           step,
-          motivation: '(invalid response)',
+          motivation: '（无效回复）',
           action: { name: 'none', arguments: {} },
-          observation: `Error: your response could not be parsed (${parsed?.errors.join('; ')}). Follow the response format exactly.`,
+          observation: `错误：你的回复无法解析（${parsed?.errors.join('；')}）。请严格遵循回复格式。`,
         });
         continue;
       }
@@ -206,8 +206,8 @@ export class AgentFoldAgent {
     let observation: string;
     let error: string | undefined;
     if (!tool) {
-      error = `unknown tool "${name}"`;
-      observation = `Error: unknown tool "${name}". Available tools: ${[...this.toolMap.keys()].join(', ')}`;
+      error = `未知工具 "${name}"`;
+      observation = `错误：未知工具 "${name}"。可用工具：${[...this.toolMap.keys()].join('、')}`;
     } else {
       try {
         observation = await tool.execute(args, {
@@ -221,7 +221,7 @@ export class AgentFoldAgent {
         });
       } catch (e) {
         error = (e as Error).message;
-        observation = `Error: ${error}`;
+        observation = `错误：${error}`;
       }
     }
     const { text } = truncateToTokens(observation, this.cfg.maxObservationTokens ?? 8000, this.estimator);
@@ -232,9 +232,9 @@ export class AgentFoldAgent {
 
 export function renderLatest(i: Interaction): string {
   return [
-    `**[Step ${i.step}]**`,
-    `**Motivation:** ${i.motivation || '(none)'}`,
-    `**Tool call:** ${JSON.stringify({ name: i.action.name, arguments: i.action.arguments })}`,
-    `**Tool response:**\n${i.observation}`,
+    `**[步骤 ${i.step}]**`,
+    `**动机：** ${i.motivation || '（无）'}`,
+    `**工具调用：** ${JSON.stringify({ name: i.action.name, arguments: i.action.arguments })}`,
+    `**工具结果：**\n${i.observation}`,
   ].join('\n');
 }

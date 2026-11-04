@@ -9,16 +9,15 @@
  * already-scanned chunk reuses the cached prefix (system + chunk).
  */
 
-export const LLM_QUERY_SYSTEM = `You are a fast document reader used as a tool by another agent. You do not deliberate; you read the given document chunk and answer the query about THIS CHUNK ONLY.
-Output a single JSON object and nothing else:
-{"relevant": true|false, "answer": "<concise finding for this chunk>", "evidence": [{"line": <line number>, "quote": "<short exact quote>"}]}
-Rules:
-- Use only the chunk text. Never guess beyond it.
-- "relevant" is true only if the chunk contains information that answers or helps answer the query.
-- Line numbers are the numbers before "|" at the start of each line.
-- Keep "answer" under 120 words and at most 5 evidence items unless the query asks for a list or a count.
-- If the query asks to count/classify/extract, do it exhaustively over the whole chunk and put the result in "answer".
-- When the query asks for counts per category/value, ALSO add "counts": {"<category>": <integer>, ...} with one integer per category (include zeros for categories named in the query). These are summed across chunks automatically.`;
+export const LLM_QUERY_SYSTEM = `你是另一个代理调用的快速文档阅读器。不要展开思考，只回答当前这一个分块，只输出一个 JSON 对象：
+{"relevant": true|false, "answer": "<本块结论>", "evidence": [{"line": <行号>, "quote": "<原文短引>"}]}
+规则：
+- 只用本块文本，不得猜测。
+- 仅当本块含能回答或帮助回答查询的信息时，"relevant" 才为 true。
+- 行号是行首 "|" 前的数字。
+- "answer" 不超过 120 词，evidence 最多 5 条；查询要求列表或计数时除外。
+- 要求计数/分类/抽取时，遍历整块，把结果放进 "answer"。
+- 要求按类别/值计数时，另加 "counts": {"<类别>": <整数>, ...}；查询点名的类别即使为 0 也要列出。引擎会自动跨分块求和。`;
 
 export function renderChunkMessage(args: {
   docId: string;
@@ -37,9 +36,9 @@ export type LLMQueryMode = 'locate' | 'extract';
 export function renderQueryMessage(query: string, mode: LLMQueryMode): string {
   const modeLine =
     mode === 'locate'
-      ? 'Mode: LOCATE — decide whether this chunk contains what the query looks for; if yes, point to the exact lines.'
-      : 'Mode: EXTRACT — perform the requested extraction/classification/count over this whole chunk and report the result in "answer" (set "relevant": true whenever you report a result, even zero counts).';
-  return `${modeLine}\nQuery: ${query}\nRespond with the JSON object only.`;
+      ? '模式：LOCATE — 判断本块是否包含查询目标；若有，指出精确行。'
+      : '模式：EXTRACT — 对整块执行所需的抽取/分类/计数，把结果写入 "answer"（即使计数为 0，也设 "relevant": true）。';
+  return `${modeLine}\n查询：${query}\n只输出 JSON 对象。`;
 }
 
 function escapeAttr(s: string): string {

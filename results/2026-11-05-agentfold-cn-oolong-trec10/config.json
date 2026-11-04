@@ -1,0 +1,74 @@
+{
+  "bench": "oolong",
+  "method": "agentfold",
+  "startedAt": "2026-11-04T21:53:48.314Z",
+  "tasks": 10,
+  "taskIds": [
+    "oolong-trec_coarse-131072-17000208",
+    "oolong-trec_coarse-131072-17000209",
+    "oolong-trec_coarse-131072-17000210",
+    "oolong-trec_coarse-131072-17000211",
+    "oolong-trec_coarse-131072-17000212",
+    "oolong-trec_coarse-131072-17000213",
+    "oolong-trec_coarse-131072-17000214",
+    "oolong-trec_coarse-131072-17000215",
+    "oolong-trec_coarse-131072-17000216",
+    "oolong-trec_coarse-131072-17000217"
+  ],
+  "argv": [
+    "oolong",
+    "--method",
+    "agentfold",
+    "--limit",
+    "10",
+    "--max-steps",
+    "10",
+    "--concurrency",
+    "3",
+    "--out",
+    "results/2026-11-05-agentfold-cn-oolong-trec10"
+  ],
+  "tools": "grep,read,calculator",
+  "models": {
+    "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+    "root": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16000,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        }
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "query": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3-flash",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 4096,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        },
+        "reasoning_effort": "low"
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "llmQuery": {
+      "reserveRatio": 0.3,
+      "concurrency": 4
+    }
+  }
+}
