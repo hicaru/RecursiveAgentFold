@@ -1,0 +1,63 @@
+import type { ContextStore } from '../context/store.js';
+import type { UsageTracker } from '../llm/usage.js';
+import type { AgentEvent } from '../agent/events.js';
+import type { JSONSchema } from '../types.js';
+
+export interface ToolContext {
+  store: ContextStore;
+  usage: UsageTracker;
+  /** Recursion depth of the calling agent (root = 0). */
+  depth: number;
+  agentName: string;
+  step: number;
+  emit: (e: AgentEvent) => void;
+  signal?: AbortSignal;
+}
+
+export interface Tool {
+  name: string;
+  description: string;
+  parameters: JSONSchema;
+  execute(args: Record<string, unknown>, ctx: ToolContext): Promise<string>;
+}
+
+export class ToolArgumentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ToolArgumentError';
+  }
+}
+
+export function argString(args: Record<string, unknown>, key: string, required = true): string | undefined {
+  const v = args[key];
+  if (v === undefined || v === null || v === '') {
+    if (required) throw new ToolArgumentError(`missing required argument "${key}"`);
+    return undefined;
+  }
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) return v.map(String).join('\n');
+  return String(v);
+}
+
+export function argNumber(args: Record<string, unknown>, key: string): number | undefined {
+  const v = args[key];
+  if (v === undefined || v === null || v === '') return undefined;
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) throw new ToolArgumentError(`argument "${key}" must be a number`);
+  return n;
+}
+
+export function argStringList(args: Record<string, unknown>, key: string): string[] | undefined {
+  const v = args[key];
+  if (v === undefined || v === null || v === '') return undefined;
+  if (Array.isArray(v)) return v.map(String);
+  if (typeof v === 'string') return v.split(',').map((s) => s.trim()).filter(Boolean);
+  throw new ToolArgumentError(`argument "${key}" must be a list of strings`);
+}
+
+/** Render tool schemas for the system prompt (stable ordering => cache-stable). */
+export function renderToolSchemas(tools: Tool[]): string {
+  return tools
+    .map((t) => JSON.stringify({ name: t.name, description: t.description, parameters: t.parameters }))
+    .join('\n');
+}
