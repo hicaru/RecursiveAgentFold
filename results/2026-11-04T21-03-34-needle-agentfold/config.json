@@ -1,0 +1,66 @@
+{
+  "bench": "needle",
+  "method": "agentfold",
+  "startedAt": "2026-11-04T21:03:34.250Z",
+  "tasks": 4,
+  "taskIds": [
+    "needle-1000000-lookup-0",
+    "needle-1000000-count-1",
+    "needle-1000000-lookup-2",
+    "needle-1000000-count-3"
+  ],
+  "argv": [
+    "needle",
+    "--method",
+    "agentfold",
+    "--tokens",
+    "1000000",
+    "--tasks",
+    "4",
+    "--concurrency",
+    "8"
+  ],
+  "tools": "grep,read,calculator",
+  "models": {
+    "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+    "root": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16000,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        }
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "query": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3-flash",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 4096,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        },
+        "reasoning_effort": "low"
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "llmQuery": {
+      "reserveRatio": 0.3,
+      "concurrency": 4
+    }
+  }
+}

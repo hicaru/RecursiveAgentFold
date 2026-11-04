@@ -97,3 +97,157 @@ resume: 39 task(s) already done, 11 to run
   [oolong-trec_coarse-131072-17000240] root step 10: read {"document":"context","start_line":2701,"end_line":3000}
   [oolong-trec_coarse-131072-17000211] root step 13: read {"document":"context","start_line":1600,"end_line":1899}
   [oolong-trec_coarse-131072-17000239] root step 7: read {"document":"context","start_line":305,"end_line":404}
+  [oolong-trec_coarse-131072-17000244] root step 5: read {"document":"context","start_line":1221,"end_line":1520}
+  [oolong-trec_coarse-131072-17000242] root step 15: grep {"pattern":"^(?!\\s*Date:)","documents":["context"],"max_matches":30}
+  [oolong-trec_coarse-131072-17000241] root step 11: read {"document":"context","start_line":3061,"end_line":3191}
+  [oolong-trec_coarse-131072-17000243] root step 6: format error response has neither <tool_call> nor <answer>
+[2/11] oolong-trec_coarse-131072-17000211 score=1.000 out="Answer: description and abstract concept is less common than human being" steps=15 answer tokens=60567/70521 cache=45.6%
+  [oolong-trec_coarse-131072-17000246] root step 0: grep {"pattern":"77083","documents":["context"],"max_matches":200}
+  [oolong-trec_coarse-131072-17000239] root step 8: read {"document":"context","start_line":405,"end_line":504}
+  [oolong-trec_coarse-131072-17000214] root step 12: read {"document":"context","start_line":601,"end_line":900}
+  [oolong-trec_coarse-131072-17000214] root: ERROR [400/1301] System detected potentially unsafe or sensitive content in input or generation. Please avoid using prompts that may generate sensitive content. Thank you for your cooperation.
+[3/11] oolong-trec_coarse-131072-17000214 score=0.000 out="" steps=13 filtered tokens=67046/85140 cache=31.3% error=[400/1301] System detected potentially unsafe or sensitive content in input or generation. Please avoid using prompts that may generate sensitive content. Thank you for your cooperation.
+  [oolong-trec_coarse-131072-17000247] root step 0: format error <folding> is not valid JSON: Invalid JSON: Unexpected end of JSON input
+  [oolong-trec_coarse-131072-17000244] root step 6: read {"document":"context","start_line":1521,"end_line":1820}
+  [oolong-trec_coarse-131072-17000242] root step 16: format error <folding> is not valid JSON: Invalid JSON: Unterminated string in JSON at position 1456 (line 1 column 1457)
+  [oolong-trec_coarse-131072-17000247] root step 0: grep {"pattern":"77083","documents":["context"],"max_matches":200}
+  [oolong-trec_coarse-131072-17000240] root step 11: read {"document":"context","start_line":3001,"end_line":3191}
+  [oolong-trec_coarse-131072-17000239] root step 9: read {"document":"context","start_line":505,"end_line":604}
+[4/11] oolong-trec_coarse-131072-17000241 score=0.000 out="Answer: 456" steps=13 answer tokens=170883/93185 cache=33.0%
+  [oolong-trec_coarse-131072-17000243] root step 6: read {"document":"context","start_line":1201,"end_line":1500}
+[5/11] oolong-trec_coarse-131072-17000242 score=0.001 out="Answer: 545" steps=17 answer tokens=70334/85137 cache=57.0%
+[6/11] oolong-trec_coarse-131072-17000247 score=1.000 out="Answer: entity is same frequency as numeric value" steps=2 answer tokens=4262/5489 cache=78.1%
+  [oolong-trec_coarse-131072-17000239] root step 10: read {"document":"context","start_line":605,"end_line":704}
+[7/11] oolong-trec_coarse-131072-17000240 score=0.100 out="Answer: 552" steps=13 answer tokens=153075/99824 cache=25.4%
+  [oolong-trec_coarse-131072-17000244] root step 7: read {"document":"context","start_line":1821,"end_line":2120}
+  [oolong-trec_coarse-131072-17000243] root step 7: read {"document":"context","start_line":1501,"end_line":1800}
+  [oolong-trec_coarse-131072-17000239] root step 11: read {"document":"context","start_line":705,"end_line":804}
+  [oolong-trec_coarse-131072-17000246] root step 1: format error response has neither <tool_call> nor <answer>
+  [oolong-trec_coarse-131072-17000239] root step 12: read {"document":"context","start_line":805,"end_line":904}
+  [oolong-trec_coarse-131072-17000243] root step 8: read {"document":"context","start_line":1801,"end_line":2100}
+  [oolong-trec_coarse-131072-17000239] root step 13: read {"document":"context","start_line":905,"end_line":1004}
+  [oolong-trec_coarse-131072-17000244] root step 8: format error <folding> is not valid JSON: Invalid JSON: Unterminated string in JSON at position 734 (line 1 column 735); response has neither <tool_call> nor <answer>
+  [oolong-trec_coarse-131072-17000239] root step 14: read {"document":"context","start_line":1005,"end_line":1104}
+  [oolong-trec_coarse-131072-17000243] root step 9: read {"document":"context","start_line":2101,"end_line":2400}
+  [oolong-trec_coarse-131072-17000239] root step 15: read {"document":"context","start_line":1105,"end_line":1204}
+[8/11] oolong-trec_coarse-131072-17000246 score=1.000 out="Label: human being" steps=2 answer tokens=4760/29314 cache=84.7%
+  [oolong-trec_coarse-131072-17000244] root step 8: read {"document":"context","start_line":2121,"end_line":2420}
+  [oolong-trec_coarse-131072-17000239] root step 16: read {"document":"context","start_line":1205,"end_line":1304}
+  [oolong-trec_coarse-131072-17000239] root step 17: read {"document":"context","start_line":1305,"end_line":1404}
+  [oolong-trec_coarse-131072-17000243] root step 10: read {"document":"context","start_line":2401,"end_line":2700}
+  [oolong-trec_coarse-131072-17000239] root step 18: read {"document":"context","start_line":1405,"end_line":1504}
+  [oolong-trec_coarse-131072-17000244] root step 9: format error response has neither <tool_call> nor <answer>
+  [oolong-trec_coarse-131072-17000239] root step 19: read {"document":"context","start_line":1505,"end_line":1604}
+  [oolong-trec_coarse-131072-17000239] root step 20: read {"document":"context","start_line":1605,"end_line":1704}
+  [oolong-trec_coarse-131072-17000243] root step 11: read {"document":"context","start_line":2701,"end_line":3000}
+  [oolong-trec_coarse-131072-17000239] root step 21: read {"document":"context","start_line":1705,"end_line":1804}
+  [oolong-trec_coarse-131072-17000244] root step 9: format error response has neither <tool_call> nor <answer>
+  [oolong-trec_coarse-131072-17000239] root step 22: read {"document":"context","start_line":1805,"end_line":1904}
+  [oolong-trec_coarse-131072-17000243] root step 12: format error response has neither <tool_call> nor <answer>
+  [oolong-trec_coarse-131072-17000239] root step 23: read {"document":"context","start_line":1905,"end_line":2004}
+  [oolong-trec_coarse-131072-17000244] root step 9: read {"document":"context","start_line":2421,"end_line":2720}
+  [oolong-trec_coarse-131072-17000239] root step 24: read {"document":"context","start_line":2005,"end_line":2104}
+  [oolong-trec_coarse-131072-17000244] root step 10: read {"document":"context","start_line":2721,"end_line":3020}
+  [oolong-trec_coarse-131072-17000239] root step 25: read {"document":"context","start_line":2105,"end_line":2204}
+  [oolong-trec_coarse-131072-17000243] root step 12: read {"document":"context","start_line":3001,"end_line":3191}
+  [oolong-trec_coarse-131072-17000244] root step 11: read {"document":"context","start_line":3021,"end_line":3191}
+  [oolong-trec_coarse-131072-17000239] root step 26: read {"document":"context","start_line":2205,"end_line":2304}
+  [oolong-trec_coarse-131072-17000244] root step 12: grep {"pattern":"User: (80132|51666|23823|39684|36547|77083|45499|82219|98356|25185|32738) \\|\\|","documents":["context"],"max_matches":200}
+  [oolong-trec_coarse-131072-17000239] root step 27: read {"document":"context","start_line":2305,"end_line":2404}
+  [oolong-trec_coarse-131072-17000243] root step 13: calculator {"expression":"50+59+44+67+51+58+49+50+56+50+23"}
+[9/11] oolong-trec_coarse-131072-17000243 score=0.003 out="Answer: 557" steps=15 answer tokens=215412/208923 cache=46.3%
+  [oolong-trec_coarse-131072-17000239] root step 28: read {"document":"context","start_line":2405,"end_line":2504}
+  [oolong-trec_coarse-131072-17000244] root step 13: grep {"pattern":"User: (34158|20860|78984|40865|63209|47962|51055|64266|68788|47134|20216|10218|13372|76299|20895) \\|\\|","documents":["context"],"max_matches":200}
+[10/11] oolong-trec_coarse-131072-17000244 score=1.000 out="User: 25185" steps=15 answer tokens=238381/198927 cache=44.8%
+  [oolong-trec_coarse-131072-17000239] root step 29: read {"document":"context","start_line":2505,"end_line":2604}
+[11/11] oolong-trec_coarse-131072-17000239 score=0.000 out="Answer: 628" steps=31 forced_answer tokens=312079/190545 cache=64.0%
+
+# Benchmark summary
+
+| metric | value |
+|---|---|
+| tasks | 50 |
+| mean score (primary) | **0.6305** |
+| correct (score = 1) | **31/50** |
+| mean score (official OOLONG) | 0.6305 |
+| mean score (lenient) | 0.6305 |
+| errors / overflow | 0 |
+| content-filtered | 8 |
+| mean score (excluding errors) | 0.7506 |
+| mean steps | 8.3 |
+| mean wall time | 654.8 s |
+| format issues | 44 |
+| folds granular / deep / corrected | 333 / 28 / 3 |
+| llm_query calls | 0 |
+| prompt / cached / completion tokens | 2523479 / 1182976 / 2315963 |
+| cache hit rate | 46.9% |
+
+## By role
+
+| role | calls | prompt | cached | hit rate | completion | errors |
+|---|---|---|---|---|---|---|
+| root | 445 | 2523479 | 1182976 | 46.9% | 2315963 | 8 |
+
+## By task
+
+| task | n | score |
+|---|---|---|
+| TASK_TYPE.MOST_FREQ | 5 | 0.600 |
+| TASK_TYPE.LEAST_FREQ | 4 | 1.000 |
+| TASK_TYPE.RELATIVE_FREQ | 29 | 0.828 |
+| TASK_TYPE.NUMERIC_ONE_CLASS | 12 | 0.044 |
+
+=== OOLONG EXIT=0 Thu Nov  5 06:03:33 JST 2026 ===
+=== NEEDLE 1M START Thu Nov  5 06:03:33 JST 2026 ===
+$ pnpm --filter @raf/benchmarks run cli needle --method agentfold --tokens 1000000 --tasks 4 --concurrency 8
+$ tsx --conditions=source src/cli.ts needle --method agentfold --tokens 1000000 --tasks 4 --concurrency 8
+running 4 task(s) → /Users/hicaru/projects/zebra/RecursiveAgentFold/results/2026-11-04T21-03-34-needle-agentfold
+  [needle-1000000-lookup-2] root step 0: grep {"pattern":"Maya Kapoor C","documents":["haystack"]}
+  [needle-1000000-lookup-0] root step 0: grep {"pattern":"Elif Sahin","documents":["haystack"],"max_matches":60}
+  [needle-1000000-count-3] root step 0: grep {"pattern":"Lisbon","documents":["haystack"],"max_matches":100}
+  [needle-1000000-count-1] root step 0: grep {"pattern":"Tallinn","documents":["haystack"],"max_matches":100}
+[1/4] needle-1000000-lookup-2 score=1.000 out="Answer: 9011" steps=2 answer tokens=2262/374 cache=87.7%
+[2/4] needle-1000000-lookup-0 score=1.000 out="Answer: 5250" steps=2 answer tokens=2355/703 cache=87.0%
+  [needle-1000000-count-3] root step 1: grep {"pattern":"Lisb","documents":["haystack"],"max_matches":100}
+  [needle-1000000-count-1] root step 1: format error <folding> is not valid JSON: Invalid JSON: Unexpected token '(', "(range mus"... is not valid JSON
+[3/4] needle-1000000-count-3 score=1.000 out="Answer: 13" steps=3 answer tokens=4349/1929 cache=69.2%
+[4/4] needle-1000000-count-1 score=1.000 out="Answer: 9" steps=2 answer tokens=4031/2642 cache=84.1%
+
+# Benchmark summary
+
+| metric | value |
+|---|---|
+| tasks | 4 |
+| mean score (primary) | **1.0000** |
+| correct (score = 1) | **4/4** |
+| mean score (official OOLONG) | 1.0000 |
+| mean score (lenient) | 1.0000 |
+| errors / overflow | 0 |
+| content-filtered | 0 |
+| mean score (excluding errors) | 1.0000 |
+| mean steps | 2.3 |
+| mean wall time | 21.6 s |
+| format issues | 1 |
+| folds granular / deep / corrected | 5 / 0 / 0 |
+| llm_query calls | 0 |
+| prompt / cached / completion tokens | 12997 / 10432 / 5648 |
+| cache hit rate | 80.3% |
+| cost (list price, USD) | **$0.0312** |
+| cost per task | $0.0078 |
+| cache saved | $0.0119 |
+
+## By role
+
+| role | calls | prompt | cached | hit rate | completion | errors |
+|---|---|---|---|---|---|---|
+| root | 10 | 12997 | 10432 | 80.3% | 5648 | 0 |
+
+## By task
+
+| task | n | score |
+|---|---|---|
+| lookup | 2 | 1.000 |
+| count | 2 | 1.000 |
+
+=== NEEDLE EXIT=0 Thu Nov  5 06:04:11 JST 2026 ===
+=== ALL DONE Thu Nov  5 06:04:11 JST 2026 ===
