@@ -5,7 +5,6 @@ import { createModels, loadEnv, repoRoot } from './config.js';
 import { buildNeedleTasks } from './needle/needle.js';
 import { fetchOolong } from './oolong/dataset.js';
 import { buildOolongTasks } from './oolong/tasks.js';
-import { buildRlmPiTasks, loadRlmPiRecords } from './oolong/rlmpi.js';
 import { createMockModels } from './mock.js';
 import { promptCheck } from './prompt-check.js';
 import { runTasks, summarize, writeSummary, type BenchTask, type Method } from './runner.js';
@@ -19,8 +18,6 @@ Commands:
   prompt-check                   Live check of root / llm_query prompts + tiny e2e run
   fetch-oolong                   Download + cache OOLONG-synth rows (HTTP range reads)
   oolong                         Run OOLONG-synth (trec_coarse@131K etc.)
-  oolong-rlmpi                   Run the rlm.pi OOLONG suite (test split, cl<=65536, n=24) — comparable
-                                 with ../rlm.pi/bench/runs/*; scored with rlm.pi's lab scorer
   needle                         Run the synthetic mega-context needle/count benchmark
 
 Common options:
@@ -46,12 +43,7 @@ oolong / fetch-oolong:
   --windows <n>                  only the first n context windows
   --no-hint                      do not prepend the dataset description
 
-oolong-rlmpi:
-  --oolong-max-cl <n>            default 65536
-  --oolong-limit <n>             default 24
-  --rlmpi-repo <dir>             fallback location of rlm.pi (default ../rlm.pi)
-
-Tools / runs:
+needle:
   --tools a,b,c                  override tool set (llm_query,branch,grep,tally,read,calculator);
                                  default: raf = all, agentfold (vanilla) = grep,read,calculator
   --resume                       with --out: skip tasks already in results.jsonl (re-runs errors)
@@ -90,9 +82,6 @@ async function main() {
       'no-hint': { type: 'boolean', default: false },
       'no-share-memo': { type: 'boolean', default: false },
       mock: { type: 'boolean', default: false },
-      'oolong-max-cl': { type: 'string', default: '65536' },
-      'oolong-limit': { type: 'string', default: '24' },
-      'rlmpi-repo': { type: 'string' },
       tools: { type: 'string' },
       resume: { type: 'boolean', default: false },
       tokens: { type: 'string', default: '200000' },
@@ -159,9 +148,6 @@ async function main() {
       rows = rows.filter((r) => keep.has(r.context_window_id));
     }
     tasks = buildOolongTasks(rows, { hint: !values['no-hint'] });
-  } else if (cmd === 'oolong-rlmpi') {
-    const repo = values['rlmpi-repo'] ?? join(root, '..', 'rlm.pi');
-    tasks = buildRlmPiTasks(loadRlmPiRecords(cacheDir, Number(values['oolong-max-cl']), Number(values['oolong-limit']), repo));
   } else if (cmd === 'needle') {
     tasks = buildNeedleTasks({ tokens: Number(values.tokens), tasks: Number(values.tasks), seed: Number(values.seed) });
   } else {
