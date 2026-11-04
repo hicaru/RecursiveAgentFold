@@ -119,7 +119,8 @@ export async function runTasks(tasks: BenchTask[], cfg: RunConfig): Promise<Task
     for (const line of readFileSync(resultsPath, 'utf8').split('\n')) {
       if (!line.trim()) continue;
       const r = JSON.parse(line) as TaskResult;
-      if (r.terminated !== 'error' && r.terminated !== 'filtered') previous.push(r);
+      // 'filtered' rows are provider refusals, not model failures: keep them and report separately.
+      if (r.terminated !== 'error') previous.push(r);
     }
     const done = new Set(previous.map((r) => r.id));
     tasks = tasks.filter((t) => !done.has(t.id));

@@ -21,10 +21,10 @@ export interface OpenAICompatibleConfig {
   retryBaseMs?: number;
   /** Upper bound for a single retry delay. Default 60s. */
   retryMaxMs?: number;
-  /** Attempts for HTTP 429 rate limits. Default 12. */
+  /** Attempts for HTTP 429 rate limits. Default 10. */
   rateLimitRetries?: number;
-  /** Upper bound for one rate-limit wait. Default 180s. */
-  rateLimitMaxMs?: number;
+  /** Fixed wait between rate-limit retries. Default 10s. */
+  rateLimitDelayMs?: number;
   /** Attempts for provider content-filter refusals (code 1301). Default 1. */
   filterRetries?: number;
   fetchImpl?: typeof fetch;
@@ -95,10 +95,11 @@ export class OpenAICompatibleClient implements LLMClient {
   async complete(req: LLMRequest): Promise<LLMResponse> {
     const base = this.cfg.retryBaseMs ?? 2000;
     const budgets = {
-      rateLimit: this.cfg.rateLimitRetries ?? 12,
+      rateLimit: this.cfg.rateLimitRetries ?? 10,
       filter: this.cfg.filterRetries ?? 1,
       other: this.cfg.maxRetries ?? 4,
     };
+    const rateLimitDelay = this.cfg.rateLimitDelayMs ?? 10_000;
     const used = { rateLimit: 0, filter: 0, other: 0 };
     for (;;) {
       try {
@@ -110,9 +111,12 @@ export class OpenAICompatibleClient implements LLMClient {
         const kind = err?.status === 429 ? 'rateLimit' : err?.code === '1301' ? 'filter' : 'other';
         used[kind]++;
         if (used[kind] > budgets[kind]) throw e;
-        const cap = kind === 'rateLimit' ? this.cfg.rateLimitMaxMs ?? 180_000 : this.cfg.retryMaxMs ?? 60_000;
+        const cap = this.cfg.retryMaxMs ?? 60_000;
         const backoff = Math.min(cap, base * 2 ** (used[kind] - 1));
-        const delay = Math.min(Math.max(err?.retryAfterMs ?? 0, backoff), cap) * (0.75 + Math.random() * 0.5);
+        const delay =
+          kind === 'rateLimit'
+            ? Math.max(rateLimitDelay, err?.retryAfterMs ?? 0)
+            : Math.min(Math.max(err?.retryAfterMs ?? 0, backoff), cap) * (0.75 + Math.random() * 0.5);
         await sleep(delay, req.signal);
       }
     }
