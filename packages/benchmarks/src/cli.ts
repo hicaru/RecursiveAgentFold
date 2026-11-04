@@ -7,6 +7,7 @@ import { fetchOolong } from './oolong/dataset.js';
 import { buildOolongTasks } from './oolong/tasks.js';
 import { createMockModels } from './mock.js';
 import { promptCheck } from './prompt-check.js';
+import { priceFor } from './pricing.js';
 import { runTasks, summarize, writeSummary, type BenchTask, type Method } from './runner.js';
 
 const HELP = `Recursive AgentFold benchmarks
@@ -188,7 +189,8 @@ async function main() {
     maxObservationTokens: 14_000,
     outDir,
   });
-  const md = writeSummary(outDir, summarize(results, { bench: cmd, method }));
+  const prices = { root: priceFor(models.root.profile.name), query: priceFor(models.query.profile.name) };
+  const md = writeSummary(outDir, summarize(results, { bench: cmd, method }, prices));
   console.log(`\n${md}`);
 }
 

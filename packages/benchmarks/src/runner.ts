@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { cacheSaved, costOf, type TokenPrice } from './pricing.js';
 import {
   ContextStore,
   LLMQueryEngine,
@@ -214,7 +215,12 @@ export async function runTasks(tasks: BenchTask[], cfg: RunConfig): Promise<Task
   return results;
 }
 
-export function summarize(results: TaskResult[], extra: Record<string, unknown> = {}) {
+export interface SummaryPrices {
+  root?: TokenPrice;
+  query?: TokenPrice;
+}
+
+export function summarize(results: TaskResult[], extra: Record<string, unknown> = {}, prices: SummaryPrices = {}) {
   const n = results.length;
   const mean = (f: (r: TaskResult) => number, rs: TaskResult[] = results) =>
     rs.length ? rs.reduce((a, r) => a + f(r), 0) / rs.length : 0;
@@ -243,6 +249,20 @@ export function summarize(results: TaskResult[], extra: Record<string, unknown> 
     }
   }
   for (const b of Object.values(roles)) b.cacheHitRate = b.promptTokens ? b.cachedTokens / b.promptTokens : 0;
+  const usd = (x: number) => Math.round(x * 1e6) / 1e6;
+  const byRoleUsd: Record<string, number> = {};
+  let totalUsd = 0;
+  let cacheSavedUsd = 0;
+  for (const [role, b] of Object.entries(roles)) {
+    const price = role === 'llm_query' ? prices.query : prices.root;
+    if (!price) continue;
+    byRoleUsd[role] = usd(costOf(price, b));
+    totalUsd += costOf(price, b);
+    cacheSavedUsd += cacheSaved(price, b);
+  }
+  const cost = Object.keys(byRoleUsd).length
+    ? { totalUsd: usd(totalUsd), perTaskUsd: n ? usd(totalUsd / n) : 0, cacheSavedUsd: usd(cacheSavedUsd), byRoleUsd }
+    : undefined;
   const promptTokens = sum((r) => r.total.promptTokens);
   const cachedTokens = sum((r) => r.total.cachedTokens);
   return {
@@ -264,6 +284,7 @@ export function summarize(results: TaskResult[], extra: Record<string, unknown> 
     byRole: roles,
     byTask: byKey('task'),
     byAnswerType: byKey('answer_type'),
+    cost,
   };
 }
 
@@ -290,12 +311,21 @@ export function writeSummary(outDir: string, summary: ReturnType<typeof summariz
     `| llm_query calls | ${summary.llmQueryCalls} |`,
     `| prompt / cached / completion tokens | ${summary.tokens.prompt} / ${summary.tokens.cached} / ${summary.tokens.completion} |`,
     `| cache hit rate | ${pct(summary.tokens.cacheHitRate)} |`,
+    ...(summary.cost
+      ? [
+          `| cost (list price, USD) | **$${summary.cost.totalUsd.toFixed(4)}** |`,
+          `| cost per task | $${summary.cost.perTaskUsd.toFixed(4)} |`,
+          `| cache saved | $${summary.cost.cacheSavedUsd.toFixed(4)} |`,
+        ]
+      : []),
     '',
     '## By role',
     '',
     '| role | calls | prompt | cached | hit rate | completion | errors |',
     '|---|---|---|---|---|---|---|',
-    ...Object.entries(summary.byRole).map(([k, b]) => `| ${k} | ${b.calls} | ${b.promptTokens} | ${b.cachedTokens} | ${pct(b.cacheHitRate)} | ${b.completionTokens} | ${b.errors} |`),
+    ...Object.entries(summary.byRole).map(([k, b]) =>
+      `| ${k} | ${b.calls} | ${b.promptTokens} | ${b.cachedTokens} | ${pct(b.cacheHitRate)} | ${b.completionTokens} | ${b.errors} |`,
+    ),
     '',
     '## By task',
     '',
