@@ -35,7 +35,10 @@ export interface AgentFoldConfig {
   signal?: AbortSignal;
 }
 
-export type Termination = 'answer' | 'forced_answer' | 'max_steps' | 'error';
+export type Termination = 'answer' | 'forced_answer' | 'max_steps' | 'error' | 'filtered';
+
+/** Provider safety refusal (Z.ai 1301): no retry loop can repair the payload. */
+const PROVIDER_REFUSAL = /\/1301\]|unsafe or sensitive/i;
 
 export interface AgentRunResult {
   answer: string | null;
@@ -143,7 +146,12 @@ export class AgentFoldAgent {
           this.usage.recordError(role);
           const message = (e as Error).message;
           this.emit({ type: 'error', agent: this.name, step, message });
-          return finish({ answer: null, steps: step, terminated: 'error', error: message });
+          return finish({
+            answer: null,
+            steps: step,
+            terminated: PROVIDER_REFUSAL.test(message) ? 'filtered' : 'error',
+            error: message,
+          });
         }
         const p = parseAgentResponse(text, { expectFolding, reasoning });
         if (forcing && !p.answer && p.errors.length === 0 && p.toolCall) p.errors.push('a final <answer> is required now');

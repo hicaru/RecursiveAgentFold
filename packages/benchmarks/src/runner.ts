@@ -119,7 +119,7 @@ export async function runTasks(tasks: BenchTask[], cfg: RunConfig): Promise<Task
     for (const line of readFileSync(resultsPath, 'utf8').split('\n')) {
       if (!line.trim()) continue;
       const r = JSON.parse(line) as TaskResult;
-      if (r.terminated !== 'error') previous.push(r);
+      if (r.terminated !== 'error' && r.terminated !== 'filtered') previous.push(r);
     }
     const done = new Set(previous.map((r) => r.id));
     tasks = tasks.filter((t) => !done.has(t.id));
@@ -215,7 +215,8 @@ export async function runTasks(tasks: BenchTask[], cfg: RunConfig): Promise<Task
 
 export function summarize(results: TaskResult[], extra: Record<string, unknown> = {}) {
   const n = results.length;
-  const mean = (f: (r: TaskResult) => number) => (n ? results.reduce((a, r) => a + f(r), 0) / n : 0);
+  const mean = (f: (r: TaskResult) => number, rs: TaskResult[] = results) =>
+    rs.length ? rs.reduce((a, r) => a + f(r), 0) / rs.length : 0;
   const sum = (f: (r: TaskResult) => number) => results.reduce((a, r) => a + f(r), 0);
   const byKey = (key: string) => {
     const m: Record<string, { n: number; score: number }> = {};
@@ -251,6 +252,8 @@ export function summarize(results: TaskResult[], extra: Record<string, unknown> 
     meanOfficial: mean((r) => r.extra?.official ?? r.score),
     meanLenient: mean((r) => r.extra?.lenient ?? r.score),
     errors: results.filter((r) => r.terminated === 'error' || r.terminated === 'context_overflow').length,
+    filtered: results.filter((r) => r.terminated === 'filtered').length,
+    meanScoreAnswered: mean((r) => r.score, results.filter((r) => r.terminated !== 'error' && r.terminated !== 'filtered')),
     meanSteps: mean((r) => r.steps),
     meanWallSec: mean((r) => r.wallMs) / 1000,
     formatIssues: sum((r) => r.formatIssues),
@@ -277,6 +280,8 @@ export function writeSummary(outDir: string, summary: ReturnType<typeof summariz
     `| mean score (official OOLONG) | ${summary.meanOfficial.toFixed(4)} |`,
     `| mean score (lenient) | ${summary.meanLenient.toFixed(4)} |`,
     `| errors / overflow | ${summary.errors} |`,
+    `| content-filtered | ${summary.filtered} |`,
+    `| mean score (excluding errors) | ${summary.meanScoreAnswered.toFixed(4)} |`,
     `| mean steps | ${summary.meanSteps.toFixed(1)} |`,
     `| mean wall time | ${summary.meanWallSec.toFixed(1)} s |`,
     `| format issues | ${summary.formatIssues} |`,

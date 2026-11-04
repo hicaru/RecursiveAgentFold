@@ -21,6 +21,12 @@ export interface OpenAICompatibleConfig {
   retryBaseMs?: number;
   /** Upper bound for a single retry delay. Default 60s. */
   retryMaxMs?: number;
+  /** Attempts for HTTP 429 rate limits. Default 12. */
+  rateLimitRetries?: number;
+  /** Upper bound for one rate-limit wait. Default 180s. */
+  rateLimitMaxMs?: number;
+  /** Attempts for provider content-filter refusals (code 1301). Default 1. */
+  filterRetries?: number;
   fetchImpl?: typeof fetch;
 }
 
@@ -30,6 +36,7 @@ export class LLMError extends Error {
     readonly status?: number,
     readonly code?: string,
     readonly retryable = false,
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = 'LLMError';
@@ -42,8 +49,16 @@ const NON_RETRYABLE_CODES = new Set([
   '1210', // invalid parameter
   '1211', // unknown model
   '1000', '1001', '1002', '1003', '1004', // auth
-  '1301', // content filter
 ]);
+
+/** Parse a Retry-After header (seconds or HTTP date) into milliseconds. */
+function retryAfterMs(raw: string | null): number | undefined {
+  if (!raw) return undefined;
+  const secs = Number(raw);
+  if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+  const at = Date.parse(raw);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
+}
 
 interface ChatCompletionResponse {
   model?: string;
@@ -78,21 +93,29 @@ export class OpenAICompatibleClient implements LLMClient {
   }
 
   async complete(req: LLMRequest): Promise<LLMResponse> {
-    const maxRetries = this.cfg.maxRetries ?? 4;
     const base = this.cfg.retryBaseMs ?? 2000;
-    let lastErr: unknown;
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const budgets = {
+      rateLimit: this.cfg.rateLimitRetries ?? 12,
+      filter: this.cfg.filterRetries ?? 1,
+      other: this.cfg.maxRetries ?? 4,
+    };
+    const used = { rateLimit: 0, filter: 0, other: 0 };
+    for (;;) {
       try {
         return await this.once(req);
       } catch (e) {
-        lastErr = e;
-        const retryable = e instanceof LLMError ? e.retryable : !(req.signal?.aborted ?? false);
-        if (!retryable || attempt === maxRetries) throw e;
-        const delay = Math.min(this.cfg.retryMaxMs ?? 60_000, base * 2 ** attempt) * (0.75 + Math.random() * 0.5);
+        const err = e instanceof LLMError ? e : undefined;
+        const retryable = err?.retryable ?? !(req.signal?.aborted ?? false);
+        if (!retryable) throw e;
+        const kind = err?.status === 429 ? 'rateLimit' : err?.code === '1301' ? 'filter' : 'other';
+        used[kind]++;
+        if (used[kind] > budgets[kind]) throw e;
+        const cap = kind === 'rateLimit' ? this.cfg.rateLimitMaxMs ?? 180_000 : this.cfg.retryMaxMs ?? 60_000;
+        const backoff = Math.min(cap, base * 2 ** (used[kind] - 1));
+        const delay = Math.min(Math.max(err?.retryAfterMs ?? 0, backoff), cap) * (0.75 + Math.random() * 0.5);
         await sleep(delay, req.signal);
       }
     }
-    throw lastErr;
   }
 
   private async once(req: LLMRequest): Promise<LLMResponse> {
@@ -138,8 +161,14 @@ export class OpenAICompatibleClient implements LLMClient {
       const msg = json?.error?.message ?? raw.slice(0, 500);
       const retryable =
         !(code && NON_RETRYABLE_CODES.has(code)) &&
-        (res.status === 429 || res.status >= 500 || res.status === 408);
-      throw new LLMError(`[${res.status}${code ? `/${code}` : ''}] ${msg}`, res.status, code, retryable);
+        (res.status === 429 || res.status >= 500 || res.status === 408 || code === '1301');
+      throw new LLMError(
+        `[${res.status}${code ? `/${code}` : ''}] ${msg}`,
+        res.status,
+        code,
+        retryable,
+        retryAfterMs(res.headers.get('retry-after')),
+      );
     }
     const choice = json?.choices?.[0];
     if (!choice?.message) throw new LLMError(`malformed response: ${raw.slice(0, 300)}`, res.status, undefined, true);
