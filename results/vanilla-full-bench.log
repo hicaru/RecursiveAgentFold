@@ -1,0 +1,99 @@
+=== OOLONG c=8 START Thu Nov  5 05:26:02 JST 2026 ===
+$ pnpm --filter @raf/benchmarks run cli oolong --method agentfold --concurrency 8 --resume --out results/2026-11-04T18-18-36-oolong-agentfold
+$ tsx --conditions=source src/cli.ts oolong --method agentfold --concurrency 8 --resume --out results/2026-11-04T18-18-36-oolong-agentfold
+running 50 task(s) → /Users/hicaru/projects/zebra/RecursiveAgentFold/results/2026-11-04T18-18-36-oolong-agentfold
+resume: 39 task(s) already done, 11 to run
+  [oolong-trec_coarse-131072-17000228] root step 0: read {"document":"context","start_line":1,"end_line":10}
+  [oolong-trec_coarse-131072-17000239] root step 0: read {"document":"context","start_line":1,"end_line":40}
+  [oolong-trec_coarse-131072-17000242] root step 0: grep {"pattern":"stand for|abbreviation|abbreviated|acronym","documents":["context"],"max_matches":200}
+  [oolong-trec_coarse-131072-17000214] root step 0: read {"document":"context","start_line":1,"end_line":20}
+  [oolong-trec_coarse-131072-17000211] root step 0: grep {"pattern":"description and abstract concept|human being","documents":["context"],"max_matches":60}
+  [oolong-trec_coarse-131072-17000214] root step 1: grep {"pattern":"Instance: (How (many|much|long|far|old|deep|high|tall|wide|big|hot|fast|thick|heavy|large|rapidly|quickly|deeply|tall)|When)","documents":["context"
+  [oolong-trec_coarse-131072-17000243] root step 0: read {"document":"context","start_line":1,"end_line":40}
+  [oolong-trec_coarse-131072-17000211] root step 1: read {"document":"context","start_line":1,"end_line":60}
+  [oolong-trec_coarse-131072-17000240] root step 0: read {"document":"context","start_line":1,"end_line":40}
+  [oolong-trec_coarse-131072-17000214] root step 2: grep {"pattern":"Instance: (Who|Where)","documents":["context"],"max_matches":5}
+  [oolong-trec_coarse-131072-17000211] root step 2: grep {"pattern":"Instance: Who ","documents":["context"],"max_matches":3}
+  [oolong-trec_coarse-131072-17000241] root step 0: read {"document":"context","start_line":1,"end_line":60}
+  [oolong-trec_coarse-131072-17000214] root step 3: grep {"pattern":"Instance:","documents":["context"],"max_matches":3}
+  [oolong-trec_coarse-131072-17000228] root step 1: read {"document":"context","start_line":5,"end_line":304}
+  [oolong-trec_coarse-131072-17000240] root step 1: read {"document":"context","start_line":1,"end_line":300}
+  [oolong-trec_coarse-131072-17000243] root step 1: grep {"pattern":"\\|\\| Instance:","documents":["context"],"max_matches":1}
+  [oolong-trec_coarse-131072-17000243] root step 2: read {"document":"context","start_line":1,"end_line":300}
+  [oolong-trec_coarse-131072-17000242] root step 1: grep {"pattern":"stand for","documents":["context"],"max_matches":5}
+  [oolong-trec_coarse-131072-17000211] root step 3: grep {"pattern":"\\|\\| Instance: ","documents":["context"],"max_matches":3}
+  [oolong-trec_coarse-131072-17000242] root step 2: grep {"pattern":"abbreviat","documents":["context"],"max_matches":10}
+  [oolong-trec_coarse-131072-17000241] root step 1: read {"document":"context","start_line":61,"end_line":360}
+  [oolong-trec_coarse-131072-17000239] root step 1: grep {"pattern":"Instance:","documents":["context"],"max_matches":3}
+  [oolong-trec_coarse-131072-17000242] root step 3: grep {"pattern":"acronym","documents":["context"],"max_matches":10}
+  [oolong-trec_coarse-131072-17000242] root step 4: grep {"pattern":"stand for[^.]*abbreviat|abbreviat[^.]*stand for|stand for[^.]*acronym|acronym[^.]*stand for|abbreviat[^.]*acronym|acronym[^.]*abbreviat","documents"
+  [oolong-trec_coarse-131072-17000239] root step 2: read {"document":"context","start_line":5,"end_line":304}
+  [oolong-trec_coarse-131072-17000214] root step 4: grep {"pattern":"instance: (in )?what [a-z' ]{0,20}(year|decade|century|percentage|proportion|speed|temperature|population|distance|height|weight|length|depth|width|
+  [oolong-trec_coarse-131072-17000240] root step 2: read {"document":"context","start_line":301,"end_line":600}
+  [oolong-trec_coarse-131072-17000242] root step 5: grep {"pattern":"(stand for.*abbreviat|abbreviat.*stand for)|(stand for.*acronym|acronym.*stand for)|(abbreviat.*acronym|acronym.*abbreviat)","documents":["context"]
+  [oolong-trec_coarse-131072-17000211] root step 4: grep {"pattern":"Instance: Why ","documents":["context"],"max_matches":5}
+  [oolong-trec_coarse-131072-17000241] root step 2: read {"document":"context","start_line":361,"end_line":660}
+  [oolong-trec_coarse-131072-17000228] root step 2: read {"document":"context","start_line":305,"end_line":604}
+  [oolong-trec_coarse-131072-17000211] root step 5: grep {"pattern":"Instance: What ","documents":["context"],"max_matches":3}
+  [oolong-trec_coarse-131072-17000211] root step 6: grep {"pattern":"Instance: How ","documents":["context"],"max_matches":3}
+  [oolong-trec_coarse-131072-17000241] root step 3: format error <folding> is not valid JSON: Invalid JSON: Unterminated string in JSON at position 1793 (line 1 column 1794)
+  [oolong-trec_coarse-131072-17000243] root step 3: read {"document":"context","start_line":301,"end_line":600}
+  [oolong-trec_coarse-131072-17000214] root step 5: grep {"pattern":"instance: how many","documents":["context"],"max_matches":200}
+  [oolong-trec_coarse-131072-17000240] root step 3: read {"document":"context","start_line":601,"end_line":900}
+  [oolong-trec_coarse-131072-17000242] root step 6: grep {"pattern":"^.*(stand for|abbreviat|acronym)","documents":["context"],"max_matches":10}
+  [oolong-trec_coarse-131072-17000228] root step 3: read {"document":"context","start_line":605,"end_line":904}
+  [oolong-trec_coarse-131072-17000228] root: ERROR [400/1301] System detected potentially unsafe or sensitive content in input or generation. Please avoid using prompts that may generate sensitive content. Thank you for your cooperation.
+[1/11] oolong-trec_coarse-131072-17000228 score=0.000 out="" steps=4 filtered tokens=25761/28266 cache=17.1% error=[400/1301] System detected potentially unsafe or sensitive content in input or generation. Please avoid using prompts that may generate sensitive content. Thank you for your cooperation.
+  [oolong-trec_coarse-131072-17000244] root step 0: read {"document":"context","start_line":1,"end_line":20}
+  [oolong-trec_coarse-131072-17000242] root step 7: grep {"pattern":"stands for|short for|initial","documents":["context"],"max_matches":60}
+  [oolong-trec_coarse-131072-17000241] root step 3: read {"document":"context","start_line":661,"end_line":960}
+  [oolong-trec_coarse-131072-17000239] root step 3: format error response has neither <tool_call> nor <answer>
+  [oolong-trec_coarse-131072-17000242] root step 8: grep {"pattern":"EENTY|correct way to abbrevi|What is an abbreviat|Why .*abbreviat","documents":["context"],"max_matches":30}
+  [oolong-trec_coarse-131072-17000214] root step 6: grep {"pattern":"instance: (what|which)","documents":["context"],"max_matches":5}
+  [oolong-trec_coarse-131072-17000211] root step 7: grep {"pattern":"Instance: How (many|much|old|far|long|tall|deep|wide|fast|big|large|heavy|high|hot|often|frequent|loud) ","documents":["context"],"max_matches":3}
+  [oolong-trec_coarse-131072-17000241] root step 4: read {"document":"context","start_line":961,"end_line":1260}
+  [oolong-trec_coarse-131072-17000244] root step 1: read {"document":"context","start_line":21,"end_line":320}
+  [oolong-trec_coarse-131072-17000240] root step 4: read {"document":"context","start_line":901,"end_line":1200}
+  [oolong-trec_coarse-131072-17000243] root step 4: format error <folding> is not valid JSON: Invalid JSON: Unterminated string in JSON at position 94 (line 1 column 95); response has neither <tool_call> nor <answer>
+  [oolong-trec_coarse-131072-17000214] root step 7: read {"document":"context","start_line":1450,"end_line":1749}
+  [oolong-trec_coarse-131072-17000242] root step 9: grep {"pattern":"(does|did) (the )?[a-z'\\- ]+ stand for","documents":["context"],"max_matches":100}
+  [oolong-trec_coarse-131072-17000211] root step 8: grep {"pattern":"Instance: What (is|are|was|were) (a|an) [a-z-]+ \\?","documents":["context"],"max_matches":5}
+  [oolong-trec_coarse-131072-17000240] root step 5: read {"document":"context","start_line":1201,"end_line":1500}
+  [oolong-trec_coarse-131072-17000242] root step 10: grep {"pattern":"the letters|What does [A-Za-z .'-]{1,25} mean","documents":["context"],"max_matches":80}
+  [oolong-trec_coarse-131072-17000241] root step 5: read {"document":"context","start_line":1261,"end_line":1560}
+  [oolong-trec_coarse-131072-17000239] root step 3: format error response has neither <tool_call> nor <answer>
+  [oolong-trec_coarse-131072-17000243] root step 4: read {"document":"context","start_line":601,"end_line":900}
+  [oolong-trec_coarse-131072-17000241] root step 6: read {"document":"context","start_line":1561,"end_line":1860}
+  [oolong-trec_coarse-131072-17000211] root step 9: grep {"pattern":"Instance: What (is|are|was|were) (a |an |the )?([A-Za-z0-9'&.-]+ )?[A-Za-z0-9'&.-]+ \\?$","documents":["context"],"max_matches":60}
+  [oolong-trec_coarse-131072-17000244] root step 2: format error response has neither <tool_call> nor <answer>
+  [oolong-trec_coarse-131072-17000240] root step 6: read {"document":"context","start_line":1501,"end_line":1800}
+  [oolong-trec_coarse-131072-17000214] root step 8: grep {"pattern":"Instance: (When|What year|In what year|During what year)","documents":["context"],"max_matches":60}
+  [oolong-trec_coarse-131072-17000244] root step 2: read {"document":"context","start_line":321,"end_line":620}
+  [oolong-trec_coarse-131072-17000241] root step 7: read {"document":"context","start_line":1861,"end_line":2160}
+  [oolong-trec_coarse-131072-17000242] root step 11: grep {"pattern":"mean \\?|refer to|represents?|expansion|full form","documents":["context"],"max_matches":200}
+  [oolong-trec_coarse-131072-17000211] root step 10: grep {"pattern":"Instance: What (is|are|was|were) [^?]+ \\?$","documents":["context"],"max_matches":5}
+  [oolong-trec_coarse-131072-17000240] root step 7: read {"document":"context","start_line":1801,"end_line":2100}
+  [oolong-trec_coarse-131072-17000239] root step 3: format error response has neither <tool_call> nor <answer>
+  [oolong-trec_coarse-131072-17000243] root step 5: format error response has neither <tool_call> nor <answer>
+  [oolong-trec_coarse-131072-17000242] root step 12: grep {"pattern":"meaning|signif|mean in|mean on|mean to|mean by|means","documents":["context"],"max_matches":200}
+  [oolong-trec_coarse-131072-17000241] root step 8: read {"document":"context","start_line":2161,"end_line":2460}
+  [oolong-trec_coarse-131072-17000214] root step 9: grep {"pattern":"(NUM|HUM|LOC|DESC|ABBR|ENTY)\\s*:|[Ll]abel","documents":["context"],"max_matches":60}
+  [oolong-trec_coarse-131072-17000244] root step 3: read {"document":"context","start_line":621,"end_line":920}
+  [oolong-trec_coarse-131072-17000239] root step 4: read {"document":"context","start_line":5,"end_line":104}
+  [oolong-trec_coarse-131072-17000211] root step 11: grep {"pattern":"Instance: What (is|was) the name of","documents":["context"],"max_matches":100}
+  [oolong-trec_coarse-131072-17000241] root step 9: read {"document":"context","start_line":2461,"end_line":2760}
+  [oolong-trec_coarse-131072-17000240] root step 8: read {"document":"context","start_line":2101,"end_line":2400}
+  [oolong-trec_coarse-131072-17000239] root step 5: read {"document":"context","start_line":105,"end_line":204}
+  [oolong-trec_coarse-131072-17000214] root step 10: read {"document":"context","start_line":1,"end_line":300}
+  [oolong-trec_coarse-131072-17000211] root step 12: read {"document":"context","start_line":5,"end_line":304}
+  [oolong-trec_coarse-131072-17000242] root step 13: grep {"pattern":"meant|expand|spell|is [A-Z]{2,} \\?|was [A-Z]{2,} \\?","documents":["context"],"case_sensitive":true,"max_matches":200}
+  [oolong-trec_coarse-131072-17000241] root step 10: read {"document":"context","start_line":2761,"end_line":3060}
+  [oolong-trec_coarse-131072-17000244] root step 4: read {"document":"context","start_line":921,"end_line":1220}
+  [oolong-trec_coarse-131072-17000243] root step 5: read {"document":"context","start_line":901,"end_line":1200}
+  [oolong-trec_coarse-131072-17000239] root step 6: read {"document":"context","start_line":205,"end_line":304}
+  [oolong-trec_coarse-131072-17000240] root step 9: read {"document":"context","start_line":2401,"end_line":2700}
+  [oolong-trec_coarse-131072-17000242] root step 14: grep {"pattern":"what 's [A-Z0-9]{2,} \\?|is [A-Z0-9]*[0-9][A-Za-z0-9]* \\?","documents":["context"],"case_sensitive":true,"max_matches":200}
+  [oolong-trec_coarse-131072-17000214] root step 11: read {"document":"context","start_line":301,"end_line":600}
+  [oolong-trec_coarse-131072-17000240] root step 10: read {"document":"context","start_line":2701,"end_line":3000}
+  [oolong-trec_coarse-131072-17000211] root step 13: read {"document":"context","start_line":1600,"end_line":1899}
+  [oolong-trec_coarse-131072-17000239] root step 7: read {"document":"context","start_line":305,"end_line":404}

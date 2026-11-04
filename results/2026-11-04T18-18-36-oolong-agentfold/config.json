@@ -1,0 +1,111 @@
+{
+  "bench": "oolong",
+  "method": "agentfold",
+  "startedAt": "2026-11-04T20:26:02.834Z",
+  "tasks": 50,
+  "taskIds": [
+    "oolong-trec_coarse-131072-17000208",
+    "oolong-trec_coarse-131072-17000209",
+    "oolong-trec_coarse-131072-17000210",
+    "oolong-trec_coarse-131072-17000211",
+    "oolong-trec_coarse-131072-17000212",
+    "oolong-trec_coarse-131072-17000213",
+    "oolong-trec_coarse-131072-17000214",
+    "oolong-trec_coarse-131072-17000215",
+    "oolong-trec_coarse-131072-17000216",
+    "oolong-trec_coarse-131072-17000217",
+    "oolong-trec_coarse-131072-17000218",
+    "oolong-trec_coarse-131072-17000219",
+    "oolong-trec_coarse-131072-17000220",
+    "oolong-trec_coarse-131072-17000221",
+    "oolong-trec_coarse-131072-17000222",
+    "oolong-trec_coarse-131072-17000223",
+    "oolong-trec_coarse-131072-17000224",
+    "oolong-trec_coarse-131072-17000225",
+    "oolong-trec_coarse-131072-17000226",
+    "oolong-trec_coarse-131072-17000227",
+    "oolong-trec_coarse-131072-17000228",
+    "oolong-trec_coarse-131072-17000229",
+    "oolong-trec_coarse-131072-17000230",
+    "oolong-trec_coarse-131072-17000231",
+    "oolong-trec_coarse-131072-17000232",
+    "oolong-trec_coarse-131072-17000206",
+    "oolong-trec_coarse-131072-17000207",
+    "oolong-trec_coarse-131072-17000233",
+    "oolong-trec_coarse-131072-17000234",
+    "oolong-trec_coarse-131072-17000235",
+    "oolong-trec_coarse-131072-17000236",
+    "oolong-trec_coarse-131072-17000237",
+    "oolong-trec_coarse-131072-17000238",
+    "oolong-trec_coarse-131072-17000239",
+    "oolong-trec_coarse-131072-17000240",
+    "oolong-trec_coarse-131072-17000241",
+    "oolong-trec_coarse-131072-17000242",
+    "oolong-trec_coarse-131072-17000243",
+    "oolong-trec_coarse-131072-17000244",
+    "oolong-trec_coarse-131072-17000245",
+    "oolong-trec_coarse-131072-17000246",
+    "oolong-trec_coarse-131072-17000247",
+    "oolong-trec_coarse-131072-17000248",
+    "oolong-trec_coarse-131072-17000249",
+    "oolong-trec_coarse-131072-17000250",
+    "oolong-trec_coarse-131072-17000251",
+    "oolong-trec_coarse-131072-17000252",
+    "oolong-trec_coarse-131072-17000253",
+    "oolong-trec_coarse-131072-17000254",
+    "oolong-trec_coarse-131072-17000255"
+  ],
+  "argv": [
+    "oolong",
+    "--method",
+    "agentfold",
+    "--concurrency",
+    "8",
+    "--resume",
+    "--out",
+    "results/2026-11-04T18-18-36-oolong-agentfold"
+  ],
+  "tools": "grep,read,calculator",
+  "models": {
+    "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+    "root": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16000,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        }
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "query": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3-flash",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 4096,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        },
+        "reasoning_effort": "low"
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "llmQuery": {
+      "reserveRatio": 0.3,
+      "concurrency": 4
+    }
+  }
+}

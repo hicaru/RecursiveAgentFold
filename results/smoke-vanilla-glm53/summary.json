@@ -1,0 +1,49 @@
+{
+  "bench": "oolong-rlmpi",
+  "method": "agentfold",
+  "n": 1,
+  "meanScore": 1,
+  "correct": 1,
+  "meanOfficial": 1,
+  "meanLenient": 1,
+  "errors": 0,
+  "meanSteps": 3,
+  "meanWallSec": 24.924,
+  "formatIssues": 0,
+  "folds": {
+    "granular": 2,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 0,
+  "tokens": {
+    "prompt": 4193,
+    "cached": 2048,
+    "completion": 1361,
+    "cacheHitRate": 0.4884331027903649
+  },
+  "byRole": {
+    "root": {
+      "calls": 3,
+      "promptTokens": 4193,
+      "completionTokens": 1361,
+      "cachedTokens": 2048,
+      "reasoningTokens": 721,
+      "latencyMs": 24904,
+      "errors": 0,
+      "cacheHitRate": 0.4884331027903649
+    }
+  },
+  "byTask": {
+    "counting": {
+      "n": 1,
+      "score": 1
+    }
+  },
+  "byAnswerType": {
+    "ANSWER_TYPE.LABEL": {
+      "n": 1,
+      "score": 1
+    }
+  }
+}
