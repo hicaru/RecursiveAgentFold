@@ -1,0 +1,70 @@
+{
+  "bench": "oolong",
+  "method": "raf",
+  "n": 1,
+  "meanScore": 1,
+  "correct": 1,
+  "meanOfficial": 1,
+  "meanLenient": 1,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 1,
+  "meanSteps": 2,
+  "meanWallSec": 310.013,
+  "formatIssues": 0,
+  "folds": {
+    "granular": 1,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 1,
+  "tokens": {
+    "prompt": 121108,
+    "cached": 10944,
+    "completion": 67012,
+    "cacheHitRate": 0.09036562407107705
+  },
+  "byRole": {
+    "root": {
+      "calls": 2,
+      "promptTokens": 5545,
+      "completionTokens": 2015,
+      "cachedTokens": 4032,
+      "reasoningTokens": 1564,
+      "latencyMs": 35953,
+      "errors": 0,
+      "cacheHitRate": 0.727141568981064
+    },
+    "llm_query": {
+      "calls": 17,
+      "promptTokens": 115563,
+      "completionTokens": 64997,
+      "cachedTokens": 6912,
+      "reasoningTokens": 63136,
+      "latencyMs": 1006093,
+      "errors": 0,
+      "cacheHitRate": 0.05981153137249812
+    }
+  },
+  "byTask": {
+    "TASK_TYPE.MOST_FREQ": {
+      "n": 1,
+      "score": 1
+    }
+  },
+  "byAnswerType": {
+    "ANSWER_TYPE.LABEL": {
+      "n": 1,
+      "score": 1
+    }
+  },
+  "cost": {
+    "totalUsd": 0.061036,
+    "perTaskUsd": 0.061036,
+    "cacheSavedUsd": 0.005426,
+    "byRoleUsd": {
+      "root": 0.012033,
+      "llm_query": 0.049004
+    }
+  }
+}

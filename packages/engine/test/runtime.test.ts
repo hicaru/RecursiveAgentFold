@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ContextStore } from '../src/context/store.js';
+import { ResearchBoard } from '../src/context/board.js';
 import { ScriptedLLM } from '../src/llm/mock.js';
 import { RecursiveAgentFold } from '../src/runtime.js';
 import { computeChunkTokens, LLMQueryEngine } from '../src/tools/llm-query.js';
@@ -212,5 +213,89 @@ describe('RecursiveAgentFold end-to-end (scripted)', () => {
     expect(folds[1]?.outcome.corrections.some((c) => c.includes('deferred to granular'))).toBe(true);
     expect(folds[3]?.outcome.directive.range).toEqual([0, 3]);
     expect(folds[4]?.outcome.directive.range).toEqual([0, 4]);
+  });
+it('ResearchBoard records entries, deduplicates, and provides byte-identical prefix across steps', async () => {
+    const board = new ResearchBoard();
+    board.record({
+      agent: 'agent',
+      kind: 'llm_query',
+      scope: 'ctx@8192:1-end',
+      key: 'extract:count categories',
+      summary: 'counts(1/1块): cat=60, dog=60',
+      counts: { cat: 60, dog: 60 },
+    });
+    expect(board.entries()).toHaveLength(1);
+    expect(board.findCounts('ctx', ['cat', 'dog'])).toEqual({ cat: 60, dog: 60 });
+    expect(board.findCounts('ctx', ['cat', 'bird'])).toBeUndefined();
+
+    // Deduplication check
+    board.record({
+      agent: 'agent',
+      kind: 'llm_query',
+      scope: 'ctx@8192:1-end',
+      key: 'extract:count categories',
+      summary: 'counts(1/1块): cat=65, dog=60',
+      counts: { cat: 65, dog: 60 },
+    });
+    expect(board.entries()).toHaveLength(1);
+    expect(board.entries()[0]?.summary).toBe('counts(1/1块): cat=65, dog=60');
+
+    // Snapshot rendered in AgentFoldAgent and stays byte-identical across steps
+    const store = new ContextStore();
+    store.add('line 1: cat\nline 2: dog\n', { id: 'ctx', title: 'test doc' });
+    const llm = new ScriptedLLM(() => '<answer>done</answer>');
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [createGrepTool()],
+      store,
+      board,
+    });
+    const state0 = new FoldState();
+    const msg0 = agent.buildMessages('Count animals', state0);
+    expect(msg0[1]?.content).toContain('### 共享研究看板');
+    expect(msg0[1]?.content).toContain('cat=65, dog=60');
+
+    // Simulate step 1
+    state0.setLatest({
+      step: 0,
+      motivation: 'check',
+      action: { name: 'grep', arguments: { pattern: 'cat' } },
+      observation: '1 matches',
+    });
+    state0.applyFold({ range: [0, 0], summary: 'found 1 cat' });
+    const msg1 = agent.buildMessages('Count animals', state0);
+
+    // Prefix up to ### 任务 should be byte-identical
+    const prefix0 = msg0[1]!.content.split('### 历史步骤')[0]!;
+    const prefix1 = msg1[1]!.content.split('### 历史步骤')[0]!;
+    expect(prefix0).toBe(prefix1);
+  });
+
+  it('ResearchBoard runAtomicBranch deduplicates concurrent and sequential branch calls', async () => {
+    const board = new ResearchBoard();
+    let callCount = 0;
+    const taskFn = async () => {
+      callCount++;
+      return 'Answer is 42';
+    };
+
+    // Sequential run
+    const res1 = await board.runAtomicBranch('calculate 40 + 2', taskFn);
+    expect(res1).toEqual({ result: 'Answer is 42', reused: false });
+    expect(callCount).toBe(1);
+
+    const res2 = await board.runAtomicBranch('calculate 40 + 2', taskFn);
+    expect(res2).toEqual({ result: 'Answer is 42', reused: true });
+    expect(callCount).toBe(1);
+
+    // Concurrent run
+    const [c1, c2] = await Promise.all([
+      board.runAtomicBranch('new subtask 99', taskFn),
+      board.runAtomicBranch('new subtask 99', taskFn),
+    ]);
+    expect(callCount).toBe(2);
+    expect(c1.result).toBe('Answer is 42');
+    expect(c2.result).toBe('Answer is 42');
+    expect([c1.reused, c2.reused]).toContain(true);
   });
 });

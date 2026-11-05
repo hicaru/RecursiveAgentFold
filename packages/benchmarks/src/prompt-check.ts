@@ -238,7 +238,6 @@ async function readerProbe(models: BenchModels, log: (s: string) => void): Promi
     ...models.llmQuery,
     maxChunkTokens: 2048,
     minChunkTokens: 1024,
-    memoize: false,
   });
   const locate = await engine.query({
     query: '找出所有人事备注里的姓名和工牌号，返回姓名与工牌号。',
@@ -256,6 +255,7 @@ async function readerProbe(models: BenchModels, log: (s: string) => void): Promi
     query: '统计本块中 cat 和 dog 的行数，按类别放进 counts。',
     mode: 'extract',
     documents: ['rows'],
+    categories: ['cat', 'dog'],
   });
   const totals: Record<string, number> = {};
   for (const f of extract.findings) for (const [k, v] of Object.entries(f.counts ?? {})) totals[k] = (totals[k] ?? 0) + v;
@@ -265,7 +265,21 @@ async function readerProbe(models: BenchModels, log: (s: string) => void): Promi
   log(
     `  ${extractOk ? '✓' : '✗'} extract — ${extract.findings.length} chunk(s), counts ${JSON.stringify(totals)} (expected 120 lines), errors ${extractErrors}`,
   );
-  return locateOk && extractOk;
+
+  // Live dedup & canonical categories probe: second query with different wording reuses cached counts
+  const cachedExtract = await engine.query({
+    query: '请给出每种动物（如 cat 与 dog）在当前分块内的出现次数',
+    mode: 'extract',
+    documents: ['rows'],
+    categories: ['cat', 'dog'],
+  });
+  const cachedHits = cachedExtract.findings.filter((f) => f.memoHit).length;
+  const boardEntries = engine.board.entries().length;
+  const dedupOk = cachedHits === cachedExtract.findings.length && boardEntries > 0;
+  log(
+    `  ${dedupOk ? '✓' : '✗'} dedup/categories memo — ${cachedHits}/${cachedExtract.findings.length} chunk hits (0 extra LLM calls), board entries ${boardEntries}`,
+  );
+  return locateOk && extractOk && dedupOk;
 }
 
 async function e2eProbe(models: BenchModels, outDir: string, log: (s: string) => void): Promise<boolean> {

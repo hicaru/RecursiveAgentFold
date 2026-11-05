@@ -1,23 +1,25 @@
-import type { ContextStore } from '../context/store.js';
-import type { UsageTracker } from '../llm/usage.js';
 import type { AgentEvent } from '../agent/events.js';
+import type { ContextStore } from '../context/store.js';
+import type { ResearchBoard } from '../context/board.js';
+import type { UsageTracker } from '../llm/usage.js';
 import type { JSONSchema } from '../types.js';
 
 export interface ToolContext {
-  store: ContextStore;
-  usage: UsageTracker;
+  readonly store: ContextStore;
+  readonly usage: UsageTracker;
   /** Recursion depth of the calling agent (root = 0). */
-  depth: number;
-  agentName: string;
-  step: number;
-  emit: (e: AgentEvent) => void;
-  signal?: AbortSignal;
+  readonly depth: number;
+  readonly agentName: string;
+  readonly step: number;
+  readonly emit: (e: AgentEvent) => void;
+  readonly signal?: AbortSignal;
+  readonly board?: ResearchBoard;
 }
 
 export interface Tool {
-  name: string;
-  description: string;
-  parameters: JSONSchema;
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: JSONSchema;
   execute(args: Record<string, unknown>, ctx: ToolContext): Promise<string>;
 }
 
@@ -56,7 +58,7 @@ export function argStringList(args: Record<string, unknown>, key: string): strin
 }
 
 /** Render tool schemas for the system prompt (stable ordering => cache-stable). */
-export function renderToolSchemas(tools: Tool[]): string {
+export function renderToolSchemas(tools: readonly Tool[]): string {
   return tools
     .map((t) => JSON.stringify({ name: t.name, description: t.description, parameters: t.parameters }))
     .join('\n');

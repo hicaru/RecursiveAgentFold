@@ -43,23 +43,30 @@ export const AGENT_SYSTEM_PROMPT_TEMPLATE = `你是 AgentFold，一个主动管�
 2. **极简调用**：只请求验证假设所需的最小数据量。每次只调用一个工具，参数必须是合法 JSON。
 3. **精准手术**：不重复已失败或被摘要覆盖的调用；用最小行区间和最小 max_matches 获取证据。
 4. **目标驱动**：一旦计数或证据足以确定答案，立即输出 <answer>，不要做多余读取。绝不编造文档内容；信息缺失就在答案中说明。
-5. **原样作答**：用题目所用的语言作答；类别标签、人名、数字保持题目原文的写法。`;
+5. **原样作答**：用题目所用的语言作答；类别标签、人名、数字保持题目原文的写法。
+6. **复用看板**：若「共享研究看板」已有能回答当前问题的精确分类计数、定位行号或子代理结论，直接据此计算或作答，绝不重复调用工具扫描。`;
 
 /** Per-tool guidance; only guidance for tools that are actually available is rendered. */
 export const TOOL_GUIDANCE: Record<string, string> = Object.freeze({
   llm_query:
-    '- **llm_query**：先用它定位（mode "locate"）或在全部分块上抽取/分类/计数（mode "extract"），再自行汇总。查询要自包含、精确，并写明输出形式（如"以整数返回计数"）。计数/分类时要求按类别返回 "counts"，引擎会自动跨分块求和；逐行密集分类用小分块更准。',
+    '- **llm_query**：当任务需要跨全文做语义分类、语义计数或模糊定位（目标类别/概念未以固定字面词出现在正文中，正则无法精确匹配）时使用。计数/分类时必须设置 mode="extract" 并传入 categories 列表，引擎会按分块并行统计、跨分块自动求和并写入共享看板。',
   grep: '- **grep**：用于精确字符串/正则搜索，总是返回全文匹配行总数及前若干匹配行。统计频次或探查模式时把 max_matches 设为 5–10 即可（总数依然精确），避免拉取大量无关行。',
   read: '- **read**：只读取精确的小行区间（10–30 行）来确认已定位的位置；不要用它搜索或通读大段文本。',
   tally: '- **tally**：正则或捕获组的确定性精确计数，不要手数。',
-  branch: '- **branch**：把自包含子任务交给拥有全新上下文的子代理，只收回最终结果。',
+  branch:
+    '- **branch**：仅在需要隔离多步子任务（如对不同文档/行区间做独立深入核查，或用 tasks 并行拆分互不重叠的原子子问题）时使用；单次工具调用能完成的任务绝不要派发 branch。',
   calculator: '- **calculator**：用精确算术处理部分结果，不要心算。',
 });
 
 export function buildAgentSystemPrompt(toolNames: string[]): string {
   const lines = toolNames.map((n) => TOOL_GUIDANCE[n]).filter((x): x is string => !!x);
-  if (toolNames.includes('llm_query') && (toolNames.includes('grep') || toolNames.includes('read'))) {
-    lines.push('- llm_query 可用时，grep/read 只用于它指出的区域；不要用 read 翻大文档。');
+  if (toolNames.includes('llm_query') && (toolNames.includes('grep') || toolNames.includes('tally'))) {
+    lines.push(
+      '- **工具路由优先级（省 token 与速度第一准则）**：',
+      '  - **第一优先级（0 token 极速）**：凡是问题中含有具体字面词、短语、人名、地名、词组或明确正则模式（无论目标是单次查找还是全篇统计次数，如"包含 Tallinn office 的便签数"），**必须直接使用 grep 或 tally**（0 模型 token、毫秒级完成精确查找与计数），**绝对严禁使用 llm_query 扫描全文档**！',
+      '  - **第二优先级（语义理解）**：仅当目标**完全没有**固定字面关键词或正则（例如抽象分类"配送/账户/技术"、开放问题语义归类），必须逐行理解语义才能分类时，才使用 llm_query（必须 mode="extract" 并传入 categories）。',
+      '  - **禁止大范围 read**：read 仅用于定位后的局部核对（10–30 行），严禁翻阅大文档。',
+    );
   }
   return AGENT_SYSTEM_PROMPT_TEMPLATE.replace('{{TOOL_GUIDANCE}}', `# 工具使用\n${lines.join('\n')}`);
 }

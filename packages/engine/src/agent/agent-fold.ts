@@ -1,4 +1,5 @@
 import type { ContextStore } from '../context/store.js';
+import type { ResearchBoard } from '../context/board.js';
 import { FoldState, fallbackSummary, type FoldDirective, type FoldStateSnapshot, type Interaction } from '../fold/state.js';
 import { UsageTracker } from '../llm/usage.js';
 import { buildAgentSystemPrompt, FORCE_ANSWER, FORMAT_REMINDER, FORMAT_REPAIR, renderBlockLabel } from '../prompts/agent.js';
@@ -35,6 +36,7 @@ export interface AgentFoldConfig {
   systemPromptExtra?: string;
   temperature?: number;
   signal?: AbortSignal;
+  board?: ResearchBoard;
 }
 
 export type Termination = 'answer' | 'forced_answer' | 'max_steps' | 'error' | 'filtered';
@@ -66,6 +68,7 @@ export class AgentFoldAgent {
   private readonly estimator: TokenEstimator;
   private readonly toolMap: Map<string, Tool>;
   private readonly systemPrompt: string;
+  private readonly initialBoardSnapshot: string | undefined;
 
   constructor(private readonly cfg: AgentFoldConfig) {
     this.depth = cfg.depth ?? 0;
@@ -76,6 +79,8 @@ export class AgentFoldAgent {
     this.systemPrompt =
       `${buildAgentSystemPrompt(cfg.tools.map((t) => t.name))}\n\n# 可用工具\n${renderToolSchemas(cfg.tools)}` +
       (cfg.systemPromptExtra ? `\n\n# 附加说明\n${cfg.systemPromptExtra}` : '');
+    this.initialBoardSnapshot =
+      cfg.board && cfg.board.entries().length > 0 ? cfg.board.render() : undefined;
   }
 
   private emit(e: AgentEvent) {
@@ -93,12 +98,9 @@ export class AgentFoldAgent {
       for (const b of blocks) prev.push(`**${renderBlockLabel(b)}** ${b.summary}`);
       if (latest) prev.push(renderLatest(latest));
     }
-    const parts: string[] = [
-      `### 文档\n${this.cfg.store.manifest()}`,
-      `### 任务\n${question.trim()}`,
-      prev.join('\n'),
-      FORMAT_REMINDER(state.currentStep, latest?.step),
-    ];
+    const parts: string[] = [`### 文档\n${this.cfg.store.manifest()}`];
+    if (this.initialBoardSnapshot) parts.push(`### 共享研究看板\n${this.initialBoardSnapshot}`);
+    parts.push(`### 任务\n${question.trim()}`, prev.join('\n'), FORMAT_REMINDER(state.currentStep, latest?.step));
     if (extraUserTail) parts.push(extraUserTail);
     return [
       { role: 'system', content: this.systemPrompt, cacheBreakpoint: true },
@@ -241,6 +243,7 @@ export class AgentFoldAgent {
           step,
           emit: (e) => this.emit(e),
           signal: this.cfg.signal,
+          board: this.cfg.board,
         });
       } catch (e) {
         error = (e as Error).message;

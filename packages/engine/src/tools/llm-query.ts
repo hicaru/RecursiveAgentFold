@@ -1,4 +1,5 @@
 import type { Chunk, ContextStore } from '../context/store.js';
+import { ResearchBoard } from '../context/board.js';
 import type { UsageTracker } from '../llm/usage.js';
 import { LLM_QUERY_SYSTEM, renderChunkMessage, renderQueryMessage, type LLMQueryMode } from '../prompts/llm-query.js';
 import { defaultEstimator, truncateToTokens } from '../tokens.js';
@@ -9,42 +10,45 @@ import { argNumber, argString, argStringList, ToolArgumentError, type Tool } fro
 
 export interface LLMQueryOptions {
   /** Fraction of the query model's window kept free for prompt + output. Default 0.3. */
-  reserveRatio?: number;
+  readonly reserveRatio?: number;
   /** Hard cap on chunk size (tokens). Dense tasks (counting) benefit from smaller chunks. */
-  maxChunkTokens?: number;
+  readonly maxChunkTokens?: number;
+  /** Default chunk size (tokens) for mode === 'extract'. Default 8192. */
+  readonly defaultExtractChunkTokens?: number;
   /** Lower bound for chunk size (tokens). Default 1024. */
-  minChunkTokens?: number;
+  readonly minChunkTokens?: number;
   /** Parallel chunk calls. Default 4. */
-  concurrency?: number;
+  readonly concurrency?: number;
   /** Prefix each line with its number so findings can point to lines. Default true. */
-  lineNumbers?: boolean;
+  readonly lineNumbers?: boolean;
   /** Max output tokens per chunk call. Default: model profile maxOutputTokens. */
-  maxOutputTokens?: number;
+  readonly maxOutputTokens?: number;
   /** Cap on the aggregated observation returned to the agent. Default 6000. */
-  maxReportTokens?: number;
+  readonly maxReportTokens?: number;
   /** Refuse calls that would scan more than this many tokens. Default 4M. */
-  maxScanTokens?: number;
+  readonly maxScanTokens?: number;
   /** Memoize (chunk, mode, query) results in-process. Default true. */
-  memoize?: boolean;
-  temperature?: number;
+  readonly memoize?: boolean;
+  readonly temperature?: number;
+  readonly board?: ResearchBoard;
 }
 
 export interface ChunkFinding {
-  chunk: Chunk;
-  relevant: boolean;
-  answer: string;
-  evidence: Array<{ line?: number; quote: string }>;
+  readonly chunk: Chunk;
+  readonly relevant: boolean;
+  readonly answer: string;
+  readonly evidence: readonly { readonly line?: number; readonly quote: string }[];
   /** Optional per-category integer counts (summed across chunks by the engine). */
-  counts?: Record<string, number>;
-  error?: string;
-  memoHit: boolean;
+  readonly counts?: Readonly<Record<string, number>>;
+  readonly error?: string;
+  readonly memoHit: boolean;
 }
 
 export interface LLMQueryResult {
-  mode: LLMQueryMode;
-  chunkTokens: number;
-  findings: ChunkFinding[];
-  report: string;
+  readonly mode: LLMQueryMode;
+  readonly chunkTokens: number;
+  readonly findings: readonly ChunkFinding[];
+  readonly report: string;
 }
 
 const SYSTEM_TOKENS = defaultEstimator.count(LLM_QUERY_SYSTEM);
@@ -71,7 +75,7 @@ export function quantizeChunkTokens(requested: number, max: number, min = 1024):
   return Math.max(min, Math.min(max, q));
 }
 
-function compressIndexRanges(idx: number[]): string {
+function compressIndexRanges(idx: readonly number[]): string {
   if (!idx.length) return '';
   const parts: string[] = [];
   let s = idx[0]!;
@@ -94,7 +98,10 @@ function compressIndexRanges(idx: number[]): string {
  */
 export class LLMQueryEngine {
   private readonly memo = new Map<string, Omit<ChunkFinding, 'chunk' | 'memoHit'>>();
+  private readonly inFlight = new Map<string, Promise<Omit<ChunkFinding, 'chunk' | 'memoHit'>>>();
+  private readonly chunkCounts = new Map<string, Record<string, number>>();
   private readonly limit: <T>(fn: () => Promise<T>) => Promise<T>;
+  readonly board: ResearchBoard;
 
   constructor(
     readonly llm: LLMClient,
@@ -103,13 +110,18 @@ export class LLMQueryEngine {
     readonly opts: LLMQueryOptions = {},
   ) {
     this.limit = createLimiter(opts.concurrency ?? 4);
+    this.board = opts.board ?? new ResearchBoard();
   }
 
   get defaultChunkTokens(): number {
     return computeChunkTokens(this.llm.profile, this.opts);
   }
 
-  selectChunks(docIds: string[], chunkTokens: number, startLine?: number, endLine?: number): Chunk[] {
+  get defaultExtractChunkTokens(): number {
+    return Math.min(this.defaultChunkTokens, this.opts.defaultExtractChunkTokens ?? 8192);
+  }
+
+  selectChunks(docIds: readonly string[], chunkTokens: number, startLine?: number, endLine?: number): Chunk[] {
     const out: Chunk[] = [];
     for (const id of docIds) {
       for (const c of this.store.chunks(id, chunkTokens)) {
@@ -123,78 +135,156 @@ export class LLMQueryEngine {
   }
 
   async query(args: {
-    query: string;
-    mode?: LLMQueryMode;
-    documents?: string[];
-    startLine?: number;
-    endLine?: number;
-    chunkTokens?: number;
-    signal?: AbortSignal;
+    readonly query: string;
+    readonly mode?: LLMQueryMode;
+    readonly documents?: readonly string[];
+    readonly startLine?: number;
+    readonly endLine?: number;
+    readonly chunkTokens?: number;
+    readonly signal?: AbortSignal;
     /** Usage sink for this call (defaults to the engine's tracker). */
-    usage?: UsageTracker;
+    readonly usage?: UsageTracker;
+    readonly agent?: string;
+    readonly categories?: readonly string[];
   }): Promise<LLMQueryResult> {
     const mode: LLMQueryMode = args.mode ?? 'locate';
     const docIds = args.documents?.length ? args.documents : this.store.list().map((d) => d.id);
     for (const id of docIds) this.store.get(id); // validate
-    const maxSize = this.defaultChunkTokens;
-    const chunkTokens = args.chunkTokens ? quantizeChunkTokens(args.chunkTokens, maxSize, this.opts.minChunkTokens) : maxSize;
+    const modeMax = mode === 'extract' ? this.defaultExtractChunkTokens : this.defaultChunkTokens;
+    const chunkTokens = args.chunkTokens
+      ? quantizeChunkTokens(args.chunkTokens, this.defaultChunkTokens, this.opts.minChunkTokens)
+      : modeMax;
     const chunks = this.selectChunks(docIds, chunkTokens, args.startLine, args.endLine);
     const scan = chunks.reduce((a, c) => a + c.tokens, 0);
     if (scan > (this.opts.maxScanTokens ?? 4_000_000)) {
       throw new ToolArgumentError(`llm_query 将扫描约 ${scan} token（上限 ${this.opts.maxScanTokens ?? 4_000_000}）；请缩小文档或行范围`);
     }
     const usage = args.usage ?? this.usage;
-    const findings = await Promise.all(chunks.map((c) => this.limit(() => this.runChunk(c, args.query, mode, usage, args.signal))));
+    const findings = await Promise.all(chunks.map((c) => this.limit(() => this.runChunk(c, args.query, mode, usage, args.signal, args.categories))));
+    const errors = findings.filter((f) => f.error);
+    if (errors.length === 0) {
+      const scope = `${docIds.join(',')}@${chunkTokens}:${args.startLine ?? 1}-${args.endLine ?? 'end'}`;
+      const totals = sumCounts(findings);
+      this.board.record({
+        agent: args.agent ?? 'agent',
+        kind: 'llm_query',
+        scope,
+        key: `${mode}:${args.query.slice(0, 160)}`,
+        summary: totals
+          ? `counts(${findings.filter((f) => f.counts).length}/${findings.length}块): ` +
+            Object.entries(totals)
+              .sort((a, b) => b[1] - a[1])
+              .map(([k, v]) => `${k}=${v}`)
+              .join(', ')
+          : `相关 ${findings.filter((f) => f.relevant).length}/${findings.length} 块`,
+        ...(totals ? { counts: Object.freeze({ ...totals }) } : {}),
+      });
+    }
     return { mode, chunkTokens, findings, report: this.formatReport(args.query, mode, chunkTokens, findings) };
   }
 
-  private async runChunk(chunk: Chunk, query: string, mode: LLMQueryMode, usage: UsageTracker, signal?: AbortSignal): Promise<ChunkFinding> {
+  private async runChunk(
+    chunk: Chunk,
+    query: string,
+    mode: LLMQueryMode,
+    usage: UsageTracker,
+    signal?: AbortSignal,
+    categories?: readonly string[],
+  ): Promise<ChunkFinding> {
     const lineNumbers = this.opts.lineNumbers !== false;
-    const memoKey = `${chunk.key}|${lineNumbers ? 'n' : 'r'}|${mode}|${query}`;
-    const hit = this.opts.memoize !== false ? this.memo.get(memoKey) : undefined;
-    if (hit) return { ...hit, chunk, memoHit: true };
-    const doc = this.store.get(chunk.docId);
-    const messages = [
-      { role: 'system' as const, content: LLM_QUERY_SYSTEM },
-      {
-        role: 'user' as const,
-        content: renderChunkMessage({
-          docId: chunk.docId,
-          title: doc.title,
-          index: chunk.index,
-          total: chunk.total,
-          startLine: chunk.startLine,
-          endLine: chunk.endLine,
-          body: this.store.renderChunk(chunk, lineNumbers),
-        }),
-        cacheBreakpoint: true,
-      },
-      { role: 'user' as const, content: renderQueryMessage(query, mode) },
-    ];
-    let lastErr = '';
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const res = await this.llm.complete({
-          messages,
-          maxTokens: this.opts.maxOutputTokens ?? this.llm.profile.maxOutputTokens,
-          temperature: this.opts.temperature ?? 0,
-          signal,
-          purpose: 'llm_query',
-        });
-        usage.record('llm_query', res.usage, res.latencyMs);
-        const parsed = normalizeFinding(res.text);
-        if (this.opts.memoize !== false) this.memo.set(memoKey, parsed);
-        return { ...parsed, chunk, memoHit: false };
-      } catch (e) {
-        usage.recordError('llm_query');
-        lastErr = (e as Error).message;
-        if (signal?.aborted || (e as { retryable?: boolean }).retryable === false) break;
+    const chunkCountKey = `${chunk.key}|${lineNumbers ? 'n' : 'r'}`;
+    const canonCats =
+      mode === 'extract' && categories && categories.length > 0
+        ? [...new Set(categories.map((x) => x.trim().toLowerCase()).filter(Boolean))].sort()
+        : undefined;
+    if (canonCats && canonCats.length > 0) {
+      const cachedCounts = this.chunkCounts.get(chunkCountKey);
+      if (cachedCounts) {
+        const hasAll = canonCats.every((cat) => Object.prototype.hasOwnProperty.call(cachedCounts, cat));
+        if (hasAll) {
+          const subsetCounts: Record<string, number> = {};
+          for (const cat of canonCats) subsetCounts[cat] = cachedCounts[cat] ?? 0;
+          return {
+            chunk,
+            relevant: true,
+            answer: Object.entries(subsetCounts).map(([k, v]) => `${k}=${v}`).join(', '),
+            evidence: [],
+            counts: Object.freeze(subsetCounts),
+            memoHit: true,
+          };
+        }
       }
     }
-    return { chunk, relevant: false, answer: '', evidence: [], error: lastErr, memoHit: false };
+    const memoKey = `${chunk.key}|${lineNumbers ? 'n' : 'r'}|${mode}|${query}`;
+    if (this.opts.memoize !== false) {
+      const hit = this.memo.get(memoKey);
+      if (hit) return { ...hit, chunk, memoHit: true };
+    }
+    const running = this.inFlight.get(memoKey);
+    if (running) {
+      const shared = await running;
+      return { ...shared, chunk, memoHit: true };
+    }
+
+    const execPromise = (async () => {
+      const doc = this.store.get(chunk.docId);
+      const messages = [
+        { role: 'system' as const, content: LLM_QUERY_SYSTEM },
+        {
+          role: 'user' as const,
+          content: renderChunkMessage({
+            docId: chunk.docId,
+            title: doc.title,
+            index: chunk.index,
+            total: chunk.total,
+            startLine: chunk.startLine,
+            endLine: chunk.endLine,
+            body: this.store.renderChunk(chunk, lineNumbers),
+          }),
+          cacheBreakpoint: true,
+        },
+        { role: 'user' as const, content: renderQueryMessage(query, mode) },
+      ];
+      let lastErr = '';
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const res = await this.llm.complete({
+            messages,
+            maxTokens: this.opts.maxOutputTokens ?? this.llm.profile.maxOutputTokens,
+            temperature: this.opts.temperature ?? 0,
+            signal,
+            purpose: 'llm_query',
+          });
+          usage.record('llm_query', res.usage, res.latencyMs);
+          if (res.text.trim() === '' || (res.finishReason === 'length' && tryParseLooseJSON(res.text) === undefined)) {
+            throw new Error('reader response truncated or empty');
+          }
+          const parsed = normalizeFinding(res.text);
+          if (parsed.counts) {
+            const existing = this.chunkCounts.get(chunkCountKey) ?? {};
+            this.chunkCounts.set(chunkCountKey, { ...existing, ...parsed.counts });
+          }
+          if (this.opts.memoize !== false) this.memo.set(memoKey, parsed);
+          return parsed;
+        } catch (e) {
+          usage.recordError('llm_query');
+          lastErr = (e as Error).message;
+          if (signal?.aborted || (e && typeof e === 'object' && 'retryable' in e && e.retryable === false)) break;
+        }
+      }
+      return { relevant: false, answer: '', evidence: [], error: lastErr };
+    })();
+
+    this.inFlight.set(memoKey, execPromise);
+    try {
+      const result = await execPromise;
+      return { ...result, chunk, memoHit: false };
+    } finally {
+      this.inFlight.delete(memoKey);
+    }
   }
 
-  formatReport(query: string, mode: LLMQueryMode, chunkTokens: number, findings: ChunkFinding[]): string {
+  formatReport(query: string, mode: LLMQueryMode, chunkTokens: number, findings: readonly ChunkFinding[]): string {
     const relevant = findings.filter((f) => f.relevant && !f.error);
     const errors = findings.filter((f) => f.error);
     const fmt = (f: ChunkFinding) => {
@@ -202,7 +292,14 @@ export class LLMQueryEngine {
         .slice(0, 5)
         .map((e) => `L${e.line ?? '?'} "${e.quote.length > 160 ? `${e.quote.slice(0, 160)}…` : e.quote}"`)
         .join('；');
-      return `#${f.chunk.index + 1} [${f.chunk.docId} L${f.chunk.startLine}-${f.chunk.endLine}] ${f.answer.replace(/\s+/g, ' ').trim()}${ev ? ` | 证据：${ev}` : ''}`;
+      const textAnswer = f.answer.replace(/\s+/g, ' ').trim();
+      const ans =
+        textAnswer === '' && f.counts
+          ? Object.entries(f.counts)
+              .map(([k, v]) => `${k}=${v}`)
+              .join(', ')
+          : textAnswer;
+      return `#${f.chunk.index + 1} [${f.chunk.docId} L${f.chunk.startLine}-${f.chunk.endLine}] ${ans}${ev ? ` | 证据：${ev}` : ''}`;
     };
     const lines: string[] = [];
     lines.push(
@@ -244,35 +341,38 @@ function normalizeFinding(text: string): Omit<ChunkFinding, 'chunk' | 'memoHit'>
     const negative = /^(no|none|not relevant|irrelevant)\b/i.test(t) || /^(无|没有|否|不相关)/.test(t) || t === '';
     return { relevant: !negative, answer: t.slice(0, 2000), evidence: [] };
   }
+  let counts: Record<string, number> | undefined;
+  if (obj.counts && typeof obj.counts === 'object' && !Array.isArray(obj.counts)) {
+    counts = {};
+    for (const [k, v] of Object.entries(obj.counts)) {
+      const n = typeof v === 'number' ? v : Number(v);
+      if (Number.isFinite(n)) counts[k.trim().toLowerCase()] = n;
+    }
+    if (!Object.keys(counts).length) counts = undefined;
+  }
   const relevantRaw = obj.relevant;
-  const relevant = typeof relevantRaw === 'boolean' ? relevantRaw : String(relevantRaw).toLowerCase() === 'true';
+  const relevant =
+    typeof relevantRaw === 'boolean'
+      ? relevantRaw
+      : counts !== undefined || String(relevantRaw).toLowerCase() === 'true';
   const answer = typeof obj.answer === 'string' ? obj.answer : obj.answer === undefined ? '' : JSON.stringify(obj.answer);
   const evidence = Array.isArray(obj.evidence)
     ? obj.evidence
         .map((e) => {
           if (typeof e === 'string') return { quote: e };
           if (e && typeof e === 'object') {
-            const r = e as Record<string, unknown>;
-            const line = Number(r.line);
-            return { line: Number.isFinite(line) ? line : undefined, quote: String(r.quote ?? r.text ?? '') };
+            const line = 'line' in e ? Number(e.line) : Number.NaN;
+            const quote = 'quote' in e ? String(e.quote) : 'text' in e ? String(e.text) : '';
+            return { line: Number.isFinite(line) ? line : undefined, quote };
           }
           return undefined;
         })
         .filter((e): e is { line: number | undefined; quote: string } => !!e)
     : [];
-  let counts: Record<string, number> | undefined;
-  if (obj.counts && typeof obj.counts === 'object' && !Array.isArray(obj.counts)) {
-    counts = {};
-    for (const [k, v] of Object.entries(obj.counts as Record<string, unknown>)) {
-      const n = typeof v === 'number' ? v : Number(v);
-      if (Number.isFinite(n)) counts[k.trim().toLowerCase()] = n;
-    }
-    if (!Object.keys(counts).length) counts = undefined;
-  }
   return { relevant, answer, evidence, counts };
 }
 
-function sumCounts(findings: ChunkFinding[]): Record<string, number> | undefined {
+function sumCounts(findings: readonly ChunkFinding[]): Record<string, number> | undefined {
   let any = false;
   const totals: Record<string, number> = {};
   for (const f of findings) {
@@ -297,6 +397,11 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
         start_line: { type: 'integer', description: '可选：只扫描与此行区间重叠的分块（仅限单个文档）。' },
         end_line: { type: 'integer' },
         chunk_tokens: { type: 'integer', description: `可选：密集任务用更小的分块（2 的幂，最大 ${engine.defaultChunkTokens}）。` },
+        categories: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '可选（extract 计数/分类必填）：要统计的精确类别名称列表；用于跨查询复用缓存并自动汇总 counts。',
+        },
       },
       required: ['query'],
     },
@@ -310,6 +415,7 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
       if ((startLine !== undefined || endLine !== undefined) && (documents?.length ?? engine.store.list().length) !== 1) {
         throw new ToolArgumentError('start_line/end_line 要求恰好一个文档');
       }
+      const categories = argStringList(args, 'categories');
       const res = await engine.query({
         query,
         mode: modeRaw,
@@ -317,8 +423,10 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
         startLine,
         endLine,
         chunkTokens: argNumber(args, 'chunk_tokens'),
+        categories,
         signal: ctx.signal,
         usage: ctx.usage,
+        agent: ctx.agentName,
       });
       ctx.emit({
         type: 'llm_query',

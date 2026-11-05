@@ -1,6 +1,7 @@
 import { AgentFoldAgent, type AgentFoldConfig, type AgentRunResult } from './agent/agent-fold.js';
 import type { EventSink } from './agent/events.js';
 import type { ContextStore } from './context/store.js';
+import { ResearchBoard } from './context/board.js';
 import { UsageTracker } from './llm/usage.js';
 import { createBranchTool } from './tools/branch.js';
 import { createCalculatorTool } from './tools/calculator.js';
@@ -36,6 +37,7 @@ export interface RecursiveAgentFoldOptions {
   onEvent?: EventSink;
   usage?: UsageTracker;
   signal?: AbortSignal;
+  board?: ResearchBoard;
 }
 
 /**
@@ -50,6 +52,7 @@ export interface RecursiveAgentFoldOptions {
 export class RecursiveAgentFold {
   readonly usage: UsageTracker;
   readonly queryEngine?: LLMQueryEngine;
+  readonly board: ResearchBoard;
   private branchCounter = 0;
 
   constructor(readonly opts: RecursiveAgentFoldOptions) {
@@ -59,9 +62,13 @@ export class RecursiveAgentFold {
         if (opts.queryEngine.store !== opts.store) throw new Error('queryEngine must use the same ContextStore');
         this.queryEngine = opts.queryEngine;
       } else if (opts.queryLLM) {
-        this.queryEngine = new LLMQueryEngine(opts.queryLLM, opts.store, this.usage, opts.llmQuery);
+        this.queryEngine = new LLMQueryEngine(opts.queryLLM, opts.store, this.usage, {
+          ...opts.llmQuery,
+          board: opts.board,
+        });
       }
     }
+    this.board = opts.board ?? this.queryEngine?.board ?? new ResearchBoard();
   }
 
   /** Tools for an agent at the given depth (branch tool only below maxDepth). */
@@ -98,6 +105,7 @@ export class RecursiveAgentFold {
       usage: this.usage,
       onEvent: this.opts.onEvent,
       signal: this.opts.signal,
+      board: this.board,
     });
     return agent.run(question);
   }

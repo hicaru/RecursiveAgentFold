@@ -72,14 +72,19 @@ export function createModels(o: ModelOverrides = {}): BenchModels {
     retryMaxMs: 30_000,
     timeoutMs: envNum('RAF_TIMEOUT_MS', 900_000),
   };
+  const queryThinking = envThinking('RAF_QUERY_THINKING', 'disabled');
+  const queryExtraBody = envJSON('RAF_QUERY_EXTRA_BODY');
+  const rawQueryMax = envNum('RAF_QUERY_MAX_OUTPUT', 16384);
+  const queryMaxOutput =
+    queryThinking === 'enabled' || queryExtraBody !== undefined ? Math.max(16384, rawQueryMax) : rawQueryMax;
   const queryCfg = {
     baseUrl,
     apiKey,
     model: o.queryModel ?? env('RAF_QUERY_MODEL', 'glm-4.5-air')!,
     contextWindow: envNum('RAF_QUERY_CONTEXT', 128_000),
-    maxOutputTokens: envNum('RAF_QUERY_MAX_OUTPUT', 1024),
-    thinking: envThinking('RAF_QUERY_THINKING', 'disabled'),
-    extraBody: envJSON('RAF_QUERY_EXTRA_BODY'),
+    maxOutputTokens: queryMaxOutput,
+    thinking: queryThinking,
+    extraBody: queryExtraBody,
     temperature: 0,
     maxRetries: envNum('RAF_MAX_RETRIES', 8),
     retryBaseMs: envNum('RAF_RETRY_BASE_MS', 5000),
@@ -90,7 +95,7 @@ export function createModels(o: ModelOverrides = {}): BenchModels {
   const llmQuery: LLMQueryOptions = {
     reserveRatio: o.reserveRatio ?? envNum('RAF_RESERVE_RATIO', 0.3),
     maxChunkTokens: maxChunk,
-    concurrency: o.queryConcurrency ?? envNum('RAF_QUERY_CONCURRENCY', 4),
+    concurrency: o.queryConcurrency ?? envNum('RAF_QUERY_CONCURRENCY', 8),
   };
   return {
     root: new OpenAICompatibleClient(rootCfg),

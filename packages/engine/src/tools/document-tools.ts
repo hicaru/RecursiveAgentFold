@@ -89,6 +89,19 @@ export function createTallyTool(): Tool {
       }
       const top = Math.min(200, argNumber(args, 'top') ?? 25);
       const r = ctx.store.tally(pattern, { docIds: argStringList(args, 'documents'), ignoreCase: args.case_sensitive !== true });
+      if (ctx.board) {
+        const topCounts: Record<string, number> = {};
+        for (const [k, n] of r.counts.slice(0, 10)) topCounts[k] = n;
+        ctx.board.record({
+          agent: ctx.agentName,
+          kind: 'tally',
+          scope: (argStringList(args, 'documents') ?? ['all']).join(','),
+          key: pattern,
+          summary: `/${pattern}/ → ${r.totalMatches} 匹配，${r.distinct} 不同值: ` +
+            r.counts.slice(0, 5).map(([k, n]) => `${k}=${n}`).join(', '),
+          counts: topCounts,
+        });
+      }
       const rows = r.counts.slice(0, top).map(([k, n]) => `${n}\t${k}`);
       return `tally /${pattern}/：${r.totalMatches} 个匹配，${r.distinct} 个不同值${r.distinct > top ? `（仅显示前 ${top} 个）` : ''}\n次数\t值\n${rows.join('\n')}`;
     },
