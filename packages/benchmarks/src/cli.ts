@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import { compareRuns } from './compare.js';
 import { createModels, loadEnv, repoRoot } from './config.js';
 import { buildNeedleTasks } from './needle/needle.js';
 import { fetchOolong } from './oolong/dataset.js';
@@ -17,6 +18,7 @@ Usage: pnpm bench <command> [options]
 Commands:
   models                         List models exposed by the configured endpoint
   prompt-check                   Live check of the Chinese prompts: per-tool probes, folding, reader, e2e
+  compare <oldDir> <newDir>      Compare two result dirs by task id (score, steps, format, tokens)
   fetch-oolong                   Download + cache OOLONG-synth rows (HTTP range reads)
   oolong                         Run OOLONG-synth (trec_coarse@131K etc.)
   needle                         Run the synthetic mega-context needle/count benchmark
@@ -54,6 +56,9 @@ needle:
   --tokens <n>                   haystack size (default 200000)
   --tasks <n>                    number of questions (default 4)
   --seed <n>
+
+compare:
+  pnpm bench compare <oldDir> <newDir>   join by task id; report common non-filtered
 `;
 
 function opt<T>(v: unknown, f: (s: string) => T): T | undefined {
@@ -96,6 +101,13 @@ async function main() {
   const cmd = positionals[0];
   if (!cmd || values.help) {
     console.log(HELP);
+    return;
+  }
+  if (cmd === 'compare') {
+    const [oldDir, newDir] = positionals.slice(1);
+    if (!oldDir || !newDir) throw new Error('usage: pnpm bench compare <oldDir> <newDir>');
+    const resolvePath = (p: string) => resolve(process.env.INIT_CWD ?? process.cwd(), p);
+    console.log(compareRuns(resolvePath(oldDir), resolvePath(newDir)));
     return;
   }
   const root = repoRoot();

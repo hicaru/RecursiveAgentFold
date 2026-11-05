@@ -33,15 +33,16 @@ export const AGENT_SYSTEM_PROMPT_TEMPLATE = `你是 AgentFold，一个主动管�
 - n 是最新交互 "[步骤 n]" 的编号，range 终点必须是 n。
 - 细粒度压缩 [n, n]：只把最新交互压成新的细块。默认用它。
 - 深度合并 [k, n]（k < n，k 必须是已有块的起点）：把区间内所有块和最新交互合成一条粗摘要。子任务结束或线索走不通时用它。
-- 摘要永久替换原文。必须保留答案所需事实：精确数字、部分计数、名称、文档 id、行号、候选答案、已排除项。丢弃噪声。
-- 第 0 步没有历史，省略 <folding>。
+- 摘要永久替换原文，必须是单行 JSON 字符串：不要换行，避免英文双引号（用「」或 JSON 转义）。必须保留答案所需事实：精确数字、部分计数、名称、文档 id、行号、候选答案、已排除项。丢弃噪声。
+- 第 0 步没有历史：不要输出 <folding> 标签（空标签也不行）。
 
 {{TOOL_GUIDANCE}}
 
 # 规则
 - 每次只调用一个工具，参数必须是合法 JSON。
 - 不重复已失败或被摘要覆盖的调用。
-- 证据足够就立即作答。绝不编造文档内容；信息缺失就在答案中说明。`;
+- 证据足够就立即作答。绝不编造文档内容；信息缺失就在答案中说明。
+- 用题目所用的语言作答；类别标签、人名、数字保持题目原文的写法。`;
 
 /** Per-tool guidance; only guidance for tools that are actually available is rendered. */
 export const TOOL_GUIDANCE: Record<string, string> = {
@@ -83,7 +84,9 @@ export const FORMAT_REMINDER = (step: number, latest: number | undefined) =>
 export const FORMAT_REPAIR = (errors: string[], step: number, latest: number | undefined) =>
   `你的上一条回复无法解析：${errors.join('；')}。\n` +
   `请重新输出第 ${step} 步的完整回复，并严格使用规定的标签` +
-  (latest === undefined ? '（第 0 步不要 <folding>）。' : `（<folding> 的 range 终点必须是 ${latest}）。`);
+  (latest === undefined
+    ? '（第 0 步不要 <folding>，空标签也不要）。'
+    : `（<folding> 的 range 终点必须是 ${latest}；summary 必须是单行 JSON 字符串，英文双引号要转义）。`);
 
 export const FORCE_ANSWER =
   '已达到步数上限。不要再调用工具。立即在 <answer>...</answer> 中给出最佳最终答案（照常包含 <folding>）。';

@@ -132,7 +132,7 @@ export function parseAgentResponse(text: string, opts: ParseOptions): ParsedResp
   const out: ParsedResponse = { errors, warnings, think: thinkRaw ?? opts.reasoning };
 
   const foldRaw = extractTag(body, 'folding');
-  if (foldRaw !== undefined) out.folding = parseFolding(foldRaw, warnings, errors);
+  if (foldRaw !== undefined && foldRaw.trim() !== '') out.folding = parseFolding(foldRaw, warnings, errors);
   else if (opts.expectFolding) warnings.push('缺少 <folding>');
 
   const motivation = extractTag(body, 'motivation') ?? extractTag(body, 'explanation' as Tag);

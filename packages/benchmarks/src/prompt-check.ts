@@ -70,14 +70,14 @@ function countText(): string {
 
 function ticketsText(): string {
   const kinds = ['客户投诉包裹延迟三天，要求赔偿。', '客户咨询如何修改账户密码。', '客户建议增加周末配送时段。'];
-  return numbered(360, (i) => `工单 ${i + 1}：${kinds[i % kinds.length] ?? ''}`);
+  return numbered(1200, (i) => `工单 ${i + 1}：${kinds[i % kinds.length] ?? ''}`);
 }
 
 const PROBES: readonly ToolProbe[] = Object.freeze([
   {
     tool: 'llm_query',
-    question: '文档 tickets 有 360 条工单。按语义把每条工单分为「配送」「账户」「建议」三类，并统计每类数量。不要用关键词计数。',
-    docs: [{ id: 'tickets', title: '客服工单（约 360 条）', text: ticketsText() }],
+    question: '文档 tickets 有 1200 条工单，分布在全文。请用长文阅读器扫描全部分块，按语义把每条工单分为「配送」「账户」「建议」三类，并统计每类数量。不要用关键词计数。',
+    docs: [{ id: 'tickets', title: '客服工单（约 1200 条）', text: ticketsText() }],
     checkArgs: (a) => {
       if (!isText(a.query)) return 'query must be a non-empty string';
       return a.mode === 'extract' ? undefined : 'mode must be "extract" for semantic counting';
@@ -86,7 +86,7 @@ const PROBES: readonly ToolProbe[] = Object.freeze([
       if (!o.includes('"counts" 已汇总')) return 'reader returned no summed counts';
       const tail = /"counts" 已汇总[^：]*：(.+)/.exec(o)?.[1] ?? '';
       const total = [...tail.matchAll(/=(\d+)/g)].reduce((a, m) => a + Number(m[1]), 0);
-      return total === 360 ? undefined : `summed counts total ${total}, expected 360`;
+      return total === 1200 ? undefined : `summed counts total ${total}, expected 1200`;
     },
   },
   {

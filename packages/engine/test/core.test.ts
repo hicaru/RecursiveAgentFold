@@ -85,6 +85,17 @@ Shift focus.
     expect(p.errors.length).toBe(1);
   });
 
+  it('ignores an empty <folding> when none is expected, warns when one is', () => {
+    const tool = '<motivation>x</motivation><tool_call>{"name":"grep","arguments":{"pattern":"x"}}</tool_call>';
+    const atStep0 = parseAgentResponse(`<folding>\n</folding>${tool}`, { expectFolding: false });
+    expect(atStep0.errors).toEqual([]);
+    expect(atStep0.folding).toBeUndefined();
+    const atStep1 = parseAgentResponse(`<folding></folding>${tool}`, { expectFolding: true });
+    expect(atStep1.errors).toEqual([]);
+    expect(atStep1.folding).toBeUndefined();
+    expect(atStep1.warnings).toContain('缺少 <folding>');
+  });
+
   it('handles unclosed tags and raw newlines in JSON strings', () => {
     const p = parseAgentResponse('<folding>{"range": [2, 4], "summary": "line1\nline2"}</folding>\n<motivation>go\n<tool_call>{"name":"grep","arguments":{"pattern":"x"}}', { expectFolding: true });
     expect(p.errors).toEqual([]);

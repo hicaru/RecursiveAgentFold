@@ -80,6 +80,8 @@ The table above was measured before the prompts moved to Chinese. This bounded r
 
 By task type: `LEAST_FREQ` 1/1.000, `RELATIVE_FREQ` 8/0.625, `MOST_FREQ` 1/0.000. Results: `results/2026-11-05-agentfold-cn-oolong-trec10`, `results/2026-11-05-agentfold-cn-needle-1m`.
 
+A post-fix diagnostic on the five problematic tasks (`17000208`–`17000212`) is in `results/2026-11-05-agentfold-cn-fix4-oolong5`: 2/5 correct, 2 provider-filtered, 4 format repairs over 67 calls (6 in the same five tasks before the fix). The answer-language rule fixed `17000212`. `17000208` remains unstable: a keyword-bucket shortcut gives the wrong label, and reading the corpus around lines 605–904 triggers provider moderation (1301). The `MOST_FREQ` accuracy issue is still open.
+
 ## Benchmarks
 
 ```bash
