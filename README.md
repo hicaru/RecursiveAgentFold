@@ -97,6 +97,8 @@ pnpm bench oolong --mock --limit 4                          # offline harness dr
 
 The agent and reader system prompts plus all tool descriptions are Chinese and compact (agent system text 4,076 → 1,181 characters; reader 1,033 → 385). `prompt-check` sends the real root system prompt once per tool (all default tools available) and fails unless the model chooses that tool, passes valid arguments, and the call executes. It also checks folding at step 1, the `llm_query` JSON/counts contract, and one tiny end-to-end run. Use `--only <tool|folding|reader|e2e>` to run a single check.
 
+`--system-extra "<text>"` appends a static block to the agent system prompt for A/B runs and records it in `config.json`. A bilingual/few-shot frequency hint tested this way still caused read sampling into the moderation-sensitive corpus region around lines 800–900 and did not fix `17000208`.
+
 Each run writes `results/<stamp>-<bench>-<method>/` containing:
 
 - `config.json`

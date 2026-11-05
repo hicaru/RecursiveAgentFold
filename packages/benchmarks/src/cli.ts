@@ -39,6 +39,7 @@ Common options:
   --mock                         offline scripted models (harness dry-run, scores meaningless)
   --no-share-memo                do not share the llm_query memo across questions of one context
   --only <name>                  prompt-check only: a tool name, folding, reader or e2e
+  --system-extra <text>          append text to the agent system prompt (static, for A/B)
 
 oolong / fetch-oolong:
   --dataset <name>               default trec_coarse
@@ -89,6 +90,7 @@ async function main() {
       'no-hint': { type: 'boolean', default: false },
       'no-share-memo': { type: 'boolean', default: false },
       only: { type: 'string' },
+      'system-extra': { type: 'string' },
       mock: { type: 'boolean', default: false },
       tools: { type: 'string' },
       resume: { type: 'boolean', default: false },
@@ -184,6 +186,7 @@ async function main() {
     taskIds: tasks.map((t) => t.id),
     argv: process.argv.slice(2),
     tools: values.tools ?? (method === 'raf' ? 'all' : method === 'agentfold' ? 'grep,read,calculator' : 'none'),
+    systemPromptExtra: values['system-extra'],
     models: models.describe(),
   };
   writeFileSync(join(outDir, 'config.json'), JSON.stringify(config, null, 2));
@@ -201,6 +204,7 @@ async function main() {
     resume: values.resume,
     documentTools: { maxReadLines: 300, maxReadTokens: 12_000, maxGrepMatches: 60 },
     maxObservationTokens: 14_000,
+    systemPromptExtra: values['system-extra'],
     outDir,
   });
   const prices = { root: priceFor(models.root.profile.name), query: priceFor(models.query.profile.name) };
