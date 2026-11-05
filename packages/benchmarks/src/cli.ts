@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import { DEFAULT_DOCUMENT_TOOL_OPTIONS, DEFAULT_MAX_OBSERVATION_TOKENS } from '@raf/engine';
 import { compareRuns } from './compare.js';
 import { createModels, loadEnv, repoRoot } from './config.js';
 import { buildNeedleTasks } from './needle/needle.js';
@@ -94,6 +95,10 @@ async function main() {
       mock: { type: 'boolean', default: false },
       tools: { type: 'string' },
       resume: { type: 'boolean', default: false },
+      'max-read-lines': { type: 'string' },
+      'max-read-tokens': { type: 'string' },
+      'max-grep-matches': { type: 'string' },
+      'max-obs-tokens': { type: 'string' },
       tokens: { type: 'string', default: '200000' },
       tasks: { type: 'string', default: '4' },
       seed: { type: 'string', default: '42' },
@@ -202,8 +207,12 @@ async function main() {
     shareQueryMemo: !values['no-share-memo'],
     tools: values.tools?.split(',').map((t) => t.trim()).filter(Boolean),
     resume: values.resume,
-    documentTools: { maxReadLines: 300, maxReadTokens: 12_000, maxGrepMatches: 60 },
-    maxObservationTokens: 14_000,
+    documentTools: {
+      maxReadLines: opt(values['max-read-lines'], Number) ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxReadLines,
+      maxReadTokens: opt(values['max-read-tokens'], Number) ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxReadTokens,
+      maxGrepMatches: opt(values['max-grep-matches'], Number) ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxGrepMatches,
+    },
+    maxObservationTokens: opt(values['max-obs-tokens'], Number) ?? DEFAULT_MAX_OBSERVATION_TOKENS,
     systemPromptExtra: values['system-extra'],
     outDir,
   });

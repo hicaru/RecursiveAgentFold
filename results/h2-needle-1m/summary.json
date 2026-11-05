@@ -1,0 +1,63 @@
+{
+  "bench": "needle",
+  "method": "agentfold",
+  "n": 4,
+  "meanScore": 1,
+  "correct": 4,
+  "meanOfficial": 1,
+  "meanLenient": 1,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 1,
+  "meanSteps": 2.5,
+  "meanWallSec": 22.88825,
+  "formatIssues": 1,
+  "folds": {
+    "granular": 6,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 0,
+  "tokens": {
+    "prompt": 12970,
+    "cached": 9472,
+    "completion": 4041,
+    "cacheHitRate": 0.7303006939090209
+  },
+  "byRole": {
+    "root": {
+      "calls": 10,
+      "promptTokens": 12970,
+      "completionTokens": 4041,
+      "cachedTokens": 9472,
+      "reasoningTokens": 2493,
+      "latencyMs": 91466,
+      "errors": 0,
+      "cacheHitRate": 0.7303006939090209
+    }
+  },
+  "byTask": {
+    "lookup": {
+      "n": 2,
+      "score": 1
+    },
+    "count": {
+      "n": 2,
+      "score": 1
+    }
+  },
+  "byAnswerType": {
+    "ANSWER_TYPE.NUMERIC": {
+      "n": 4,
+      "score": 1
+    }
+  },
+  "cost": {
+    "totalUsd": 0.02514,
+    "perTaskUsd": 0.006285,
+    "cacheSavedUsd": 0.010798,
+    "byRoleUsd": {
+      "root": 0.02514
+    }
+  }
+}

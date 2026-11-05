@@ -5,6 +5,9 @@ import { RecursiveAgentFold } from '../src/runtime.js';
 import { computeChunkTokens, LLMQueryEngine } from '../src/tools/llm-query.js';
 import { UsageTracker } from '../src/llm/usage.js';
 import type { AgentEvent } from '../src/agent/events.js';
+import { AgentFoldAgent } from '../src/agent/agent-fold.js';
+import { FoldState } from '../src/fold/state.js';
+import { createGrepTool, createReadTool } from '../src/tools/document-tools.js';
 
 function haystack(lines: number, needleAt: number): string {
   const out: string[] = [];
@@ -134,5 +137,80 @@ describe('RecursiveAgentFold end-to-end (scripted)', () => {
     expect(res.answer).toBe('beta');
     expect(res.terminated).toBe('forced_answer');
     expect(res.formatIssues).toBeGreaterThanOrEqual(2);
+  });
+  it('places document manifest with sample preview before question and stabilizes history header across steps', () => {
+    const store = new ContextStore();
+    store.add(haystack(30, 5), { id: 'ctx', title: 'haystack' });
+    const llm = new ScriptedLLM(() => '<answer>done</answer>');
+    const agent = new AgentFoldAgent({ llm, tools: [], store });
+    const state0 = new FoldState();
+    const msgQ1Step0 = agent.buildMessages('Question A?', state0)[1]?.content ?? '';
+    const msgQ2Step0 = agent.buildMessages('Question B?', state0)[1]?.content ?? '';
+    const taskIdx1 = msgQ1Step0.indexOf('\n\n### 任务\n');
+    const taskIdx2 = msgQ2Step0.indexOf('\n\n### 任务\n');
+    expect(taskIdx1).toBeGreaterThan(0);
+    expect(taskIdx1).toBe(taskIdx2);
+    expect(msgQ1Step0.slice(0, taskIdx1)).toBe(msgQ2Step0.slice(0, taskIdx2));
+    expect(msgQ1Step0.slice(0, taskIdx1)).toContain('示例首行：');
+    expect(msgQ1Step0.slice(0, taskIdx1)).toContain('1| Filler line 1:');
+    expect(msgQ1Step0.slice(0, taskIdx1)).toContain('2| Filler line 2:');
+
+    const state1 = new FoldState();
+    state1.setLatest({
+      step: 0,
+      motivation: 'probe',
+      action: { name: 'grep', arguments: { pattern: 'passcode' } },
+      observation: 'found 1',
+    });
+    const msgQ1Step1 = agent.buildMessages('Question A?', state1)[1]?.content ?? '';
+    const histHeader = '\n\n### 历史步骤\n';
+    const histIdx0 = msgQ1Step0.indexOf(histHeader);
+    const histIdx1 = msgQ1Step1.indexOf(histHeader);
+    expect(histIdx0).toBeGreaterThan(0);
+    expect(histIdx0).toBe(histIdx1);
+    expect(msgQ1Step0.slice(0, histIdx0 + histHeader.length)).toBe(msgQ1Step1.slice(0, histIdx1 + histHeader.length));
+  });
+
+  it('defers premature mid-run deep folds to granular to preserve cache, while allowing final-turn or threshold-met deep folds', async () => {
+    const store = new ContextStore();
+    store.add(haystack(40, 10), { id: 'ctx', title: 'haystack' });
+    const events: AgentEvent[] = [];
+    const llm = new ScriptedLLM((req) => {
+      const user = req.messages[1]?.content ?? '';
+      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      switch (step) {
+        case 0:
+          return '<motivation>step 0</motivation><tool_call>{"name":"grep","arguments":{"pattern":"passcode","max_matches":5}}</tool_call>';
+        case 1:
+          return '<folding>{"range":[0,0],"summary":"s0"}</folding><motivation>step 1</motivation><tool_call>{"name":"read","arguments":{"document":"ctx","start_line":10,"end_line":10}}</tool_call>';
+        case 2:
+          // Mid-run deep fold across only 1 existing block (< minDeepFoldBlocks=3): should be deferred to granular [1,1]
+          return '<folding>{"range":[0,1],"summary":"premature merge"}</folding><motivation>step 2</motivation><tool_call>{"name":"read","arguments":{"document":"ctx","start_line":10,"end_line":10}}</tool_call>';
+        case 3:
+          // Mid-run deep fold across 2 existing blocks (< minDeepFoldBlocks=3): should be deferred to granular [2,2]
+          return '<folding>{"range":[0,2],"summary":"still premature"}</folding><motivation>step 3</motivation><tool_call>{"name":"read","arguments":{"document":"ctx","start_line":10,"end_line":10}}</tool_call>';
+        case 4:
+          // Mid-run deep fold across 3 existing blocks (>= minDeepFoldBlocks=3): should execute as deep [0,3]
+          return '<folding>{"range":[0,3],"summary":"merged 0..3"}</folding><motivation>step 4</motivation><tool_call>{"name":"read","arguments":{"document":"ctx","start_line":10,"end_line":10}}</tool_call>';
+        default:
+          // Final-turn deep fold (with <answer>) is always allowed even with 1 block
+          return '<folding>{"range":[0,4],"summary":"final summary"}</folding><answer>7341</answer>';
+      }
+    });
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [createGrepTool(), createReadTool()],
+      store,
+      minDeepFoldBlocks: 3,
+      onEvent: (e) => events.push(e),
+    });
+    const res = await agent.run('What is the passcode?');
+    expect(res.answer).toBe('7341');
+    const folds = events.filter((e): e is Extract<AgentEvent, { type: 'fold' }> => e.type === 'fold');
+    expect(folds.map((f) => f.outcome.kind)).toEqual(['granular', 'granular', 'granular', 'deep', 'deep']);
+    expect(folds[1]?.outcome.directive.range).toEqual([1, 1]);
+    expect(folds[1]?.outcome.corrections.some((c) => c.includes('deferred to granular'))).toBe(true);
+    expect(folds[3]?.outcome.directive.range).toEqual([0, 3]);
+    expect(folds[4]?.outcome.directive.range).toEqual([0, 4]);
   });
 });

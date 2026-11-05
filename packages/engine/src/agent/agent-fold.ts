@@ -1,5 +1,5 @@
 import type { ContextStore } from '../context/store.js';
-import { FoldState, fallbackSummary, type FoldStateSnapshot, type Interaction } from '../fold/state.js';
+import { FoldState, fallbackSummary, type FoldDirective, type FoldStateSnapshot, type Interaction } from '../fold/state.js';
 import { UsageTracker } from '../llm/usage.js';
 import { buildAgentSystemPrompt, FORCE_ANSWER, FORMAT_REMINDER, FORMAT_REPAIR, renderBlockLabel } from '../prompts/agent.js';
 import { parseAgentResponse, type ParsedResponse } from '../protocol/parser.js';
@@ -16,6 +16,8 @@ export interface AgentFoldConfig {
   maxSteps?: number;
   /** Tool observations longer than this are truncated (head+tail). */
   maxObservationTokens?: number;
+  /** Minimum retracted blocks required for a mid-run deep fold (default 6). */
+  readonly minDeepFoldBlocks?: number;
   /** Re-ask the model when its response cannot be parsed. */
   maxFormatRetries?: number;
   /** After maxSteps, ask once more for a final answer instead of failing. */
@@ -39,6 +41,8 @@ export type Termination = 'answer' | 'forced_answer' | 'max_steps' | 'error' | '
 
 /** Provider safety refusal (Z.ai 1301): no retry loop can repair the payload. */
 const PROVIDER_REFUSAL = /\/1301\]|unsafe or sensitive/i;
+export const DEFAULT_MAX_OBSERVATION_TOKENS = 3200;
+export const DEFAULT_MIN_DEEP_FOLD_BLOCKS = 6;
 
 export interface AgentRunResult {
   answer: string | null;
@@ -80,18 +84,21 @@ export class AgentFoldAgent {
 
   /** Build C_t = (Q, T, S, I). Exposed for tests and cache analysis. */
   buildMessages(question: string, state: FoldState, extraUserTail?: string): ChatMessage[] {
-    const parts: string[] = [];
-    parts.push(`### 任务\n${question.trim()}`);
-    parts.push(`### 文档\n${this.cfg.store.manifest()}`);
     const blocks = state.blocks;
     const latest = state.latest;
-    if (blocks.length || latest) {
-      const prev: string[] = ['### 历史步骤'];
+    const prev: string[] = ['### 历史步骤'];
+    if (blocks.length === 0 && !latest) {
+      prev.push('（无）');
+    } else {
       for (const b of blocks) prev.push(`**${renderBlockLabel(b)}** ${b.summary}`);
       if (latest) prev.push(renderLatest(latest));
-      parts.push(prev.join('\n'));
     }
-    parts.push(FORMAT_REMINDER(state.currentStep, latest?.step));
+    const parts: string[] = [
+      `### 文档\n${this.cfg.store.manifest()}`,
+      `### 任务\n${question.trim()}`,
+      prev.join('\n'),
+      FORMAT_REMINDER(state.currentStep, latest?.step),
+    ];
     if (extraUserTail) parts.push(extraUserTail);
     return [
       { role: 'system', content: this.systemPrompt, cacheBreakpoint: true },
@@ -180,8 +187,24 @@ export class AgentFoldAgent {
       // FOLD
       if (state.latest) {
         if (!parsed.folding) formatIssues++;
-        const requested = parsed.folding ?? { range: [state.latest.step, state.latest.step] as [number, number], summary: fallbackSummary(state.latest) };
+        const latestStep = state.latest.step;
+        let requested: FoldDirective = parsed.folding ?? {
+          range: [latestStep, latestStep],
+          summary: fallbackSummary(state.latest),
+        };
+        let deferredDeep = false;
+        const minDeep = this.cfg.minDeepFoldBlocks ?? DEFAULT_MIN_DEEP_FOLD_BLOCKS;
+        if (parsed.answer === undefined && requested.range[0] < latestStep && minDeep > 1) {
+          const wouldRetract = state.blocks.filter((b) => b.to >= requested.range[0]).length;
+          if (wouldRetract < minDeep) {
+            requested = { range: [latestStep, latestStep], summary: requested.summary };
+            deferredDeep = true;
+          }
+        }
         const outcome = state.applyFold(requested);
+        if (deferredDeep) {
+          outcome.corrections.push(`deep fold (< ${minDeep} blocks) deferred to granular [${latestStep}, ${latestStep}] to preserve cache`);
+        }
         this.emit({ type: 'fold', agent: this.name, step, outcome, requested: parsed.folding });
       }
 
@@ -224,7 +247,7 @@ export class AgentFoldAgent {
         observation = `错误：${error}`;
       }
     }
-    const { text } = truncateToTokens(observation, this.cfg.maxObservationTokens ?? 8000, this.estimator);
+    const { text } = truncateToTokens(observation, this.cfg.maxObservationTokens ?? DEFAULT_MAX_OBSERVATION_TOKENS, this.estimator);
     this.emit({ type: 'tool_result', agent: this.name, step, name, observation: text, tokens: this.estimator.count(text), error });
     return text;
   }

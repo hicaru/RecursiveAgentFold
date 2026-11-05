@@ -38,9 +38,15 @@ export interface GrepMatch {
 }
 
 export interface ContextStoreOptions {
-  estimator?: TokenEstimator;
+  readonly estimator?: TokenEstimator;
   /** Lines longer than this are hard-wrapped so chunking stays line-aligned. */
-  maxLineChars?: number;
+  readonly maxLineChars?: number;
+  /** Sample lines shown per document in manifest() when doc has >= previewMinLines. Default 2. */
+  readonly previewLines?: number;
+  /** Minimum document line count required before manifest() renders sample lines. Default 20. */
+  readonly previewMinLines?: number;
+  /** Max characters per sample line in manifest(). Default 160. */
+  readonly previewLineChars?: number;
 }
 
 /**
@@ -57,10 +63,16 @@ export class ContextStore {
   private readonly chunkCache = new Map<string, Chunk[]>();
   private readonly estimator: TokenEstimator;
   private readonly maxLineChars: number;
+  private readonly previewLines: number;
+  private readonly previewMinLines: number;
+  private readonly previewLineChars: number;
 
   constructor(opts: ContextStoreOptions = {}) {
     this.estimator = opts.estimator ?? defaultEstimator;
     this.maxLineChars = opts.maxLineChars ?? 2000;
+    this.previewLines = opts.previewLines ?? 2;
+    this.previewMinLines = opts.previewMinLines ?? 20;
+    this.previewLineChars = opts.previewLineChars ?? 160;
   }
 
   add(text: string, opts: AddDocumentOptions = {}): StoredDocument {
@@ -111,9 +123,21 @@ export class ContextStore {
   /** Stable manifest rendered into the agent prompt (part of the cached prefix). */
   manifest(): string {
     if (this.docs.size === 0) return '（未加载文档）';
-    return this.list()
-      .map((d) => `- id: \`${d.id}\` — ${d.title} — 约 ${d.tokens.toLocaleString('en-US')} token，${d.lines.length.toLocaleString('en-US')} 行`)
-      .join('\n');
+    const out: string[] = [];
+    for (const d of this.docs.values()) {
+      out.push(`- id: \`${d.id}\` — ${d.title} — 约 ${d.tokens.toLocaleString('en-US')} token，${d.lines.length.toLocaleString('en-US')} 行`);
+      if (this.previewLines > 0 && d.lines.length >= this.previewMinLines) {
+        out.push('  示例首行：');
+        let shown = 0;
+        for (let i = 0; i < d.lines.length && shown < this.previewLines; i++) {
+          const line = d.lines[i] ?? '';
+          if (!line.trim()) continue;
+          out.push(`  ${i + 1}| ${line.length > this.previewLineChars ? `${line.slice(0, this.previewLineChars)}…` : line}`);
+          shown++;
+        }
+      }
+    }
+    return out.join('\n');
   }
 
   /** Deterministic line-aligned chunking, memoized per (doc, chunkTokens). */

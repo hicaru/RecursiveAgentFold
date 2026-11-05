@@ -2,13 +2,19 @@ import { truncateToTokens } from '../tokens.js';
 import { argNumber, argString, argStringList, ToolArgumentError, type Tool } from './types.js';
 
 export interface DocumentToolOptions {
-  /** Max lines returned by one read. Default 200. */
-  maxReadLines?: number;
-  /** Max tokens returned by one read. Default 4000. */
-  maxReadTokens?: number;
-  /** Max matching lines listed by grep. Default 40. */
-  maxGrepMatches?: number;
+  /** Max lines returned by one read. Default 80. */
+  readonly maxReadLines?: number;
+  /** Max tokens returned by one read. Default 2400. */
+  readonly maxReadTokens?: number;
+  /** Max matching lines listed by grep. Default 25. */
+  readonly maxGrepMatches?: number;
 }
+
+export const DEFAULT_DOCUMENT_TOOL_OPTIONS: Readonly<Required<DocumentToolOptions>> = Object.freeze({
+  maxReadLines: 80,
+  maxReadTokens: 2400,
+  maxGrepMatches: 25,
+});
 
 export function createListDocumentsTool(): Tool {
   return {
@@ -32,7 +38,7 @@ export function createGrepTool(opts: DocumentToolOptions = {}): Tool {
         pattern: { type: 'string', description: 'JavaScript 正则表达式。' },
         documents: { type: 'array', items: { type: 'string' }, description: '文档 id（默认：全部）。' },
         case_sensitive: { type: 'boolean', default: false },
-        max_matches: { type: 'integer', description: `列出多少行（默认 ${opts.maxGrepMatches ?? 40}，最大 200）。` },
+        max_matches: { type: 'integer', description: `列出多少行（默认 ${opts.maxGrepMatches ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxGrepMatches}，最大 100）。` },
       },
       required: ['pattern'],
     },
@@ -43,7 +49,7 @@ export function createGrepTool(opts: DocumentToolOptions = {}): Tool {
       } catch (e) {
         throw new ToolArgumentError(`无效正则：${(e as Error).message}`);
       }
-      const max = Math.min(200, argNumber(args, 'max_matches') ?? opts.maxGrepMatches ?? 40);
+      const max = Math.min(100, argNumber(args, 'max_matches') ?? opts.maxGrepMatches ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxGrepMatches);
       const r = ctx.store.grep(pattern, {
         docIds: argStringList(args, 'documents'),
         ignoreCase: args.case_sensitive !== true,
@@ -54,7 +60,7 @@ export function createGrepTool(opts: DocumentToolOptions = {}): Tool {
         .join('，')}`;
       const body = r.matches.map((m) => `${m.docId}:${m.line}| ${m.text}`).join('\n');
       const more = r.total > r.matches.length ? `\n… 另有 ${r.total - r.matches.length} 行匹配未显示` : '';
-      return truncateToTokens(`${head}${body ? `\n${body}` : ''}${more}`, opts.maxReadTokens ?? 4000).text;
+      return truncateToTokens(`${head}${body ? `\n${body}` : ''}${more}`, opts.maxReadTokens ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxReadTokens).text;
     },
   };
 }
@@ -90,7 +96,7 @@ export function createTallyTool(): Tool {
 }
 
 export function createReadTool(opts: DocumentToolOptions = {}): Tool {
-  const maxLines = opts.maxReadLines ?? 200;
+  const maxLines = opts.maxReadLines ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxReadLines;
   return {
     name: 'read',
     description: `读取已存文档的精确行区间（每次最多 ${maxLines} 行）。仅用于对 llm_query 或 grep 定位到的位置做精确确认。`,
@@ -114,7 +120,7 @@ export function createReadTool(opts: DocumentToolOptions = {}): Tool {
       }
       const r = ctx.store.read(doc, s, e);
       const header = `${doc} 第 ${r.startLine}-${r.endLine} 行，共 ${r.totalLines} 行${note}`;
-      return truncateToTokens(`${header}\n${r.text}`, opts.maxReadTokens ?? 4000).text;
+      return truncateToTokens(`${header}\n${r.text}`, opts.maxReadTokens ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxReadTokens).text;
     },
   };
 }
