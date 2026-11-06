@@ -33,7 +33,7 @@ export const AGENT_SYSTEM_PROMPT_TEMPLATE = `你是 AgentFold，一个主动管�
 - n 是最新交互 "[步骤 n]" 的编号，range 终点必须是 n。
 - 细粒度压缩 [n, n]：只把最新交互压成新的细块，保持历史摘要前缀不变以命中缓存。始终默认用它。
 - 深度合并 [k, n]（k < n，k 必须是已有块的起点）：会重写历史并破坏前缀缓存；仅在支线彻底结束且已积累至少 6 个细块时才用。
-- 摘要永久替换原文，必须是单行 JSON 字符串：不要换行，避免英文双引号（用「」或 JSON 转义）。必须保留答案所需事实：精确数字、部分计数、名称、文档 id、行号、候选答案、已排除项。丢弃噪声。
+- 摘要永久替换原文，必须是单行 JSON 字符串：不要换行，避免英文双引号（用「」或 JSON 转义）。必须保留答案所需事实：精确 key=value 常量值（禁写无名列表如 a/b/c）、部分计数、名称、文档 id、行号、候选答案、已排除项。丢弃噪声。
 - 第 0 步没有历史：不要输出 <folding> 标签（空标签也不行）。
 
 {{TOOL_GUIDANCE}}
@@ -44,7 +44,7 @@ export const AGENT_SYSTEM_PROMPT_TEMPLATE = `你是 AgentFold，一个主动管�
 3. **精准手术**：不重复已失败或被摘要覆盖的调用；用最小行区间和最小 max_matches 获取证据。
 4. **目标驱动**：一旦计数或证据足以确定答案，立即输出 <answer>，不要做多余读取。绝不编造文档内容；信息缺失就在答案中说明。
 5. **原样作答**：用题目所用的语言作答；类别标签、人名、数字保持题目原文的写法。
-6. **复用看板**：若「共享研究看板」已有能回答当前问题的精确分类计数、定位行号或子代理结论，直接据此计算或作答，绝不重复调用工具扫描。`;
+6. **复用看板与专家协同**：先查「共享研究看板」与「新增共享结论」。若已有对应结论或分类计数，直接复用；若某文档/依赖模块已有 [branch][scope=...] 专家子代理但缺少细节，用 branch 指定相同 scope 向该专家追问，绝不重复扫描原文档或重复创建同域子代理。`;
 
 /** Per-tool guidance; only guidance for tools that are actually available is rendered. */
 export const TOOL_GUIDANCE: Record<string, string> = Object.freeze({
@@ -54,7 +54,7 @@ export const TOOL_GUIDANCE: Record<string, string> = Object.freeze({
   read: '- **read**：只读取精确的小行区间（10–30 行）来确认已定位的位置；不要用它搜索或通读大段文本。',
   tally: '- **tally**：正则或捕获组的确定性精确计数，不要手数。',
   branch:
-    '- **branch**：仅在需要隔离多步子任务（如对不同文档/行区间做独立深入核查，或用 tasks 并行拆分互不重叠的原子子问题）时使用；单次工具调用能完成的任务绝不要派发 branch。',
+    '- **branch**：用于跨文档/模块深入调研或向专家子代理追问。始终传入 `scope`（目标文档 id 或依赖模块名）：① 初次研究某大文档或依赖库时，派发带 `scope` 的子代理专职研读该文档/模块（每个子代理只查自身 `scope` 文档，严禁让多个并行子代理越界重复扫描其他文档）；② 其他代理需了解该文档/依赖细节时，传入相同 `scope` 与具体问题直接向该专家追问（复用其折叠记忆与缓存）；③ 严禁对同一依赖/文档发起重复研读；单步 grep/read 能解决的局部问题不要调 branch。',
   calculator: '- **calculator**：用精确算术处理部分结果，不要心算。',
 });
 
@@ -86,7 +86,7 @@ export function renderBlockLabel(b: { from: number; to: number }): string {
 
 export const FORMAT_REMINDER = (step: number, latest: number | undefined) =>
   latest === undefined
-    ? `### 当前步骤\n当前是第 ${step} 步。没有历史：输出 <motivation> 和 <tool_call>（或 <answer>），不要 <folding>。`
+    ? `### 当前步骤\n当前是第 ${step} 步。${step === 0 ? '没有历史' : '上一步已归档'}：输出 <motivation> 和 <tool_call>（或 <answer>），不要 <folding>。`
     : `### 当前步骤\n当前是第 ${step} 步。输出 <folding>（range 终点必须是 ${latest}）、<motivation>，然后 <tool_call> 或 <answer>。`;
 
 export const FORMAT_REPAIR = (errors: string[], step: number, latest: number | undefined) =>

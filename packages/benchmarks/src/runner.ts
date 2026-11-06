@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { cacheSaved, costOf, type TokenPrice } from './pricing.js';
 import {
   ContextStore,
+  DEFAULT_MAX_DEPTH,
   LLMQueryEngine,
   RecursiveAgentFold,
   UsageTracker,
@@ -171,7 +172,7 @@ export async function runTasks(tasks: BenchTask[], cfg: RunConfig): Promise<Task
               queryEngine,
               store: store!,
               llmQuery: cfg.llmQuery,
-              maxDepth: toolPreset(cfg).branch ? (cfg.maxDepth ?? 1) : 0,
+              maxDepth: toolPreset(cfg).branch ? (cfg.maxDepth ?? DEFAULT_MAX_DEPTH) : 0,
               rootMaxSteps: cfg.rootMaxSteps ?? 30,
               branchMaxSteps: cfg.branchMaxSteps ?? 15,
               agent: { systemPromptExtra: cfg.systemPromptExtra, maxObservationTokens: cfg.maxObservationTokens },

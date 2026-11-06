@@ -37,6 +37,14 @@ export interface AgentFoldConfig {
   temperature?: number;
   signal?: AbortSignal;
   board?: ResearchBoard;
+  /** Pre-populated folded state when resuming a scoped specialist sub-agent. */
+  readonly initialState?: FoldStateSnapshot;
+  /** Follow-up question posed by a peer or parent agent to an existing specialist. */
+  readonly followUpQuestion?: string;
+  /** Active scope call stack for cycle prevention across inter-agent queries. */
+  readonly callStack?: readonly string[];
+  readonly initialBoardCount?: number;
+  readonly initialBoardSnapshot?: string;
 }
 
 export type Termination = 'answer' | 'forced_answer' | 'max_steps' | 'error' | 'filtered';
@@ -68,6 +76,7 @@ export class AgentFoldAgent {
   private readonly estimator: TokenEstimator;
   private readonly toolMap: Map<string, Tool>;
   private readonly systemPrompt: string;
+  private readonly initialBoardCount: number;
   private readonly initialBoardSnapshot: string | undefined;
 
   constructor(private readonly cfg: AgentFoldConfig) {
@@ -79,10 +88,14 @@ export class AgentFoldAgent {
     this.systemPrompt =
       `${buildAgentSystemPrompt(cfg.tools.map((t) => t.name))}\n\n# 可用工具\n${renderToolSchemas(cfg.tools)}` +
       (cfg.systemPromptExtra ? `\n\n# 附加说明\n${cfg.systemPromptExtra}` : '');
+    this.initialBoardCount = cfg.initialBoardCount ?? (cfg.board ? cfg.board.entries().length : 0);
     this.initialBoardSnapshot =
-      cfg.board && cfg.board.entries().length > 0 ? cfg.board.render() : undefined;
+      cfg.initialBoardSnapshot !== undefined
+        ? cfg.initialBoardSnapshot
+        : cfg.board && this.initialBoardCount > 0
+          ? cfg.board.render()
+          : undefined;
   }
-
   private emit(e: AgentEvent) {
     this.cfg.onEvent?.(e);
   }
@@ -100,7 +113,18 @@ export class AgentFoldAgent {
     }
     const parts: string[] = [`### 文档\n${this.cfg.store.manifest()}`];
     if (this.initialBoardSnapshot) parts.push(`### 共享研究看板\n${this.initialBoardSnapshot}`);
-    parts.push(`### 任务\n${question.trim()}`, prev.join('\n'), FORMAT_REMINDER(state.currentStep, latest?.step));
+    const taskBlock = this.name.startsWith('specialist#')
+      ? `### 任务\n${question.trim()}\n（注：你当前就是专家子代理 ${this.name}，请直接用 grep/read 核查本域文档，切勿对自身 scope 调用 branch。）`
+      : `### 任务\n${question.trim()}`;
+    parts.push(taskBlock, prev.join('\n'));
+    const delta = this.cfg.board?.renderSince(this.initialBoardCount);
+    if (delta) parts.push(`### 新增共享结论\n${delta}`);
+    if (this.cfg.followUpQuestion) {
+      parts.push(
+        `### 协同追问\n${this.cfg.followUpQuestion.trim()}\n（请优先复用上方「历史步骤」中已明确以 key=value 记录的精确结论与公式直接作答；若追问涉及的新标识符/下标未在摘要中以精确 key=value 写出，先用 grep/read 核实该项再作答。）`,
+      );
+    }
+    parts.push(FORMAT_REMINDER(state.currentStep, latest?.step));
     if (extraUserTail) parts.push(extraUserTail);
     return [
       { role: 'system', content: this.systemPrompt, cacheBreakpoint: true },
@@ -109,7 +133,12 @@ export class AgentFoldAgent {
   }
 
   async run(question: string): Promise<AgentRunResult> {
-    const state = new FoldState();
+    const state = this.cfg.initialState ? FoldState.restore(this.cfg.initialState) : new FoldState();
+    const isSpecialist =
+      this.depth > 0 ||
+      this.cfg.initialState !== undefined ||
+      this.cfg.followUpQuestion !== undefined ||
+      (this.cfg.name !== undefined && this.cfg.name !== 'root');
     const maxSteps = this.cfg.maxSteps ?? 100;
     const role = this.cfg.usageRole ?? (this.depth === 0 ? 'root' : 'branch');
     let formatIssues = 0;
@@ -196,7 +225,7 @@ export class AgentFoldAgent {
         };
         let deferredDeep = false;
         const minDeep = this.cfg.minDeepFoldBlocks ?? DEFAULT_MIN_DEEP_FOLD_BLOCKS;
-        if (parsed.answer === undefined && requested.range[0] < latestStep && minDeep > 1) {
+        if ((parsed.answer === undefined || isSpecialist) && requested.range[0] < latestStep && minDeep > 1) {
           const wouldRetract = state.blocks.filter((b) => b.to >= requested.range[0]).length;
           if (wouldRetract < minDeep) {
             requested = { range: [latestStep, latestStep], summary: requested.summary };
@@ -212,10 +241,26 @@ export class AgentFoldAgent {
 
       // ANSWER
       if (parsed.answer !== undefined) {
+        if (isSpecialist) {
+          const answerStep = state.currentStep;
+          const queryTag = this.cfg.followUpQuestion
+            ? `追问「${this.cfg.followUpQuestion.replace(/\s+/g, ' ').slice(0, 60)}」`
+            : '初始任务';
+          const cleanAns = parsed.answer.replace(/\s+/g, ' ').trim().slice(0, 600);
+          state.setLatest({
+            step: answerStep,
+            motivation: queryTag,
+            action: { name: 'answer', arguments: {} },
+            observation: cleanAns,
+          });
+          state.applyFold({
+            range: [answerStep, answerStep],
+            summary: `完成${queryTag}，结论：${cleanAns}`,
+          });
+        }
         this.emit({ type: 'answer', agent: this.name, step, answer: parsed.answer });
         return finish({ answer: parsed.answer, steps: step + 1, terminated: forcing ? 'forced_answer' : 'answer' });
       }
-
       // ACT
       const action = parsed.toolCall!;
       const motivation = parsed.motivation ?? '';
@@ -244,6 +289,7 @@ export class AgentFoldAgent {
           emit: (e) => this.emit(e),
           signal: this.cfg.signal,
           board: this.cfg.board,
+          callStack: this.cfg.callStack,
         });
       } catch (e) {
         error = (e as Error).message;

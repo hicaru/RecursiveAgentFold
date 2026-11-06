@@ -14,6 +14,7 @@ export interface ToolContext {
   readonly emit: (e: AgentEvent) => void;
   readonly signal?: AbortSignal;
   readonly board?: ResearchBoard;
+  readonly callStack?: readonly string[];
 }
 
 export interface Tool {

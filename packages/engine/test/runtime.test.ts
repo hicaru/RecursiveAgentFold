@@ -298,4 +298,197 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
     expect(c2.result).toBe('Answer is 42');
     expect([c1.reused, c2.reused]).toContain(true);
   });
+
+  it('Scoped specialist persists FoldState across follow-up queries with byte-identical prompt prefix', async () => {
+    const store = new ContextStore();
+    store.add('export const AUTH_KDF_ROUNDS = 8;\nexport const AUTH_SALT = 250;\n', {
+      id: 'lib_auth',
+      title: 'auth library',
+    });
+    store.add('export const ORDER_ID = 1;\n', { id: 'service_order', title: 'order service' });
+
+    const root = new ScriptedLLM((req) => {
+      const user = req.messages[1]?.content ?? '';
+      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      switch (step) {
+        case 0:
+          return '<motivation>Study lib_auth rounds</motivation><tool_call>{"name":"branch","arguments":{"scope":"lib_auth","task":"Find AUTH_KDF_ROUNDS in lib_auth"}}</tool_call>';
+        case 1:
+          return '<folding>{"range":[0,0],"summary":"lib_auth rounds=8"}</folding><motivation>Ask lib_auth specialist follow-up</motivation><tool_call>{"name":"branch","arguments":{"scope":"lib_auth","task":"What is AUTH_SALT in lib_auth?"}}</tool_call>';
+        default:
+          return '<folding>{"range":[1,1],"summary":"lib_auth salt=250"}</folding><answer>8 and 250</answer>';
+      }
+    });
+
+    const branchPrompts: string[] = [];
+    const branch = new ScriptedLLM((req) => {
+      const user = req.messages[1]?.content ?? '';
+      branchPrompts.push(user);
+      if (user.includes('### 协同追问')) {
+        return '<motivation>Answer directly from folded state</motivation><answer>250</answer>';
+      }
+      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      return step === 0
+        ? '<motivation>grep lib_auth</motivation><tool_call>{"name":"grep","arguments":{"document":"lib_auth","pattern":"AUTH_"}}</tool_call>'
+        : '<folding>{"range":[0,0],"summary":"grep lib_auth found AUTH_KDF_ROUNDS=8 and AUTH_SALT=250"}</folding><answer>8</answer>';
+    });
+
+    const raf = new RecursiveAgentFold({ rootLLM: root, branchLLM: branch, store, maxDepth: 2 });
+    const res = await raf.run('Get AUTH_KDF_ROUNDS and AUTH_SALT from lib_auth');
+    expect(res.answer).toBe('8 and 250');
+    expect(branchPrompts).toHaveLength(3);
+
+    // Follow-up call (3rd branch prompt) must preserve [压缩步骤 0] and [压缩步骤 1] and include ### 协同追问
+    const firstPrompt = branchPrompts[0] ?? '';
+    const followUpPrompt = branchPrompts[2] ?? '';
+    expect(followUpPrompt).toContain('[压缩步骤 0]');
+    expect(followUpPrompt).toContain('[压缩步骤 1]');
+    expect(followUpPrompt).toContain('### 协同追问\nWhat is AUTH_SALT in lib_auth?');
+    expect(followUpPrompt).toContain('当前是第 2 步。上一步已归档');
+
+    // Prefix up to ### 历史步骤 must be 100% byte-identical between initial specialist run and follow-up
+    const prefixInit = firstPrompt.split('### 历史步骤')[0];
+    const prefixFollowUp = followUpPrompt.split('### 历史步骤')[0];
+    expect(prefixInit).toBeDefined();
+    expect(prefixFollowUp).toBe(prefixInit);
+  });
+
+  it('Diamond dependency concurrent branch calls on same scope serialize on queue and reuse specialist state', async () => {
+    const board = new ResearchBoard();
+    const events: string[] = [];
+
+    const [r1, r2, r3] = await Promise.all([
+      board.runScopedBranch('lib_auth', 'Study lib_auth rounds', async (input) => {
+        events.push(`start:q1:followUp=${input.isFollowUp}`);
+        await Promise.resolve();
+        events.push('end:q1');
+        return {
+          resultText: 'rounds=8',
+          answer: '8',
+          state: { blocks: [{ from: 0, to: 0, summary: 'rounds=8, salt=250' }] },
+        };
+      }),
+      board.runScopedBranch('lib_auth', 'Study lib_auth rounds', async (input) => {
+        events.push(`start:q1_dup:followUp=${input.isFollowUp}`);
+        return {
+          resultText: 'dup',
+          answer: 'dup',
+          state: { blocks: [] },
+        };
+      }),
+      board.runScopedBranch('lib_auth', 'What is salt in lib_auth?', async (input) => {
+        events.push(`start:q2:followUp=${input.isFollowUp}:blocks=${input.previousState?.blocks.length ?? 0}`);
+        return {
+          resultText: 'salt=250',
+          answer: '250',
+          state: {
+            blocks: [
+              ...(input.previousState?.blocks ?? []),
+              { from: 1, to: 1, summary: 'salt=250' },
+            ],
+          },
+        };
+      }),
+    ]);
+
+    expect(r1).toEqual({ result: 'rounds=8', reused: false, scope: 'lib_auth' });
+    expect(r2).toEqual({ result: 'rounds=8', reused: true, scope: 'lib_auth' });
+    expect(r3).toEqual({ result: 'salt=250', reused: false, scope: 'lib_auth' });
+    expect(events).toEqual([
+      'start:q1:followUp=false',
+      'end:q1',
+      'start:q2:followUp=true:blocks=1',
+    ]);
+    expect(board.entries()).toHaveLength(1);
+  });
+
+  it('Detects inter-agent callStack cycles without deadlocking and supports leaf consultOnly mode at maxDepth', async () => {
+    const store = new ContextStore();
+    store.add('mod_a content', { id: 'mod_a', title: 'Module A' });
+    store.add('mod_b content', { id: 'mod_b', title: 'Module B' });
+    store.add('mod_c content', { id: 'mod_c', title: 'Module C' });
+
+    let leafSawCycle = false;
+    let leafSawConsultOnlyBlock = false;
+    let leafSawModC = false;
+
+    const root = new ScriptedLLM((req) => {
+      const user = req.messages[1]?.content ?? '';
+      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      return step === 0
+        ? '<motivation>First register mod_c specialist, then run mod_a</motivation><tool_call>{"name":"branch","arguments":{"tasks":[{"scope":"mod_c","task":"Inspect mod_c"},{"scope":"mod_a","task":"Inspect mod_a"}]}}</tool_call>'
+        : `<folding>{"range":[0,0],"summary":"done"}</folding><answer>${user.includes('mod_b_ok') ? 'cycle-safe-and-consulted' : 'failed'}</answer>`;
+    });
+
+    const branch = new ScriptedLLM((req) => {
+      const user = req.messages[1]?.content ?? '';
+      if (user.includes('### 任务\nInspect mod_c')) {
+        return user.includes('### 协同追问')
+          ? '<motivation>reply to leaf consult</motivation><answer>mod_c_val=99</answer>'
+          : '<motivation>init mod_c</motivation><answer>mod_c_ready</answer>';
+      }
+      if (user.includes('### 任务\nInspect mod_a')) {
+        const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+        return step === 0
+          ? '<motivation>delegate to mod_b</motivation><tool_call>{"name":"branch","arguments":{"scope":"mod_b","task":"Inspect mod_b"}}</tool_call>'
+          : `<folding>{"range":[0,0],"summary":"from mod_b"}</folding><answer>${user.includes('mod_b_verified') ? 'mod_b_ok' : 'mod_b_bad'}</answer>`;
+      }
+      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      if (step === 0) {
+        return '<motivation>try cycle to mod_a</motivation><tool_call>{"name":"branch","arguments":{"scope":"mod_a","task":"Cycle back to mod_a"}}</tool_call>';
+      }
+      if (step === 1) {
+        if (user.includes('检测到循环调用')) leafSawCycle = true;
+        return '<folding>{"range":[0,0],"summary":"cycle blocked"}</folding><motivation>try unstudied at leaf</motivation><tool_call>{"name":"branch","arguments":{"scope":"mod_unstudied","task":"Spawn new"}}</tool_call>';
+      }
+      if (step === 2) {
+        if (user.includes('该深度仅允许向看板上已有的专家子代理')) leafSawConsultOnlyBlock = true;
+        return '<folding>{"range":[1,1],"summary":"unstudied blocked"}</folding><motivation>consult existing mod_c</motivation><tool_call>{"name":"branch","arguments":{"scope":"mod_c","task":"What is mod_c value?"}}</tool_call>';
+      }
+      if (user.includes('mod_c_val=99')) leafSawModC = true;
+      return '<folding>{"range":[2,2],"summary":"got mod_c"}</folding><answer>mod_b_verified</answer>';
+    });
+
+    const raf = new RecursiveAgentFold({ rootLLM: root, branchLLM: branch, store, maxDepth: 2 });
+    const res = await raf.run('Test cycle guard and leaf consult');
+    expect(res.answer).toBe('cycle-safe-and-consulted');
+    expect(leafSawCycle).toBe(true);
+    expect(leafSawConsultOnlyBlock).toBe(true);
+    expect(leafSawModC).toBe(true);
+  });
+
+  it('Renders new board entries via renderSince in the dynamic tail without altering cached prefix', () => {
+    const board = new ResearchBoard();
+    board.record({
+      agent: 'specialist#1[lib_auth]',
+      kind: 'branch',
+      scope: 'lib_auth',
+      key: 'lib_auth',
+      summary: 'AUTH_KDF_ROUNDS = 8',
+    });
+    const store = new ContextStore();
+    store.add('line 1\n', { id: 'ctx', title: 'doc' });
+    const llm = new ScriptedLLM(() => '<answer>ok</answer>');
+    const agent = new AgentFoldAgent({ llm, tools: [createGrepTool()], store, board });
+    const state = new FoldState();
+    const msg0 = agent.buildMessages('Question?', state)[1]?.content ?? '';
+    expect(msg0).toContain('[branch][scope=lib_auth]');
+    expect(msg0).not.toContain('### 新增共享结论');
+
+    // Record a new specialist conclusion while agent is running
+    board.record({
+      agent: 'specialist#2[lib_crypto]',
+      kind: 'branch',
+      scope: 'lib_crypto',
+      key: 'lib_crypto',
+      summary: 'CRYPTO_PRIME_MOD = 509',
+    });
+    const msg1 = agent.buildMessages('Question?', state)[1]?.content ?? '';
+    expect(msg1).toContain('### 新增共享结论');
+    expect(msg1).toContain('[branch][scope=lib_crypto] CRYPTO_PRIME_MOD = 509');
+
+    const prefix0 = msg0.split('### 历史步骤')[0];
+    const prefix1 = msg1.split('### 历史步骤')[0];
+    expect(prefix1).toBe(prefix0);
+  });
 });
