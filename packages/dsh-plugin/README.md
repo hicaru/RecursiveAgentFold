@@ -46,10 +46,34 @@ For a RAF Session, `llm/stream` builds a `ContextStore` from the Session transcr
 
 RAF runs inside one outer model request. Its internal model calls use the Session provider and model through `ctx.llm`. Internal calls are tagged with an `AsyncLocalStorage` guard so the listener does not intercept them again.
 
+### RAF runs view
+
+The plugin registers a dedicated **RAF** tab in the conversation view ring, between Trajectory and Statistics. It reads the Host run registry and polls while a run is active.
+
+- Left column: every agent in the run. RAF `branch` subagents appear as nested agents; click one to inspect only its steps and tools.
+- Main column: the selected agent's steps. Each step shows context size, blocks, the model response/reasoning, folds, tool calls and results, `llm_query` scans, per-call LLM tokens/cache/latency, errors, and the final answer.
+- Tool rows expand to show arguments and result text. A `branch` tool links to its subagent.
+- Header: run selector, live status, model, settings, steps, agents, tokens, cache hit rate, and duration.
+- New runs appear automatically; completed runs remain selectable. The Host keeps the latest 30 runs in memory, so a Host restart clears the list.
+
+The view shows the RAF tools (`llm_query`, `grep`, `read`, `tally`, `branch`, `calculator`), not DSH `bash`/`edit`. RAF branch agents are engine subagents, not DSH subagents.
+
+The Host exposes the run data at `GET /plugins/@raf/dsh-plugin/runs?sessionId=...` and `GET /plugins/@raf/dsh-plugin/runs/<id>`.
+
+### Trajectory trace
+
+The runner also writes a compact diagnostic trace into the assistant message's **reasoning** block:
+
+- Open **Trajectory**, select the assistant record, and read **Thinking**.
+- The trace lists settings, steps, folds, tool calls and results, `llm_query` scans, per-call tokens/cache/latency, and the final answer.
+- **Statistics** shows the run as one outer step with aggregate usage.
+
+The trace is capped at 12,000 characters and is skipped when a later RAF run rebuilds its transcript.
+
 Limits of this first integration:
 
 - RAF does not see DSH tools (`bash`, `edit`, `read` paths, and so on). Use `Standard` for coding tool work.
-- RAF steps are not in the session log. Fork and replay keep only the final answer.
+- RAF steps are not native `tool/call`/`step` events. Trajectory shows them as diagnostic reasoning, not as separate tool rows; a custom Agent driver is required for native rows.
 - A context document should be in earlier messages; the latest user message is the question.
 - The reader calls use the same model as the root with its default reasoning effort.
 

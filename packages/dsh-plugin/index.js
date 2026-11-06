@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 const ENGINE_STANDARD = 'standard';
 const ENGINE_RAF = 'raf';
 const ENGINE_ROUTE = '/plugins/@raf/dsh-plugin/engine';
+const RUNS_ROUTE = '/plugins/@raf/dsh-plugin/runs';
 const DEFAULT_SETTINGS = Object.freeze({ depth: 2, reserve: 0.3, concurrency: 4 });
 const DEPTH_MIN = 1;
 const DEPTH_MAX = 3;
@@ -17,6 +18,8 @@ const CONCURRENCY_MIN = 1;
 const CONCURRENCY_MAX = 8;
 const MAX_BODY_BYTES = 8192;
 const MAX_ENGINE_ENTRIES = 2000;
+const MAX_RUNS = 30;
+const MAX_RUN_EVENTS = 2000;
 const RAF_ROOT_MAX_STEPS = 32;
 
 export const inject = ['llm'];
@@ -249,15 +252,185 @@ class DshLlmClient {
   }
 }
 
-async function* rafStream(ctx, outer, settings) {
+
+function shortText(value, limit) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+  if (typeof text !== 'string') return '';
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
+function formatTrace(events, settings, outer) {
+  const lines = [];
+  lines.push('RAF execution trace (diagnostic data, not model reasoning).');
+  lines.push(`model: ${outer.provider}/${outer.model}`);
+  lines.push(`settings: depth=${settings.depth} reserve=${settings.reserve} readers=${settings.concurrency}`);
+  for (const event of events) {
+    switch (event.type) {
+      case 'run_start':
+        lines.push(`[run] ${event.agent} depth=${event.depth} question=${shortText(event.question, 300)}`);
+        break;
+      case 'step_start':
+        lines.push(`[step ${event.step}] ${event.agent} ctx=${event.contextTokens} blocks=${event.blocks}`);
+        break;
+      case 'llm_call':
+        lines.push(
+          `  [llm ${event.role}] ${event.model} in=${event.usage.promptTokens} out=${event.usage.completionTokens} cached=${event.usage.cachedTokens} ${event.latencyMs}ms`,
+        );
+        break;
+      case 'llm_response':
+        lines.push(`  [response] ${shortText(event.text, 600)}`);
+        break;
+      case 'fold': {
+        const directive = event.outcome?.directive ?? event.requested;
+        const range = Array.isArray(directive?.range) ? `[${directive.range.join(',')}]` : '';
+        lines.push(`  [fold${event.outcome?.kind ? ` ${event.outcome.kind}` : ''}] ${range} ${shortText(directive?.summary, 500)}`);
+        if (Array.isArray(event.outcome?.corrections) && event.outcome.corrections.length > 0) {
+          lines.push(`    corrections: ${shortText(event.outcome.corrections.join('; '), 400)}`);
+        }
+        break;
+      }
+      case 'tool_call':
+        lines.push(`  [tool ${event.action.name}] ${shortText(event.action.arguments, 500)}`);
+        break;
+      case 'tool_result':
+        lines.push(
+          `  [result ${event.name}] tokens=${event.tokens}${event.error ? ` error=${event.error}` : ''} ${shortText(event.observation, 700)}`,
+        );
+        break;
+      case 'llm_query':
+        lines.push(
+          `  [llm_query] mode=${event.mode} chunks=${event.chunks} relevant=${event.relevant} errors=${event.errors} memo=${event.memoHits} chunkTokens=${event.chunkTokens} query=${shortText(event.query, 300)}`,
+        );
+        break;
+      case 'format_error':
+        lines.push(`  [format_error step ${event.step}] ${shortText(event.errors.join('; '), 500)}`);
+        break;
+      case 'error':
+        lines.push(`  [error${event.step === undefined ? '' : ` step ${event.step}`}] ${shortText(event.message, 600)}`);
+        break;
+      case 'answer':
+        lines.push(`  [answer step ${event.step}] ${shortText(event.answer, 600)}`);
+        break;
+      case 'run_end':
+        lines.push(`[end] ${event.agent} steps=${event.steps} terminated=${event.terminated}`);
+        break;
+      default:
+        lines.push(`  [${String(event.type)}]`);
+    }
+  }
+  const text = lines.join('\n');
+  return text.length > 12000 ? `${text.slice(0, 12000)}\n… trace truncated` : text;
+}
+
+
+function sanitizeRunEvent(event) {
+  switch (event.type) {
+    case 'llm_response':
+      return {
+        ...event,
+        text: shortText(event.text, 8000),
+        ...(event.reasoning === undefined ? {} : { reasoning: shortText(event.reasoning, 8000) }),
+      };
+    case 'tool_result':
+      return { ...event, observation: shortText(event.observation, 8000) };
+    case 'answer':
+      return { ...event, answer: shortText(event.answer, 8000) };
+    case 'format_error':
+      return { ...event, raw: shortText(event.raw, 8000) };
+    default:
+      return event;
+  }
+}
+
+function createRunRegistry() {
+  const runs = new Map();
+  const trim = () => {
+    while (runs.size > MAX_RUNS) {
+      const oldest = runs.keys().next().value;
+      if (oldest === undefined) break;
+      runs.delete(oldest);
+    }
+  };
+  const summary = (run) => ({
+    id: run.id,
+    sessionId: run.sessionId,
+    startedAt: run.startedAt,
+    endedAt: run.endedAt,
+    status: run.status,
+    termination: run.termination,
+    model: run.model,
+    question: run.question,
+    settings: run.settings,
+    answerPreview: typeof run.answer === 'string' ? run.answer.slice(0, 200) : '',
+    usage: run.usage,
+    agentCount: run.agentCount,
+    stepCount: run.stepCount,
+    eventCount: run.events.length,
+    error: run.error,
+  });
+  return {
+    create(input) {
+      const run = {
+        id: randomUUID(),
+        ...input,
+        startedAt: Date.now(),
+        endedAt: null,
+        status: 'running',
+        termination: null,
+        events: [],
+        usage: null,
+        answer: '',
+        error: null,
+        agentCount: 0,
+        stepCount: 0,
+      };
+      runs.set(run.id, run);
+      trim();
+      return run;
+    },
+    append(run, event) {
+      if (run === undefined) return;
+      if (run.events.length >= MAX_RUN_EVENTS) return;
+      const entry = { seq: run.events.length + 1, at: Date.now(), event: sanitizeRunEvent(event) };
+      run.events.push(entry);
+      if (event.type === 'run_start') run.agentCount += 1;
+      if (event.type === 'step_start') run.stepCount += 1;
+    },
+    finish(run, patch) {
+      if (run === undefined) return;
+      Object.assign(run, patch);
+      if (run.endedAt === null) run.endedAt = Date.now();
+    },
+    list(sessionId) {
+      return [...runs.values()]
+        .filter((run) => sessionId === undefined || run.sessionId === sessionId)
+        .sort((left, right) => right.startedAt - left.startedAt)
+        .map(summary);
+    },
+    get(id) {
+      return runs.get(id);
+    },
+  };
+}
+
+async function* rafStream(ctx, outer, settings, runs) {
   const signal = outer.signal;
+  let run;
+  let finished = false;
   try {
     if (signal?.aborted) throw signal.reason ?? new Error('aborted');
-    const raf = await loadRaf();
     const messages = Array.isArray(outer.messages) ? outer.messages : [];
     const userIndex = latestUserIndex(messages);
     const question = questionOf(messages, userIndex);
+    const effectiveQuestion = question === '' ? 'Answer the latest request.' : question;
     const transcript = renderTranscript(userIndex < 0 ? messages : messages.slice(0, userIndex));
+    run = runs.create({
+      sessionId: outer.sessionId,
+      model: `${outer.provider}/${outer.model}`,
+      settings: { ...settings },
+      question: effectiveQuestion,
+    });
+    const raf = await loadRaf();
     const contextWindow = contextWindowOf(ctx, outer.sessionId);
     const profile = {
       name: outer.model,
@@ -268,6 +441,7 @@ async function* rafStream(ctx, outer, settings) {
     if (transcript !== '') store.add(transcript, { id: 'session', title: 'DSH session transcript' });
     const rootLLM = new DshLlmClient(ctx, outer, profile, outer.reasoningEffort);
     const queryLLM = new DshLlmClient(ctx, outer, profile, undefined);
+    const events = [];
     const engine = new raf.RecursiveAgentFold({
       rootLLM,
       queryLLM,
@@ -276,8 +450,12 @@ async function* rafStream(ctx, outer, settings) {
       llmQuery: { reserveRatio: settings.reserve, concurrency: settings.concurrency },
       rootMaxSteps: RAF_ROOT_MAX_STEPS,
       signal,
+      onEvent: (event) => {
+        events.push(event);
+        runs.append(run, event);
+      },
     });
-    const result = await engine.run(question === '' ? 'Answer the latest request.' : question);
+    const result = await engine.run(effectiveQuestion);
     if (signal?.aborted) throw signal.reason ?? new Error('aborted');
     const answer = typeof result.answer === 'string' ? result.answer.trim() : '';
     const text =
@@ -286,12 +464,39 @@ async function* rafStream(ctx, outer, settings) {
         : result.error !== undefined
           ? `RAF engine error: ${result.error}`
           : 'RAF engine returned no answer.';
-    yield { type: 'block-start', index: 0, blockType: 'text' };
-    for (let offset = 0; offset < text.length; offset += 2000) {
-      yield { type: 'text-delta', index: 0, text: text.slice(offset, offset + 2000) };
-    }
-    yield { type: 'block-end', index: 0, block: { type: 'text', text } };
     const total = result.usage.total();
+    runs.finish(run, {
+      status: result.terminated === 'error' ? 'error' : 'done',
+      termination: result.terminated,
+      answer: text,
+      error: result.error ?? null,
+      usage: {
+        input: total.promptTokens,
+        output: total.completionTokens,
+        cached: total.cachedTokens,
+        cacheHitRate: total.cacheHitRate,
+        latencyMs: total.latencyMs,
+        calls: total.calls,
+        errors: total.errors,
+      },
+    });
+    finished = true;
+    const trace = formatTrace(events, settings, outer);
+    let index = 0;
+    if (trace !== '') {
+      const reasoning = `\n~~~text\n${trace}\n~~~\n`;
+      yield { type: 'block-start', index, blockType: 'reasoning' };
+      for (let offset = 0; offset < reasoning.length; offset += 2000) {
+        yield { type: 'reasoning-delta', index, text: reasoning.slice(offset, offset + 2000) };
+      }
+      yield { type: 'block-end', index, block: { type: 'reasoning', text: reasoning } };
+      index += 1;
+    }
+    yield { type: 'block-start', index, blockType: 'text' };
+    for (let offset = 0; offset < text.length; offset += 2000) {
+      yield { type: 'text-delta', index, text: text.slice(offset, offset + 2000) };
+    }
+    yield { type: 'block-end', index, block: { type: 'text', text } };
     yield {
       type: 'usage',
       usage: {
@@ -303,6 +508,15 @@ async function* rafStream(ctx, outer, settings) {
     };
     yield { type: 'finish', reason: { kind: 'stop' } };
   } catch (error) {
+    if (run !== undefined && !finished) {
+      const message = error instanceof Error ? error.message : String(error);
+      runs.finish(run, {
+        status: signal?.aborted ? 'aborted' : 'error',
+        answer: '',
+        error: message,
+        usage: null,
+      });
+    }
     if (signal?.aborted) throw error;
     const message = error instanceof Error ? error.message : String(error);
     const text = `RAF engine error: ${message}`;
@@ -353,6 +567,7 @@ function admissionRejection(ctx, req) {
 
 export function apply(ctx) {
   const state = loadState();
+  const runs = createRunRegistry();
   let writeQueue = Promise.resolve();
   let disposed = false;
 
@@ -375,7 +590,7 @@ export function apply(ctx) {
     if (rafInternal.getStore() === true) return next();
     if (options === null || typeof options !== 'object') return next();
     if (engineOf(state, options.sessionId) !== ENGINE_RAF) return next();
-    return rafStream(ctx, options, state.settings);
+    return rafStream(ctx, options, state.settings, runs);
   });
 
   ctx.inject(['webServer'], (webCtx) => {
@@ -430,6 +645,46 @@ export function apply(ctx) {
           },
         }),
       'raf: engine state route',
+    );
+
+    webCtx.effect(
+      () =>
+        webCtx.webServer.register({
+          kind: 'prefix',
+          path: RUNS_ROUTE,
+          handler: async (req, res) => {
+            try {
+              const rejection = admissionRejection(webCtx, req);
+              if (rejection !== undefined) {
+                res.writeHead(rejection);
+                res.end(rejection === 401 ? 'unauthorized' : 'forbidden');
+                return;
+              }
+              if (req.method !== 'GET') {
+                res.writeHead(405, { allow: 'GET' });
+                res.end('method not allowed');
+                return;
+              }
+              const url = new URL(req.url ?? '/', 'http://localhost');
+              const rest = url.pathname.slice(RUNS_ROUTE.length).replace(/^\/+/, '');
+              if (rest === '') {
+                const sessionId = url.searchParams.get('sessionId') ?? undefined;
+                sendJson(res, 200, { runs: runs.list(sessionId) });
+                return;
+              }
+              const run = runs.get(decodeURIComponent(rest));
+              if (run === undefined) {
+                sendJson(res, 404, { error: 'run not found' });
+                return;
+              }
+              sendJson(res, 200, run);
+            } catch (error) {
+              const status = typeof error?.status === 'number' ? error.status : 400;
+              sendJson(res, status, { error: error instanceof Error ? error.message : String(error) });
+            }
+          },
+        }),
+      'raf: runs route',
     );
   });
 
