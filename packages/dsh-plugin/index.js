@@ -234,6 +234,8 @@ class DshLlmClient {
       model: this.outer.model,
       messages: request.messages.map((message) => dshMessage(message, this.outer)),
       sessionId: this.outer.sessionId,
+      // Tag RAF calls so the listener skips them even outside the ALS guard.
+      purpose: `raf-${request.purpose ?? 'root'}`,
       ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
       ...(request.maxTokens !== undefined
         ? { maxTokens: request.maxTokens }

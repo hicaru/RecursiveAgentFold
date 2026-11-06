@@ -45,7 +45,7 @@ For a RAF Session, `llm/stream` builds a `ContextStore` from the Session transcr
 - the final `<answer>` becomes one assistant message in DSH;
 - RAF token usage is reported in the same message's usage chunk.
 
-RAF runs inside one outer model request. Its internal model calls use the Session provider and model through `ctx.llm`. Root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 4,096 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. Internal calls are tagged with an `AsyncLocalStorage` guard so the listener does not intercept them again.
+RAF runs inside one outer model request. Its internal model calls use the Session provider and model through `ctx.llm`. Root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 4,096 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. Internal calls are tagged with an `AsyncLocalStorage` guard and a `raf-*` `purpose` value, so the listener does not intercept them again.
 
 DSH marks internal calls with `purpose` (`session-title`, `compaction`, `auto-review`, `onboarding_use_case`). The listener passes every such call through. RAF therefore never answers a title prompt or a compaction summary.
 
