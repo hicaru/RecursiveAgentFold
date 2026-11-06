@@ -576,8 +576,7 @@ function createInlineTrace(ctx, outer, signal) {
     try {
       if (event.type === 'tool_call') {
         const action = event.action !== null && typeof event.action === 'object' ? event.action : {};
-        const rawName = typeof action.name === 'string' && action.name !== '' ? action.name : 'tool';
-        const name = rawName.startsWith('dsh_') ? rawName : `raf_${rawName}`;
+        const name = typeof action.name === 'string' && action.name !== '' ? action.name : 'tool';
         const args = JSON.stringify(action.arguments ?? {});
         const callId = randomUUID();
         const label = String(event.agent ?? 'root');
@@ -594,7 +593,7 @@ function createInlineTrace(ctx, outer, signal) {
         };
         if (append('assistant/message', { turn, step, message }, { surfaceOp: 'append' }) === undefined) return;
         const call = append('tool/call', { turn, step, callId, name, arguments: args });
-        const key = `${label}\u0000${Number(event.step ?? 0)}\u0000${rawName}`;
+        const key = `${label}\u0000${Number(event.step ?? 0)}\u0000${name}`;
         const list = pending.get(key) ?? [];
         list.push({ callId, callSeq: call?.seq });
         pending.set(key, list);

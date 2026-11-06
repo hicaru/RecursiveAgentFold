@@ -55,7 +55,7 @@ RAF writes native Session events while it runs, so Chat and Trajectory show its 
 
 - each RAF tool call appends an assistant message with the agent label (`root`, `branch#1@1`) and the model's motivation, then a `tool-call` block;
 - the matching result appends a native `tool/result` event, so the tool card expands normally;
-- internal RAF tools render with a `raf_` display name (`raf_read`, `raf_llm_query`, ...) so Chat uses the generic tool card; DSH tools keep `dsh_read`, `dsh_bash`, and so on;
+- internal RAF tools (`read`, `grep`, `llm_query`, `branch`, `calculator`) and DSH tools (`dsh_read`, `dsh_bash`, and so on) use the same inline rows;
 - subagent calls carry their `branch` label, so the root and every subagent show their own tools in order.
 
 The events are synthetic: RAF already executed the tool, and the Host appends only the display records. The tool is not executed again. The separate live dock was removed; the **RAF** tab remains the detailed per-agent inspector.
