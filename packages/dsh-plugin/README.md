@@ -41,7 +41,7 @@ For a RAF Session, `llm/stream` builds a `ContextStore` from the Session transcr
 - the latest **human** message (`source.kind === 'user'`) is the question;
 - every other message — including DSH's synthetic instruction, runtime, skill, and time messages — is the document;
 - RAF's `llm_query`, `grep`, `read`, `tally`, `branch`, and `calculator` operate on that transcript;
-- DSH coding tools are exposed to RAF as `dsh_read`, `dsh_glob`, `dsh_grep`, `dsh_bash`, `dsh_write`, `dsh_edit`, `dsh_apply_patch`, `dsh_lsp`, `dsh_web_search`, and `dsh_web_fetch`;
+- DSH coding tools are exposed to RAF as `read_file`, `glob`, `grep_files`, `bash`, `write`, `edit`, `apply_patch`, `lsp`, `web_search`, and `web_fetch`. `read_file` and `grep_files` avoid the names `read` and `grep`, which RAF uses for its own context-store tools;
 - the final `<answer>` becomes one assistant message in DSH;
 - RAF token usage is reported in the same message's usage chunk.
 
@@ -55,7 +55,7 @@ RAF writes native Session events while it runs, so Chat and Trajectory show its 
 
 - each RAF tool call appends an assistant message with the agent label (`root`, `branch#1@1`) and the model's motivation, then a `tool-call` block;
 - the matching result appends a native `tool/result` event, so the tool card expands normally;
-- internal RAF tools (`read`, `grep`, `llm_query`, `branch`, `calculator`) and DSH tools (`dsh_read`, `dsh_bash`, and so on) use the same inline rows;
+- internal RAF tools (`read`, `grep`, `llm_query`, `branch`, `calculator`) and DSH tools (`read_file`, `bash`, and so on) use the same inline rows;
 - subagent calls carry their `branch` label, so the root and every subagent show their own tools in order.
 
 The events are synthetic: RAF already executed the tool, and the Host appends only the display records. The tool is not executed again. The separate live dock was removed; the **RAF** tab remains the detailed per-agent inspector.
@@ -70,7 +70,7 @@ The plugin registers a dedicated **RAF** tab in the conversation view ring, betw
 - Header: run selector, live status, model, settings, steps, agents, tokens, cache hit rate, and duration.
 - New runs appear automatically; completed runs remain selectable. The Host keeps the latest 30 runs in memory, so a Host restart clears the list.
 
-The view shows both RAF's context tools (`llm_query`, `grep`, `read`, `tally`, `branch`, `calculator`) and the `dsh_*` DSH tools. RAF branch agents are engine subagents; the DSH `subagent` tool is not exposed.
+The view shows both RAF's context tools (`llm_query`, `grep`, `read`, `tally`, `branch`, `calculator`) and the bridged DSH file tools. RAF branch agents are engine subagents; the DSH `subagent` tool is not exposed.
 
 The Host exposes the run data at `GET /plugins/@raf/dsh-plugin/runs?sessionId=...` and `GET /plugins/@raf/dsh-plugin/runs/<id>`.
 
@@ -86,7 +86,7 @@ The trace is capped at 12,000 characters and is skipped when a later RAF run reb
 
 Limits of this first integration:
 
-- RAF's own `read`/`grep` tools scan the transcript. The `dsh_*` tools run the real DSH tools, with the normal approval policy.
+- RAF's own `read`/`grep` tools scan the transcript. The bridged DSH tools run the real DSH tools, with the normal approval policy.
 - DSH tool calls from RAF are shown in the RAF view. They are not native session `tool/call` events, so Chat and Trajectory do not render them as tool rows; a custom Agent driver is required for that.
 - DSH's synthetic user messages are context, not the question. The latest human message is the question.
 - An answer cut by the output limit or an unclosed `<answer>` is rejected and retried with a shorter complete answer.

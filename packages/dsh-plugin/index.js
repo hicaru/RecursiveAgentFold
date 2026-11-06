@@ -376,6 +376,10 @@ function sanitizeRunEvent(event) {
 const RAF_DSH_TOOLS = Object.freeze(
   new Set(['read', 'glob', 'grep', 'bash', 'write', 'edit', 'apply_patch', 'lsp', 'web_search', 'web_fetch']),
 );
+const RAF_DSH_NAME = Object.freeze({
+  read: 'read_file',
+  grep: 'grep_files',
+});
 
 function contentText(blocks) {
   if (!Array.isArray(blocks)) return '';
@@ -431,7 +435,7 @@ function createDshTools(ctx, sessionId, signal) {
     if (definition.deferLoading === true) continue;
     if (!RAF_DSH_TOOLS.has(definition.name)) continue;
     extra.push({
-      name: `dsh_${definition.name}`,
+      name: RAF_DSH_NAME[definition.name] ?? definition.name,
       description: definition.description,
       parameters: definition.parameters,
       execute: async (args, toolCtx) => {
@@ -591,7 +595,7 @@ function createInlineTrace(ctx, outer, signal) {
           ],
           source: { kind: 'model', provider: outer.provider, model: outer.model },
         };
-        if (append('assistant/message', { turn, step, message }, { surfaceOp: 'append' }) === undefined) return;
+        if (append('assistant/message', { turn, step, message, stream: [] }, { surfaceOp: 'append' }) === undefined) return;
         const call = append('tool/call', { turn, step, callId, name, arguments: args });
         const key = `${label}\u0000${Number(event.step ?? 0)}\u0000${name}`;
         const list = pending.get(key) ?? [];
