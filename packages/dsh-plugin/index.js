@@ -530,6 +530,102 @@ function createRunRegistry() {
   };
 }
 
+function getLiveSession(ctx, sessionId) {
+  try {
+    const agents = ctx.get('agents');
+    const agent = agents !== undefined && typeof agents.get === 'function' ? agents.get(sessionId) : undefined;
+    const session = agent?.session;
+    return session !== undefined && typeof session.append === 'function' ? session : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sessionPosition(session) {
+  const log = Array.isArray(session.log) ? session.log : [];
+  let turn = 1;
+  let step = 0;
+  for (const event of log) {
+    if (event?.type === 'turn/start' && typeof event.data?.turn === 'number') turn = event.data.turn;
+    if (event?.type === 'step/start') {
+      if (typeof event.data?.turn === 'number') turn = event.data.turn;
+      if (typeof event.data?.step === 'number') step = event.data.step;
+    }
+  }
+  return { turn, step };
+}
+
+function createInlineTrace(ctx, outer, signal) {
+  const session = getLiveSession(ctx, outer.sessionId);
+  if (session === undefined) return () => {};
+  const { turn, step } = sessionPosition(session);
+  const pending = new Map();
+  let failed = false;
+  const append = (type, data, opts) => {
+    if (failed) return undefined;
+    try {
+      return session.append(type, data, ...(opts === undefined ? [] : [opts]));
+    } catch (error) {
+      failed = true;
+      console.error('RAF: cannot append inline session event', error);
+      return undefined;
+    }
+  };
+  return (event) => {
+    if (signal?.aborted || event === null || typeof event !== 'object') return;
+    try {
+      if (event.type === 'tool_call') {
+        const action = event.action !== null && typeof event.action === 'object' ? event.action : {};
+        const name = typeof action.name === 'string' && action.name !== '' ? action.name : 'tool';
+        const args = JSON.stringify(action.arguments ?? {});
+        const callId = randomUUID();
+        const label = String(event.agent ?? 'root');
+        const motivation = String(event.motivation ?? '').replace(/\s+/g, ' ').trim().slice(0, 400);
+        const line = motivation === '' ? `${label} · ${name}` : `${label} · ${motivation}`;
+        const message = {
+          id: randomUUID(),
+          role: 'assistant',
+          content: [
+            { type: 'text', text: line },
+            { type: 'tool-call', id: callId, name, arguments: args },
+          ],
+          source: { kind: 'model', provider: outer.provider, model: outer.model },
+        };
+        if (append('assistant/message', { turn, step, message }, { surfaceOp: 'append' }) === undefined) return;
+        const call = append('tool/call', { turn, step, callId, name, arguments: args });
+        const key = `${label}\u0000${Number(event.step ?? 0)}\u0000${name}`;
+        const list = pending.get(key) ?? [];
+        list.push({ callId, callSeq: call?.seq });
+        pending.set(key, list);
+        return;
+      }
+      if (event.type === 'tool_result') {
+        const key = `${String(event.agent ?? 'root')}\u0000${Number(event.step ?? 0)}\u0000${String(event.name ?? '')}`;
+        const list = pending.get(key);
+        const item = list === undefined ? undefined : list.shift();
+        if (item === undefined) return;
+        const observation = shortText(event.observation, 6000);
+        const message = {
+          id: randomUUID(),
+          role: 'tool',
+          toolCallId: item.callId,
+          source: { kind: 'tool', callId: item.callId },
+          content: [{ type: 'text', text: observation === '' ? '—' : observation }],
+          isError: event.error !== undefined,
+        };
+        append(
+          'tool/result',
+          { turn, step, message },
+          { surfaceOp: 'append', ...(item.callSeq === undefined ? {} : { sourceEventSeqs: [item.callSeq] }) },
+        );
+      }
+    } catch (error) {
+      failed = true;
+      console.error('RAF: cannot render inline session event', error);
+    }
+  };
+}
+
 async function* rafStream(ctx, outer, settings, runs) {
   const signal = outer.signal;
   let run;
@@ -565,6 +661,7 @@ async function* rafStream(ctx, outer, settings, runs) {
     const rootLLM = new DshLlmClient(ctx, outer, rootProfile, outer.reasoningEffort);
     const queryLLM = new DshLlmClient(ctx, outer, queryProfile, undefined);
     const extraTools = createDshTools(ctx, outer.sessionId, signal);
+    const inline = createInlineTrace(ctx, outer, signal);
     const events = [];
     const engine = new raf.RecursiveAgentFold({
       rootLLM,
@@ -579,6 +676,7 @@ async function* rafStream(ctx, outer, settings, runs) {
       onEvent: (event) => {
         events.push(event);
         runs.append(run, event);
+        inline(event);
       },
     });
     const result = await engine.run(effectiveQuestion);

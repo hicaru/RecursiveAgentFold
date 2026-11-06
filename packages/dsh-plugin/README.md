@@ -49,17 +49,16 @@ RAF runs inside one outer model request. Its internal model calls use the Sessio
 
 DSH marks internal calls with `purpose` (`session-title`, `compaction`, `auto-review`, `onboarding_use_case`). The listener passes every such call through. RAF therefore never answers a title prompt or a compaction summary.
 
-### Live RAF activity above the composer
+### Inline RAF tool calls
 
-RAF Sessions also get a live dock above the composer, aligned with the composer card like the todo/goal docks. It polls the run registry and shows the current run in chronological order:
+RAF writes native Session events while it runs, so Chat and Trajectory show its work inline:
 
-- the dock prefers a **running** run over a newer finished run, so a background title call cannot hide the active turn;
-- agent chips: `Root` (selected by default), `All agents`, then every `branch` subagent; click one to filter its work;
-- feed rows: agent start/finish with the agent question, steps with context size and block count, LLM calls with model/output/latency, model responses with reasoning, tool calls, `llm_query` scans, folds, answers, errors;
-- click an `llm`, response, tool, fold, or answer row to expand reasoning, arguments, results, summaries, or the final text;
-- a running run stays visible; a finished run lingers for five seconds, then the dock hides. Collapse or close it earlier. The RAF tab has the full per-agent tree.
+- each RAF tool call appends an assistant message with the agent label (`root`, `branch#1@1`) and the model's motivation, then a `tool-call` block;
+- the matching result appends a native `tool/result` event, so the tool card expands normally;
+- internal RAF tools (`read`, `grep`, `llm_query`, `branch`, `calculator`) and DSH tools (`dsh_read`, `dsh_bash`, and so on) use the same inline rows;
+- subagent calls carry their `branch` label, so the root and every subagent show their own tools in order.
 
-The dock is client-side UI over the runs API. The tool calls still are not native Session events.
+The events are synthetic: RAF already executed the tool, and the Host appends only the display records. The tool is not executed again. The separate live dock was removed; the **RAF** tab remains the detailed per-agent inspector.
 
 ### RAF runs view
 
@@ -112,7 +111,6 @@ The settings page writes `{ depth, reserve, concurrency }` to `localStorage` and
 | `conversation.input.left` | `raf-engine` | Composer engine switch. |
 | `shell.overlay` | `raf-engine-menu` | Fixed engine menu above the composer. |
 | `conversation.view` | `raf-runs` | RAF run inspector tab. |
-| `conversation.input.dock` | `raf-live` | Live RAF activity above the composer. |
 
 ## Install
 
