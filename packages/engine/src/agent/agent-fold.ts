@@ -54,6 +54,8 @@ export type Termination = 'answer' | 'forced_answer' | 'max_steps' | 'error' | '
 
 /** Provider safety refusal (Z.ai 1301): no retry loop can repair the payload. */
 const PROVIDER_REFUSAL = /\/1301\]|unsafe or sensitive/i;
+/** Protocol tags belong outside the answer text. */
+const PROTOCOL_TAG = /<\s*\/?\s*(?:think|folding|folded_output|fold|折叠|motivation|explanation|动机|tool_call|answer)\b[^>]*>/i;
 export const DEFAULT_MAX_OBSERVATION_TOKENS = 3200;
 export const DEFAULT_MIN_DEEP_FOLD_BLOCKS = 6;
 
@@ -254,6 +256,8 @@ export class AgentFoldAgent {
             p.errors.push('the <answer> hit the output token limit; produce a complete, shorter final answer');
           } else if (answerOpen && !answerClosed) {
             p.errors.push('the <answer> is not closed; produce a complete final answer');
+          } else if (PROTOCOL_TAG.test(p.answer)) {
+            p.errors.push('the <answer> contains a protocol tag; return only the answer text');
           }
         }
         if (p.errors.length === 0 && p.answer !== undefined) {

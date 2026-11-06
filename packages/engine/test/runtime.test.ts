@@ -726,6 +726,42 @@ describe('answer echo guard', () => {
   });
 });
 
+describe('answer protocol tag guard', () => {
+  it('rejects an answer that contains a protocol closing tag and retries', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const summary =
+      'ARCHITECTURE summary with many details about the engine loop, fold state, cache layout, llm_query chunks, branch recursion, prompts, parsers, and the applyFold transition.';
+    const responses = [
+      '<motivation>probe the context.</motivation><tool_call>{"name":"probe","arguments":{}}</tool_call>',
+      `<folding>{"range":[0,0],"summary":${JSON.stringify(summary)}}</folding><motivation>answer.</motivation><answer>copied text"}</folding></answer>`,
+      `<folding>{"range":[0,0],"summary":${JSON.stringify(summary)}}</folding><motivation>answer cleanly.</motivation><answer>clean final answer</answer>`,
+    ];
+    const llm = new ScriptedLLM((_req, index) => responses[Math.min(index, responses.length - 1)]!);
+    const events: AgentEvent[] = [];
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [
+        {
+          name: 'probe',
+          description: 'probe the context',
+          parameters: { type: 'object', properties: {} },
+          async execute() {
+            return 'observed';
+          },
+        },
+      ],
+      store,
+      maxSteps: 6,
+      maxFormatRetries: 1,
+      onEvent: (event) => events.push(event),
+    });
+    const result = await agent.run('summarize the project');
+    expect(result.answer).toBe('clean final answer');
+    expect(events.some((event) => event.type === 'format_error' && event.errors.some((error) => error.includes('protocol tag')))).toBe(true);
+  });
+});
+
 describe('truncated answer guard', () => {
   it('rejects an answer cut by the output limit and retries', async () => {
     const store = new ContextStore();
