@@ -6,8 +6,10 @@ window.__ModuleLoader__.load({
 
     const NS = 'raf';
     const PANEL_ID = 'raf';
-    const SETTINGS_KEY = 'raf.dsh.settings.v1';
-    const ENGINE_CONTEXTFOLD = 'contextfold';
+    const SETTINGS_KEY = 'raf.dsh.settings.v2';
+    const ENGINES_KEY = 'raf.dsh.engines.v1';
+    const ENGINE_API = '/plugins/@raf/dsh-plugin/engine';
+    const ENGINE_STANDARD = 'standard';
     const ENGINE_RAF = 'raf';
 
     const DEPTH_MIN = 1;
@@ -19,11 +21,9 @@ window.__ModuleLoader__.load({
     const CONCURRENCY_MAX = 8;
 
     const DEFAULT_SETTINGS = Object.freeze({
-      engine: ENGINE_CONTEXTFOLD,
       depth: 2,
       reserve: 0.3,
       concurrency: 4,
-      cacheLayout: true,
     });
 
     const EN = Object.freeze({
@@ -42,8 +42,6 @@ window.__ModuleLoader__.load({
       'tuning.reserve.desc': 'Share of each reader window kept free for the prompt.',
       'tuning.concurrency.title': 'Readers',
       'tuning.concurrency.desc': 'Parallel llm_query calls over the context.',
-      'tuning.cache.title': 'Cache layout',
-      'tuning.cache.desc': 'Place static chunks before the query. This keeps the prompt cache warm.',
       'tuning.decrease': 'Decrease',
       'tuning.increase': 'Increase',
       'menu.head': 'Engine',
@@ -66,8 +64,6 @@ window.__ModuleLoader__.load({
       'tuning.reserve.desc': 'Доля окна читателя, свободная для промпта.',
       'tuning.concurrency.title': 'Читатели',
       'tuning.concurrency.desc': 'Параллельные вызовы llm_query по контексту.',
-      'tuning.cache.title': 'Раскладка кэша',
-      'tuning.cache.desc': 'Ставьте статические чанки перед запросом, чтобы prompt cache оставался тёплым.',
       'tuning.decrease': 'Уменьшить',
       'tuning.increase': 'Увеличить',
       'menu.head': 'Движок',
@@ -108,12 +104,7 @@ window.__ModuleLoader__.load({
 .rafx-stepBtn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--rafx-ink)}
 .rafx-stepBtn:disabled{opacity:.35;cursor:default}
 .rafx-stepValue{min-width:20px;text-align:center;font-family:var(--ds-font-family-code,monospace);font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}
-.rafx-switch{position:relative;flex:none;width:36px;height:20px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:var(--rafx-surface-2);cursor:pointer;transition:background .16s,border-color .16s}
-.rafx-switch[aria-checked=true]{border-color:transparent;background:var(--rafx-business)}
-.rafx-switchKnob{position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:var(--dsw-alias-label-primary-foreground);box-shadow:0 1px 2px color-mix(in srgb,var(--rafx-ink) 22%,transparent);transition:transform .16s var(--ds-ease-in-out)}
-.rafx-switch[aria-checked=true] .rafx-switchKnob{transform:translateX(16px)}
 .rafx-sideIcon{position:relative;display:inline-flex;align-items:center;justify-content:center;color:currentColor}
-.rafx-sideDot{position:absolute;right:-1px;bottom:-1px;width:5px;height:5px;border-radius:50%;background:var(--dsw-alias-brand-primary);box-shadow:0 0 0 1.5px var(--dsw-specific-sidebar-fill)}
 .rafx-sideIcon[data-active=true]{color:var(--dsw-alias-brand-primary)}
 .rafx-engine{display:inline-flex;align-items:center;gap:4px;height:28px;max-width:220px;padding:0 4px 0 8px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;font-weight:500;line-height:20px;cursor:pointer;transition:background .14s,color .14s}
 .rafx-engine:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
@@ -131,12 +122,8 @@ window.__ModuleLoader__.load({
 .rafx-option[aria-checked=true] .rafx-optionCheck{opacity:1}
 @keyframes rafx-pop{from{opacity:0;transform:translateY(4px) scale(.985)}to{opacity:1;transform:none}}
 @media (max-width:640px){.rafx-header{padding-top:20px}.rafx-row{flex-direction:column;align-items:stretch;gap:10px;padding:14px 0}.rafx-rowControl{justify-content:flex-start}.rafx-range{width:100%}}
-@media (prefers-reduced-motion:reduce){.rafx-menu{animation:none}.rafx-switch,.rafx-switchKnob,.rafx-segBtn,.rafx-engine,.rafx-engineChevron{transition:none}}
+@media (prefers-reduced-motion:reduce){.rafx-menu{animation:none}.rafx-segBtn,.rafx-engine,.rafx-engineChevron{transition:none}}
 `;
-
-    function toEngine(value) {
-      return value === ENGINE_RAF ? ENGINE_RAF : ENGINE_CONTEXTFOLD;
-    }
 
     function toInteger(value, fallback, min, max) {
       const number = typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : fallback;
@@ -152,11 +139,9 @@ window.__ModuleLoader__.load({
     function sanitizeSettings(value) {
       const source = value !== null && typeof value === 'object' ? value : {};
       return Object.freeze({
-        engine: toEngine(source.engine),
         depth: toInteger(source.depth, DEFAULT_SETTINGS.depth, DEPTH_MIN, DEPTH_MAX),
         reserve: toReserve(source.reserve),
         concurrency: toInteger(source.concurrency, DEFAULT_SETTINGS.concurrency, CONCURRENCY_MIN, CONCURRENCY_MAX),
-        cacheLayout: typeof source.cacheLayout === 'boolean' ? source.cacheLayout : DEFAULT_SETTINGS.cacheLayout,
       });
     }
 
@@ -206,6 +191,7 @@ window.__ModuleLoader__.load({
           snapshot = sanitizeSettings({ ...snapshot, ...patch });
           persist();
           emit();
+          queueSettingsSync();
         },
         resetTuning() {
           snapshot = sanitizeSettings({
@@ -213,16 +199,10 @@ window.__ModuleLoader__.load({
             depth: DEFAULT_SETTINGS.depth,
             reserve: DEFAULT_SETTINGS.reserve,
             concurrency: DEFAULT_SETTINGS.concurrency,
-            cacheLayout: DEFAULT_SETTINGS.cacheLayout,
           });
           persist();
           emit();
-        },
-        setEngine(engine) {
-          if (snapshot.engine === engine) return;
-          snapshot = sanitizeSettings({ ...snapshot, engine });
-          persist();
-          emit();
+          queueSettingsSync();
         },
         replace(next) {
           snapshot = next;
@@ -233,14 +213,128 @@ window.__ModuleLoader__.load({
 
     const settingsStore = createSettingsStore();
 
-    function createMenuStore() {
-      let snapshot = Object.freeze({ open: false, rect: null, trigger: null });
+    const touchedEngines = new Set();
+
+    function sanitizeEngine(value) {
+      return value === ENGINE_RAF ? ENGINE_RAF : ENGINE_STANDARD;
+    }
+
+    function readEngines() {
+      try {
+        const raw = window.localStorage.getItem(ENGINES_KEY);
+        if (raw === null) return Object.freeze({});
+        const parsed = JSON.parse(raw);
+        if (parsed === null || typeof parsed !== 'object') return Object.freeze({});
+        const next = {};
+        for (const [sessionId, value] of Object.entries(parsed)) {
+          if (typeof sessionId === 'string' && sessionId) next[sessionId] = sanitizeEngine(value);
+        }
+        return Object.freeze(next);
+      } catch {
+        return Object.freeze({});
+      }
+    }
+
+    function createEngineStore() {
+      let snapshot = readEngines();
       const listeners = new Set();
       const emit = () => {
         for (const listener of listeners) listener();
       };
-      const set = (open, rect, trigger) => {
-        snapshot = Object.freeze({ open, rect, trigger });
+      const persist = () => {
+        try {
+          window.localStorage.setItem(ENGINES_KEY, JSON.stringify(snapshot));
+        } catch {
+          // Storage is optional. The Host state still applies.
+        }
+      };
+      return {
+        getSnapshot: () => snapshot,
+        subscribe(listener) {
+          listeners.add(listener);
+          return () => {
+            listeners.delete(listener);
+          };
+        },
+        get(sessionId) {
+          if (typeof sessionId !== 'string' || !sessionId) return ENGINE_STANDARD;
+          return sanitizeEngine(snapshot[sessionId]);
+        },
+        set(sessionId, engine) {
+          if (typeof sessionId !== 'string' || !sessionId) return;
+          const next = sanitizeEngine(engine);
+          if (sanitizeEngine(snapshot[sessionId]) === next) return;
+          const draft = { ...snapshot };
+          if (next === ENGINE_STANDARD) delete draft[sessionId];
+          else draft[sessionId] = next;
+          snapshot = Object.freeze(draft);
+          persist();
+          emit();
+        },
+        replace(next) {
+          if (next === null || typeof next !== 'object') return;
+          const draft = {};
+          for (const [sessionId, value] of Object.entries(next)) {
+            if (typeof sessionId === 'string' && sessionId) draft[sessionId] = sanitizeEngine(value);
+          }
+          snapshot = Object.freeze(draft);
+          emit();
+        },
+      };
+    }
+
+    const engineStore = createEngineStore();
+
+    function useEngine(sessionId) {
+      return React.useSyncExternalStore(engineStore.subscribe, () => engineStore.get(sessionId));
+    }
+
+    function requestHost(method, payload, query) {
+      if (typeof fetch !== 'function') return Promise.reject(new Error('fetch unavailable'));
+      const suffix = query === undefined ? '' : '?' + query;
+      const init = { method, credentials: 'same-origin' };
+      if (payload !== undefined) {
+        init.headers = { 'content-type': 'application/json' };
+        init.body = JSON.stringify(payload);
+      }
+      return fetch(ENGINE_API + suffix, init).then((response) => {
+        if (!response.ok) throw new Error('RAF host request failed: ' + response.status);
+        return response.json();
+      });
+    }
+
+    function getHostEngine(sessionId) {
+      return requestHost('GET', undefined, 'sessionId=' + encodeURIComponent(sessionId)).then((data) =>
+        sanitizeEngine(data.engine),
+      );
+    }
+
+    function postHostEngine(sessionId, engine) {
+      return requestHost('POST', { sessionId, engine, settings: settingsStore.getSnapshot() });
+    }
+
+    function postHostSettings(settings) {
+      return requestHost('POST', { settings });
+    }
+
+    let settingsSyncTimer = 0;
+
+    function queueSettingsSync() {
+      if (settingsSyncTimer !== 0) window.clearTimeout(settingsSyncTimer);
+      settingsSyncTimer = window.setTimeout(() => {
+        settingsSyncTimer = 0;
+        void postHostSettings(settingsStore.getSnapshot()).catch(() => {});
+      }, 200);
+    }
+
+    function createMenuStore() {
+      let snapshot = Object.freeze({ open: false, rect: null, trigger: null, sessionId: null });
+      const listeners = new Set();
+      const emit = () => {
+        for (const listener of listeners) listener();
+      };
+      const set = (open, rect, trigger, sessionId) => {
+        snapshot = Object.freeze({ open, rect, trigger, sessionId });
         emit();
       };
       return {
@@ -251,18 +345,18 @@ window.__ModuleLoader__.load({
             listeners.delete(listener);
           };
         },
-        open(trigger) {
+        open(trigger, sessionId) {
           if (!trigger || typeof trigger.getBoundingClientRect !== 'function') return;
-          set(true, trigger.getBoundingClientRect(), trigger);
+          set(true, trigger.getBoundingClientRect(), trigger, typeof sessionId === 'string' ? sessionId : null);
         },
         close() {
           if (!snapshot.open) return;
-          set(false, null, snapshot.trigger);
+          set(false, null, snapshot.trigger, snapshot.sessionId);
         },
         refresh() {
           const trigger = snapshot.trigger;
           if (!snapshot.open || !trigger || !trigger.isConnected) return;
-          snapshot = Object.freeze({ open: true, rect: trigger.getBoundingClientRect(), trigger });
+          snapshot = Object.freeze({ open: true, rect: trigger.getBoundingClientRect(), trigger, sessionId: snapshot.sessionId });
           emit();
         },
       };
@@ -380,29 +474,43 @@ window.__ModuleLoader__.load({
       };
     }
 
-    function EngineControl({ t }) {
-      const settings = useStore(settingsStore);
+    function EngineControl({ t, sessionId }) {
+      const engine = useEngine(sessionId);
       const menu = useStore(menuStore);
       const ref = React.useRef(null);
-      const text = engineText(t, settings.engine);
+      const text = engineText(t, engine);
+
+      React.useEffect(() => {
+        if (typeof sessionId !== 'string' || !sessionId) return undefined;
+        let active = true;
+        void getHostEngine(sessionId)
+          .then((hostEngine) => {
+            if (active && !touchedEngines.has(sessionId)) engineStore.set(sessionId, hostEngine);
+          })
+          .catch(() => {});
+        return () => {
+          active = false;
+        };
+      }, [sessionId]);
+
       return h(
         'button',
         {
           ref,
           type: 'button',
           className: 'rafx-engine',
-          'data-engine': settings.engine,
+          'data-engine': engine,
           'aria-haspopup': 'menu',
           'aria-expanded': menu.open,
           'aria-label': t('switch.aria', { engine: text.title }),
           onClick: () => {
             if (menu.open) menuStore.close();
-            else menuStore.open(ref.current);
+            else menuStore.open(ref.current, sessionId);
           },
           onKeyDown: (event) => {
             if (event.key === 'ArrowDown') {
               event.preventDefault();
-              if (!menu.open) menuStore.open(ref.current);
+              if (!menu.open) menuStore.open(ref.current, sessionId);
             } else if (event.key === 'Escape' && menu.open) {
               event.preventDefault();
               menuStore.close();
@@ -416,7 +524,8 @@ window.__ModuleLoader__.load({
 
     function EngineMenu({ t }) {
       const menu = useStore(menuStore);
-      const settings = useStore(settingsStore);
+      const sessionId = menu.sessionId;
+      const engine = useEngine(sessionId);
       const ref = React.useRef(null);
       const [pos, setPos] = React.useState(null);
       const open = menu.open;
@@ -430,9 +539,19 @@ window.__ModuleLoader__.load({
         });
       };
 
-      const choose = (engine) => {
-        settingsStore.setEngine(engine);
+      const choose = (nextEngine) => {
+        if (typeof sessionId !== 'string' || !sessionId) {
+          closeMenu(true);
+          return;
+        }
+        const previous = engineStore.get(sessionId);
+        touchedEngines.add(sessionId);
+        engineStore.set(sessionId, nextEngine);
         closeMenu(true);
+        void postHostEngine(sessionId, nextEngine).catch(() => {
+          engineStore.set(sessionId, previous);
+          console.error('RAF: engine switch failed');
+        });
       };
 
       React.useLayoutEffect(() => {
@@ -517,9 +636,9 @@ window.__ModuleLoader__.load({
 
       if (!open) return null;
 
-      const options = [ENGINE_CONTEXTFOLD, ENGINE_RAF].map((engine) => {
-        const text = engineText(t, engine);
-        const selected = settings.engine === engine;
+      const options = [ENGINE_STANDARD, ENGINE_RAF].map((option) => {
+        const text = engineText(t, option);
+        const selected = engine === option;
         return h(
           'button',
           {
@@ -527,9 +646,9 @@ window.__ModuleLoader__.load({
             type: 'button',
             role: 'menuitemradio',
             'aria-checked': selected,
-            'data-raf-option': engine,
+            'data-raf-option': option,
             className: 'rafx-option',
-            onClick: () => choose(engine),
+            onClick: () => choose(option),
           },
           h('span', { className: 'rafx-optionLabel' }, text.option),
           h('span', { className: 'rafx-optionCheck', 'aria-hidden': 'true' }, h(CheckGlyph, { size: 14 })),
@@ -557,18 +676,14 @@ window.__ModuleLoader__.load({
     }
 
     function RafIcon({ size = 18, active = false }) {
-      const settings = useStore(settingsStore);
-      const rafOn = settings.engine === ENGINE_RAF;
       return h(
         'span',
         {
           className: 'rafx-sideIcon',
           'data-active': active ? 'true' : undefined,
-          'data-raf': rafOn ? 'true' : undefined,
           style: { width: size, height: size },
         },
         h(RafMark, { size }),
-        rafOn ? h('span', { className: 'rafx-sideDot', 'aria-hidden': 'true' }) : null,
       );
     }
 
@@ -619,21 +734,6 @@ window.__ModuleLoader__.load({
           },
           h(PlusGlyph, { size: 12 }),
         ),
-      );
-    }
-
-    function Switch({ label, checked, onChange }) {
-      return h(
-        'button',
-        {
-          type: 'button',
-          role: 'switch',
-          className: 'rafx-switch',
-          'aria-checked': checked,
-          'aria-label': label,
-          onClick: () => onChange(!checked),
-        },
-        h('span', { className: 'rafx-switchKnob', 'aria-hidden': 'true' }),
       );
     }
 
@@ -745,15 +845,6 @@ window.__ModuleLoader__.load({
                   onChange: (value) => settingsStore.update({ concurrency: value }),
                 }),
               }),
-              h(SettingRow, {
-                label: t('tuning.cache.title'),
-                hint: t('tuning.cache.desc'),
-                control: h(Switch, {
-                  label: t('tuning.cache.title'),
-                  checked: settings.cacheLayout,
-                  onChange: (value) => settingsStore.update({ cacheLayout: value }),
-                }),
-              }),
             ),
           ),
         ),
@@ -774,14 +865,29 @@ window.__ModuleLoader__.load({
 
       settingsStore.hydrate();
 
+      void postHostSettings(settingsStore.getSnapshot()).catch(() => {});
+
       ctx.effect(() => {
         const onStorage = (event) => {
+          if (event.key === ENGINES_KEY) {
+            engineStore.replace(readEngines());
+            return;
+          }
           if (event.key !== SETTINGS_KEY) return;
           settingsStore.replace(event.newValue === null ? DEFAULT_SETTINGS : parseSettings(event.newValue));
         };
         window.addEventListener('storage', onStorage);
         return () => window.removeEventListener('storage', onStorage);
       }, 'raf: settings sync');
+
+      ctx.effect(
+        () => () => {
+          if (settingsSyncTimer === 0) return;
+          window.clearTimeout(settingsSyncTimer);
+          settingsSyncTimer = 0;
+        },
+        'raf: settings sync timer',
+      );
 
       ctx.effect(
         () =>

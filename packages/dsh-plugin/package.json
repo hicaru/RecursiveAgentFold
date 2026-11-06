@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "RAF engine settings panel and composer engine switch for the DeepSeek Harness Web UI.",
+  "description": "Recursive AgentFold engine runtime, settings panel, and composer engine switch for the DeepSeek Harness Web UI.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
