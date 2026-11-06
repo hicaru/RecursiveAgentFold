@@ -1,0 +1,98 @@
+{
+  "bench": "longbench-pro",
+  "method": "raf",
+  "n": 20,
+  "meanScore": 0.65,
+  "correct": 13,
+  "meanOfficial": 0.65,
+  "meanLenient": 0.65,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 0.65,
+  "meanSteps": 3.9,
+  "meanWallSec": 210.17315,
+  "formatIssues": 5,
+  "folds": {
+    "granular": 58,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 1,
+  "tokens": {
+    "prompt": 484152,
+    "cached": 227200,
+    "completion": 238799,
+    "cacheHitRate": 0.46927411226226473
+  },
+  "byRole": {
+    "root": {
+      "calls": 81,
+      "promptTokens": 342456,
+      "completionTokens": 235822,
+      "cachedTokens": 225408,
+      "reasoningTokens": 209630,
+      "latencyMs": 3597197,
+      "errors": 0,
+      "cacheHitRate": 0.6582101058238139
+    },
+    "llm_query": {
+      "calls": 16,
+      "promptTokens": 141696,
+      "completionTokens": 2977,
+      "cachedTokens": 1792,
+      "reasoningTokens": 784,
+      "latencyMs": 89390,
+      "errors": 0,
+      "cacheHitRate": 0.012646793134598013
+    }
+  },
+  "byTask": {
+    "T1. Retrieval & Ranking": {
+      "n": 3,
+      "score": 0.3333333333333333
+    },
+    "T2. Sequencing & Structure Reconstruction": {
+      "n": 3,
+      "score": 1
+    },
+    "T5. Attribution & Citation Alignment": {
+      "n": 2,
+      "score": 1
+    },
+    "T6. Aggregation & Clustering": {
+      "n": 7,
+      "score": 0.5714285714285714
+    },
+    "T9. Version & Code Diff Analysis": {
+      "n": 1,
+      "score": 1
+    },
+    "T3. Evidence-Grounded QA": {
+      "n": 1,
+      "score": 1
+    },
+    "T10. Rule Induction & In-Context Learning": {
+      "n": 1,
+      "score": 1
+    },
+    "T7. Consistency & Compliance Checking": {
+      "n": 2,
+      "score": 0
+    }
+  },
+  "byAnswerType": {
+    "?": {
+      "n": 20,
+      "score": 0.65
+    }
+  },
+  "cost": {
+    "totalUsd": 1.282618,
+    "perTaskUsd": 0.064131,
+    "cacheSavedUsd": 0.25718,
+    "byRoleUsd": {
+      "root": 1.26009,
+      "llm_query": 0.022528
+    }
+  }
+}

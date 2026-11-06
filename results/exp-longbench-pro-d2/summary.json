@@ -1,0 +1,78 @@
+{
+  "bench": "longbench-pro",
+  "method": "raf",
+  "n": 6,
+  "meanScore": 0.3333333333333333,
+  "correct": 2,
+  "meanOfficial": 0.3333333333333333,
+  "meanLenient": 0.3333333333333333,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 0.3333333333333333,
+  "meanSteps": 4,
+  "meanWallSec": 355.1596666666667,
+  "formatIssues": 1,
+  "folds": {
+    "granular": 18,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 1,
+  "tokens": {
+    "prompt": 131700,
+    "cached": 66368,
+    "completion": 69505,
+    "cacheHitRate": 0.5039331814730448
+  },
+  "byRole": {
+    "root": {
+      "calls": 25,
+      "promptTokens": 96974,
+      "completionTokens": 68339,
+      "cachedTokens": 66368,
+      "reasoningTokens": 60518,
+      "latencyMs": 1806997,
+      "errors": 0,
+      "cacheHitRate": 0.6843896302101594
+    },
+    "llm_query": {
+      "calls": 2,
+      "promptTokens": 34726,
+      "completionTokens": 1166,
+      "cachedTokens": 0,
+      "reasoningTokens": 73,
+      "latencyMs": 30629,
+      "errors": 0,
+      "cacheHitRate": 0
+    }
+  },
+  "byTask": {
+    "T1. Retrieval & Ranking": {
+      "n": 2,
+      "score": 0
+    },
+    "T2. Sequencing & Structure Reconstruction": {
+      "n": 3,
+      "score": 0.6666666666666666
+    },
+    "T5. Attribution & Citation Alignment": {
+      "n": 1,
+      "score": 0
+    }
+  },
+  "byAnswerType": {
+    "?": {
+      "n": 6,
+      "score": 0.3333333333333333
+    }
+  },
+  "cost": {
+    "totalUsd": 0.366588,
+    "perTaskUsd": 0.061098,
+    "cacheSavedUsd": 0.07566,
+    "byRoleUsd": {
+      "root": 0.360796,
+      "llm_query": 0.005792
+    }
+  }
+}

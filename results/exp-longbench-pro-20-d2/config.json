@@ -1,0 +1,78 @@
+{
+  "bench": "longbench-pro",
+  "method": "raf",
+  "startedAt": "2026-11-06T11:20:50.033Z",
+  "tasks": 20,
+  "taskIds": [
+    "longbench-pro-401c9ee31d21dabf734bc2f48d13a4ebe30368041a84cdb460c964f9228120c3",
+    "longbench-pro-3d49df06d3b2dc8d20eae1c72ee97496847db4c9cf99956ca4104ab5c1453d33",
+    "longbench-pro-7d080fa388c88fbf84bd4345301bd0a267967970f9e3ce584872fa23760a16c9",
+    "longbench-pro-a2f4d35dd6d73b1e4a02355c7e293938dc2e3ca4151f8771989d7a9c607abde0",
+    "longbench-pro-0397898cd90615ea4a2727268ad77259fe5d50c85025e622be5e89936828ce4e",
+    "longbench-pro-c59303e01130cfb20abea74d63bf61646def20eddcb4d4d986ff08ac3d46de04",
+    "longbench-pro-c41d743b90182fec371f8a7fa53abda174196280c2df3347647d964650620a65",
+    "longbench-pro-29f2b2619d42bd84ad7a85b12e0d8df67bb879643eeb2be4a28681c6eda5f25b",
+    "longbench-pro-2bc1b1da4f5200e446327cf5141cb3b49b09ce016d1f127f54fb5ffb921a2fa4",
+    "longbench-pro-b2d18db83b5088c6c0c7a2e98d458516736ebec2d7dc147f3b16ec10bee92baf",
+    "longbench-pro-3139d2757c481648a56b95d46262efc28df133da70ef5c1b4602ffbc1c201d9c",
+    "longbench-pro-35ddea1dc1d6984bf63f9a767bdbefdd770b363e92ed73c69c7f51927c4ca1fc",
+    "longbench-pro-af5bc2c9fb904c737e089fbe9326abe295be55e589b4844c02c13c25c3ada068",
+    "longbench-pro-a545274918d88e2d95ac41b5a5f9124ae31f9fb46f8174acffc6124bec52155d",
+    "longbench-pro-00e65818883eddac9ef44659bd14fd17a930c4cab1f0b47409aacc4ca45ab868",
+    "longbench-pro-e05d69d0f0f2d51d34fe5aede86ea6d0f5059e3a2eef846575513e72af004d1e",
+    "longbench-pro-220dfafb8f4c4d31ec2b0239a646f0fc7ea2ae6f247295427c8a6dc9ca805a16",
+    "longbench-pro-16e1e7b1428b7179b01e9a63b00fccef8542f31f097f5634c7731cbfa204335f",
+    "longbench-pro-285c204f795e9c1163f11c5f26f615ade2b14055ebc1110ef4b281dcf0955909",
+    "longbench-pro-5e393564e2235ea91b4e37678dfc0921549f7bd45749c4a0b8c9621da59f0585"
+  ],
+  "argv": [
+    "longbench-pro",
+    "--limit",
+    "20",
+    "--out",
+    "results/exp-longbench-pro-20-d2"
+  ],
+  "tools": "all",
+  "models": {
+    "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+    "root": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16000,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        }
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "query": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3-flash",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16384,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        },
+        "reasoning_effort": "low"
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "llmQuery": {
+      "reserveRatio": 0.3,
+      "concurrency": 4
+    }
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "bench": "mrcr",
+  "method": "raf",
+  "n": 6,
+  "meanScore": 1,
+  "correct": 6,
+  "meanOfficial": 1,
+  "meanLenient": 1,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 1,
+  "meanSteps": 4,
+  "meanWallSec": 289.5253333333333,
+  "formatIssues": 0,
+  "folds": {
+    "granular": 18,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 0,
+  "tokens": {
+    "prompt": 86708,
+    "cached": 71616,
+    "completion": 58342,
+    "cacheHitRate": 0.8259445495225354
+  },
+  "byRole": {
+    "root": {
+      "calls": 24,
+      "promptTokens": 86708,
+      "completionTokens": 58342,
+      "cachedTokens": 71616,
+      "reasoningTokens": 46976,
+      "latencyMs": 1428931,
+      "errors": 0,
+      "cacheHitRate": 0.8259445495225354
+    }
+  },
+  "byTask": {
+    "mrcr_coref": {
+      "n": 6,
+      "score": 1
+    }
+  },
+  "byAnswerType": {
+    "ANSWER_TYPE.STRING": {
+      "n": 6,
+      "score": 1
+    }
+  },
+  "cost": {
+    "totalUsd": 0.296454,
+    "perTaskUsd": 0.049409,
+    "cacheSavedUsd": 0.081642,
+    "byRoleUsd": {
+      "root": 0.296454
+    }
+  }
+}

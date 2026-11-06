@@ -1,0 +1,67 @@
+{
+  "bench": "codegraph",
+  "method": "raf",
+  "n": 6,
+  "meanScore": 1,
+  "correct": 6,
+  "meanOfficial": 1,
+  "meanLenient": 1,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 1,
+  "meanSteps": 11.5,
+  "meanWallSec": 117.63733333333333,
+  "formatIssues": 2,
+  "folds": {
+    "granular": 63,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 0,
+  "tokens": {
+    "prompt": 256257,
+    "cached": 216064,
+    "completion": 38646,
+    "cacheHitRate": 0.8431535528785555
+  },
+  "byRole": {
+    "root": {
+      "calls": 70,
+      "promptTokens": 256257,
+      "completionTokens": 38646,
+      "cachedTokens": 216064,
+      "reasoningTokens": 22148,
+      "latencyMs": 705593,
+      "errors": 0,
+      "cacheHitRate": 0.8431535528785555
+    }
+  },
+  "byTask": {
+    "spec_specialist": {
+      "n": 2,
+      "score": 1
+    },
+    "diamond_deps": {
+      "n": 2,
+      "score": 1
+    },
+    "chain_hop": {
+      "n": 2,
+      "score": 1
+    }
+  },
+  "byAnswerType": {
+    "ANSWER_TYPE.NUMERIC": {
+      "n": 6,
+      "score": 1
+    }
+  },
+  "cost": {
+    "totalUsd": 0.282489,
+    "perTaskUsd": 0.047082,
+    "cacheSavedUsd": 0.246313,
+    "byRoleUsd": {
+      "root": 0.282489
+    }
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "bench": "longbench-pro",
+  "method": "raf",
+  "startedAt": "2026-11-06T03:27:11.926Z",
+  "tasks": 6,
+  "taskIds": [
+    "longbench-pro-401c9ee31d21dabf734bc2f48d13a4ebe30368041a84cdb460c964f9228120c3",
+    "longbench-pro-3d49df06d3b2dc8d20eae1c72ee97496847db4c9cf99956ca4104ab5c1453d33",
+    "longbench-pro-7d080fa388c88fbf84bd4345301bd0a267967970f9e3ce584872fa23760a16c9",
+    "longbench-pro-a2f4d35dd6d73b1e4a02355c7e293938dc2e3ca4151f8771989d7a9c607abde0",
+    "longbench-pro-0397898cd90615ea4a2727268ad77259fe5d50c85025e622be5e89936828ce4e",
+    "longbench-pro-c59303e01130cfb20abea74d63bf61646def20eddcb4d4d986ff08ac3d46de04"
+  ],
+  "argv": [
+    "longbench-pro",
+    "--limit",
+    "6",
+    "--out",
+    "results/exp-longbench-pro-d2"
+  ],
+  "tools": "all",
+  "models": {
+    "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+    "root": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16000,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        }
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "query": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3-flash",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16384,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        },
+        "reasoning_effort": "low"
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "llmQuery": {
+      "reserveRatio": 0.3,
+      "concurrency": 4
+    }
+  }
+}
