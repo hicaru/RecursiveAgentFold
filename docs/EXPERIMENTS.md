@@ -27,6 +27,19 @@
 | `exp-oolong-d2` | регрессия после multi-agent апгрейда | `bench oolong --limit 5 --max-depth 2` | 5/5, fmt 1→0, cache 21.4→39.9%, cost +32% (1 сэмпл: 2 llm_query) | ✅ точность/fmt/cache; ⚠️ cost-шум |
 | `exp-needle-1m-d2` | регрессия после multi-agent апгрейда | `bench needle --tokens 1000000 --tasks 4 --max-depth 2` | 4/4 (+0.225), count-3 0.1→1.0, cost тот же | ✅ прогресс |
 
+## 2026-11-06: сравнение с публичными бенчмарками GLM (web)
+
+Модель прогонов: `glm-5.3-flash` (легкая варианта; флагман GLM-5.3 = 753B MoE, 1M контекст). Публичные long-context цифры для GLM-5.3: LongBench-Pro 72.6%, RULER 81.4%, OpenAI-MRCR 74.3%, NIAH 97.7% (насыщен, низкое доверие) — trustthebench.com. LongBench v2 (503 задачи, без инструментов): GLM-5 = 60.8% (#8, llmlearner.com, окт 2026); GLM-4.5 = 50.3% w/CoT (официальный longbench2.github.io); GLM-5.3 не публиковался.
+
+| Наш прогон (n) | Наш результат | Публичный ориентир | Оценка |
+|---|---|---|---|
+| longbench-v2 (6) | 66.7% (4/6); Code Repo 3/3 | GLM-5: 60.8% (n=503, ±4.3pp, без тулов) | point-estimate выше, но 95% CI наш ≈ [37%, 90%] — статистически неотличимо; у нас тула + агент, не apples-to-apples |
+| needle 1M (4) | 100% (4/4) | GLM-5.3 NIAH: 97.7% (насыщенный бенч) | оба у потолка, сравнение бессмысленно при n=4 |
+| oolong trec_coarse (5) | 100% (5/5) | публичного аналога не найдено | — |
+| codegraph (6) | 100% (6/6) @ d2 | собственный синтетический бенч | — |
+
+Вывод: на пересекающихся бенчах наш агентный результат не хуже опубликованных цифр флагмана при том, что гонялась flash-варианта с тулами; выборка 4–6 задач статистически ничтожна. Следующий шаг для значимого сравнения: полный longbench-v2 (503) на d2. Источники: huggingface.co/zai-org/GLM-5.3, longbench2.github.io, llmlearner.com/rankings/longbench-v2, trustthebench.com/models/z-ai-glm-5-3, llm-stats.com/models/glm-5.3, docs.z.ai/guides/llm/glm-5.3.
+
 ## Итог кампании
 
 - **`DEFAULT_MAX_DEPTH = 2`** (`runtime.ts:13`): правило выбора d* ∈ {2,3} → tie 6/6, d2 дешевле d3 в 1.38× (порог 1.25×). d0/d4 вне правила (d0 — соло брут-форс 11.5 шагов, d4 — нулевой прирост).
