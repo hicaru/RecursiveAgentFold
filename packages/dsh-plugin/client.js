@@ -87,6 +87,14 @@ window.__ModuleLoader__.load({
       'live.fold': 'fold',
       'live.answer': 'answer',
       'live.error': 'error',
+      'live.llm': 'llm',
+      'live.response': 'response',
+      'live.context': 'ctx',
+      'live.blocks': 'blocks',
+      'live.retry': 'retry {attempt}',
+      'live.prompt': 'prompt',
+      'live.output': 'output',
+      'live.finish': 'finish',
       'live.collapse': 'Collapse',
       'live.expand': 'Expand',
       'live.close': 'Close',
@@ -154,6 +162,14 @@ window.__ModuleLoader__.load({
       'live.fold': 'фолд',
       'live.answer': 'ответ',
       'live.error': 'ошибка',
+      'live.llm': 'LLM',
+      'live.response': 'ответ',
+      'live.context': 'контекст',
+      'live.blocks': 'блоков',
+      'live.retry': 'повтор {attempt}',
+      'live.prompt': 'промпт',
+      'live.output': 'вывод',
+      'live.finish': 'финиш',
       'live.collapse': 'Свернуть',
       'live.expand': 'Развернуть',
       'live.close': 'Закрыть',
@@ -349,6 +365,8 @@ window.__ModuleLoader__.load({
 .rafx-liveRow:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .rafx-liveRow[data-kind=agent-start],.rafx-liveRow[data-kind=agent-end]{min-height:24px;color:var(--dsw-alias-label-tertiary);font-size:12px;cursor:default}
 .rafx-liveRow[data-kind=agent-start]:hover,.rafx-liveRow[data-kind=agent-end]:hover{background:transparent}
+.rafx-liveRow[data-kind=step]{min-height:22px;color:var(--dsw-alias-label-tertiary);cursor:default}
+.rafx-liveRow[data-kind=step]:hover{background:transparent}
 .rafx-liveRow .rafx-liveMeta{font-size:11px}
 .rafx-liveAgentTag{flex:none;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary);font-size:11.5px;line-height:20px}
 .rafx-liveAgentTag[data-depth="0"]{color:var(--dsw-alias-label-secondary);font-weight:500}
@@ -356,6 +374,7 @@ window.__ModuleLoader__.load({
 .rafx-liveText{flex:none;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px}
 .rafx-liveEnd{flex:none;color:var(--dsw-alias-label-tertiary);font-size:11.5px;line-height:20px}
 .rafx-liveName{flex:none;color:var(--dsw-alias-label-primary);font-family:var(--ds-font-family-code,monospace);font-size:11.5px;font-weight:600;line-height:20px}
+.rafx-liveModel{flex:none;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:20px}
 .rafx-livePreview{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:20px}
 .rafx-liveKind{flex:none;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px}
 .rafx-liveKind[data-kind=answer]{color:var(--dsw-alias-label-secondary)}
@@ -1927,7 +1946,7 @@ window.__ModuleLoader__.load({
     }
 
 
-    const LIVE_LINGER_MS = 10 * 60_000;
+    const LIVE_LINGER_MS = 5000;
     const LIVE_FEED_LIMIT = 160;
 
     function compactJson(value, limit = 90) {
@@ -1946,6 +1965,7 @@ window.__ModuleLoader__.load({
       const entries = [];
       const pending = new Map();
       const depthByAgent = new Map();
+      const stepByAgent = new Map();
       const records = run !== null && typeof run === 'object' && Array.isArray(run.events) ? run.events : [];
       for (const record of records) {
         const event = record === null || typeof record !== 'object' ? null : record.event;
@@ -1958,8 +1978,9 @@ window.__ModuleLoader__.load({
           const agent = String(event.agent ?? 'agent');
           const depth = Number(event.depth ?? 0);
           depthByAgent.set(agent, depth);
+          stepByAgent.set(agent, 0);
           agents.push({ name: agent, depth, status: 'running', terminated: '', steps: 0 });
-          entries.push({ key, kind: 'agent-start', agent, depth, at });
+          entries.push({ key, kind: 'agent-start', agent, depth, at, question: String(event.question ?? '') });
           continue;
         }
         const agent = String(event.agent ?? 'root');
@@ -1973,6 +1994,52 @@ window.__ModuleLoader__.load({
             meta.steps = Number(event.steps ?? 0);
           }
           entries.push({ key, kind: 'agent-end', agent, depth, at, terminated, steps: Number(event.steps ?? 0) });
+          continue;
+        }
+        if (type === 'step_start') {
+          const step = Number(event.step ?? 0);
+          stepByAgent.set(agent, step);
+          entries.push({
+            key,
+            kind: 'step',
+            agent,
+            depth,
+            step,
+            at,
+            contextTokens: Number(event.contextTokens ?? 0),
+            blocks: Number(event.blocks ?? 0),
+          });
+          continue;
+        }
+        if (type === 'llm_call') {
+          const usage = event.usage !== null && typeof event.usage === 'object' ? event.usage : {};
+          entries.push({
+            key,
+            kind: 'llm',
+            agent,
+            depth,
+            step: stepByAgent.get(agent) ?? 0,
+            at,
+            role: String(event.role ?? 'llm'),
+            model: String(event.model ?? ''),
+            usage,
+            latencyMs: Number(event.latencyMs ?? 0),
+            finishReason: event.finishReason === undefined ? '' : String(event.finishReason),
+            attempt: Number(event.attempt ?? 0),
+          });
+          continue;
+        }
+        if (type === 'llm_response') {
+          entries.push({
+            key,
+            kind: 'response',
+            agent,
+            depth,
+            step: Number(event.step ?? 0),
+            at,
+            text: String(event.text ?? ''),
+            reasoning: String(event.reasoning ?? ''),
+          });
           continue;
         }
         if (type === 'tool_call') {
@@ -2066,7 +2133,8 @@ window.__ModuleLoader__.load({
     }
 
     function RafLiveRow({ t, item, open, onToggle }) {
-      const expandable = item.kind === 'tool' || item.kind === 'fold' || item.kind === 'answer' || item.kind === 'error';
+      const expandable =
+        item.kind === 'tool' || item.kind === 'fold' || item.kind === 'answer' || item.kind === 'error' || item.kind === 'llm' || item.kind === 'response';
       const base = {
         className: 'rafx-liveRow',
         'data-kind': item.kind,
@@ -2076,13 +2144,51 @@ window.__ModuleLoader__.load({
       const stepTag = item.step === undefined ? null : h('span', { className: 'rafx-liveStep' }, t('live.step', { step: item.step }));
       const head = [];
       if (item.kind === 'agent-start') {
-        head.push(agentTag, h('span', { className: 'rafx-liveText' }, t('live.started')));
+        head.push(
+          agentTag,
+          h('span', { className: 'rafx-liveText' }, t('live.started')),
+          item.question === '' ? null : h('span', { className: 'rafx-livePreview' }, item.question),
+        );
       } else if (item.kind === 'agent-end') {
         head.push(
           agentTag,
           h('span', { className: 'rafx-liveText' }, t('live.finished')),
           h('span', { className: 'rafx-liveEnd' }, item.terminated),
           h('span', { className: 'rafx-liveMeta' }, t('live.steps', { count: item.steps })),
+        );
+      } else if (item.kind === 'step') {
+        head.push(
+          agentTag,
+          stepTag,
+          h(
+            'span',
+            { className: 'rafx-liveMeta' },
+            `${formatTokens(item.contextTokens)} ${t('live.context')} · ${item.blocks} ${t('live.blocks')}`,
+          ),
+        );
+      } else if (item.kind === 'llm') {
+        head.push(
+          agentTag,
+          stepTag,
+          h('span', { className: 'rafx-liveKind' }, t('live.llm')),
+          h('span', { className: 'rafx-liveModel', title: item.model }, item.model),
+          item.attempt > 0 ? h('span', { className: 'rafx-liveMeta' }, t('live.retry', { attempt: item.attempt })) : null,
+          h(
+            'span',
+            { className: 'rafx-liveMeta' },
+            `${t('live.output')} ${formatTokens(item.usage.completionTokens ?? 0)} · ${formatDuration(item.latencyMs)}`,
+          ),
+          item.finishReason === '' ? null : h('span', { className: 'rafx-liveEnd' }, item.finishReason),
+          h('span', { className: 'rafx-liveChevron', 'aria-hidden': true }, h(ChevronGlyph, { size: 11 })),
+        );
+      } else if (item.kind === 'response') {
+        const preview = (item.reasoning.trim() === '' ? item.text : item.reasoning).replace(/\s+/g, ' ').trim();
+        head.push(
+          agentTag,
+          stepTag,
+          h('span', { className: 'rafx-liveKind' }, t('live.response')),
+          h('span', { className: 'rafx-livePreview' }, preview.slice(0, 180)),
+          h('span', { className: 'rafx-liveChevron', 'aria-hidden': true }, h(ChevronGlyph, { size: 11 })),
         );
       } else if (item.kind === 'tool') {
         head.push(
@@ -2131,7 +2237,48 @@ window.__ModuleLoader__.load({
       }
       let body = null;
       if (expandable && open) {
-        if (item.kind === 'tool') {
+        if (item.kind === 'llm') {
+          body = h(
+            'div',
+            { className: 'rafx-liveBody' },
+            h(
+              'div',
+              { className: 'rafx-liveMetaLine' },
+              `${t('live.llm')} ${item.role} · ${item.model}${item.attempt > 0 ? ` · ${t('live.retry', { attempt: item.attempt })}` : ''}`,
+            ),
+            h(
+              'div',
+              { className: 'rafx-liveMetaLine' },
+              `${t('live.prompt')} ${formatTokens(item.usage.promptTokens ?? 0)} · ${t('view.cache')} ${formatTokens(item.usage.cachedTokens ?? 0)} · ${t('live.output')} ${formatTokens(item.usage.completionTokens ?? 0)}`,
+            ),
+            h(
+              'div',
+              { className: 'rafx-liveMetaLine' },
+              `${t('view.duration')} ${formatDuration(item.latencyMs)}${item.finishReason === '' ? '' : ` · ${t('live.finish')} ${item.finishReason}`}`,
+            ),
+          );
+        } else if (item.kind === 'response') {
+          body = h(
+            'div',
+            { className: 'rafx-liveBody' },
+            item.reasoning === ''
+              ? null
+              : h(
+                  'div',
+                  { className: 'rafx-field' },
+                  h('span', { className: 'rafx-liveLabel' }, t('view.reasoning')),
+                  h('pre', { className: 'rafx-livePre' }, item.reasoning),
+                ),
+            item.text === ''
+              ? null
+              : h(
+                  'div',
+                  { className: 'rafx-field' },
+                  h('span', { className: 'rafx-liveLabel' }, t('view.thinking')),
+                  h('pre', { className: 'rafx-livePre' }, item.text),
+                ),
+          );
+        } else if (item.kind === 'tool') {
           body = h(
             'div',
             { className: 'rafx-liveBody' },
@@ -2187,7 +2334,7 @@ window.__ModuleLoader__.load({
     function RafLiveDock({ t, sessionId }) {
       const engine = useEngine(sessionId);
       const [run, setRun] = React.useState(null);
-      const [selectedAgent, setSelectedAgent] = React.useState('all');
+      const [selectedAgent, setSelectedAgent] = React.useState('root');
       const [openKey, setOpenKey] = React.useState(null);
       const [collapsed, setCollapsed] = React.useState(false);
       const [dismissed, setDismissed] = React.useState(null);
@@ -2205,7 +2352,7 @@ window.__ModuleLoader__.load({
           try {
             const list = await getRuns(sessionId);
             if (!active) return;
-            const latest = list[0];
+            const latest = list.find((candidate) => candidate.status === 'running') ?? list[0];
             if (
               latest === undefined ||
               (latest.status !== 'running' && (typeof latest.endedAt !== 'number' || Date.now() - latest.endedAt > LIVE_LINGER_MS))
@@ -2229,8 +2376,12 @@ window.__ModuleLoader__.load({
         };
       }, [engine, sessionId]);
 
+      const feed = React.useMemo(() => buildRunFeed(run), [run]);
+      const rootAgent = feed.agents.find((agent) => agent.depth === 0);
+      const rootName = rootAgent?.name ?? 'root';
+
       React.useEffect(() => {
-        setSelectedAgent('all');
+        setSelectedAgent(rootName);
         setOpenKey(null);
         setCollapsed(false);
         stickRef.current = true;
@@ -2240,8 +2391,9 @@ window.__ModuleLoader__.load({
         setDismissed(null);
       }, [sessionId]);
 
-      const feed = React.useMemo(() => buildRunFeed(run), [run]);
-      const visible = feed.entries.filter((item) => selectedAgent === 'all' || item.agent === selectedAgent);
+      const activeAgent =
+        selectedAgent === 'all' || feed.agents.some((agent) => agent.name === selectedAgent) ? selectedAgent : rootName;
+      const visible = feed.entries.filter((item) => activeAgent === 'all' || item.agent === activeAgent);
       const shown = visible.length > LIVE_FEED_LIMIT ? visible.slice(-LIVE_FEED_LIMIT) : visible;
 
       React.useEffect(() => {
@@ -2249,7 +2401,7 @@ window.__ModuleLoader__.load({
         const element = feedRef.current;
         if (element === null || !stickRef.current) return;
         element.scrollTop = element.scrollHeight;
-      }, [shown.length, selectedAgent, collapsed]);
+      }, [shown.length, activeAgent, collapsed]);
 
       if (engine !== ENGINE_RAF || run === null || run.id === dismissed) return null;
 
@@ -2310,32 +2462,52 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { className: 'rafx-liveAgents' },
+                feed.agents
+                  .filter((agent) => agent.depth === 0)
+                  .map((agent) =>
+                    h(
+                      'button',
+                      {
+                        key: agent.name,
+                        type: 'button',
+                        className: 'rafx-liveAgentChip',
+                        'data-selected': activeAgent === agent.name ? 'true' : undefined,
+                        'data-depth': agent.depth,
+                        style: { paddingLeft: '6px' },
+                        onClick: () => setSelectedAgent(agent.name),
+                      },
+                      h('span', { className: 'rafx-liveAgentDot', 'data-status': agent.status, 'aria-hidden': true }),
+                      t('view.root'),
+                    ),
+                  ),
                 h(
                   'button',
                   {
                     type: 'button',
                     className: 'rafx-liveAgentChip',
-                    'data-selected': selectedAgent === 'all' ? 'true' : undefined,
+                    'data-selected': activeAgent === 'all' ? 'true' : undefined,
                     onClick: () => setSelectedAgent('all'),
                   },
                   t('live.all'),
                 ),
-                feed.agents.map((agent) =>
-                  h(
-                    'button',
-                    {
-                      key: agent.name,
-                      type: 'button',
-                      className: 'rafx-liveAgentChip',
-                      'data-selected': selectedAgent === agent.name ? 'true' : undefined,
-                      'data-depth': agent.depth,
-                      style: { paddingLeft: `${6 + agent.depth * 10}px` },
-                      onClick: () => setSelectedAgent(agent.name),
-                    },
-                    h('span', { className: 'rafx-liveAgentDot', 'data-status': agent.status, 'aria-hidden': true }),
-                    agent.depth === 0 ? t('view.root') : agent.name,
+                feed.agents
+                  .filter((agent) => agent.depth > 0)
+                  .map((agent) =>
+                    h(
+                      'button',
+                      {
+                        key: agent.name,
+                        type: 'button',
+                        className: 'rafx-liveAgentChip',
+                        'data-selected': activeAgent === agent.name ? 'true' : undefined,
+                        'data-depth': agent.depth,
+                        style: { paddingLeft: `${6 + agent.depth * 10}px` },
+                        onClick: () => setSelectedAgent(agent.name),
+                      },
+                      h('span', { className: 'rafx-liveAgentDot', 'data-status': agent.status, 'aria-hidden': true }),
+                      agent.name,
+                    ),
                   ),
-                ),
               ),
               shown.length === 0
                 ? h('div', { className: 'rafx-liveEmpty' }, status === 'running' ? t('live.waiting') : t('view.noEvents'))

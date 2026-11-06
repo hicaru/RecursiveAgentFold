@@ -149,6 +149,10 @@ function latestUserIndex(messages) {
   return -1;
 }
 
+function hasHumanUserMessage(messages) {
+  return messages.some(isHumanUserMessage);
+}
+
 function renderTranscript(messages) {
   const parts = [];
   for (const message of messages) {
@@ -709,6 +713,10 @@ export function apply(ctx) {
   ctx.on('llm/stream', (options, next) => {
     if (rafInternal.getStore() === true) return next();
     if (options === null || typeof options !== 'object') return next();
+    // Internal DSH calls set purpose. RAF owns only the main agent call.
+    if (options.purpose !== undefined) return next();
+    // RAF answers a human request. Skip calls with synthetic messages only.
+    if (!hasHumanUserMessage(Array.isArray(options.messages) ? options.messages : [])) return next();
     if (engineOf(state, options.sessionId) !== ENGINE_RAF) return next();
     return rafStream(ctx, options, state.settings, runs);
   });

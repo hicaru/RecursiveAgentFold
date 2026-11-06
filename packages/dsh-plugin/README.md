@@ -4,7 +4,7 @@ DeepSeek Harness bundle for the Recursive AgentFold engine. It adds two surfaces
 
 - A **RAF** entry in the left sidebar. It opens a compact settings page for fold depth, reserve, and reader concurrency.
 - An **engine switch** in the composer tool row, after the permission control. It selects `Standard` or `RAF (Recursive AgentFold)` for the current Session.
-- The Host half intercepts `llm/stream`. When a Session is on RAF, it runs `@raf/engine` instead of the standard model call and returns the RAF answer as one normal assistant message.
+- The Host half intercepts the main agent `llm/stream` call. When a Session is on RAF, it runs `@raf/engine` instead of the standard model call and returns the RAF answer as one normal assistant message. Internal DSH calls such as session titles, compaction, and reviews set `purpose` and stay on the standard path.
 
 ## Layout
 
@@ -47,14 +47,17 @@ For a RAF Session, `llm/stream` builds a `ContextStore` from the Session transcr
 
 RAF runs inside one outer model request. Its internal model calls use the Session provider and model through `ctx.llm`. Root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 4,096 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. Internal calls are tagged with an `AsyncLocalStorage` guard so the listener does not intercept them again.
 
+DSH marks internal calls with `purpose` (`session-title`, `compaction`, `auto-review`, `onboarding_use_case`). The listener passes every such call through. RAF therefore never answers a title prompt or a compaction summary.
+
 ### Live RAF activity above the composer
 
 RAF Sessions also get a live dock above the composer, aligned with the composer card like the todo/goal docks. It polls the run registry and shows the current run in chronological order:
 
-- agent chips: `Root`, then every `branch` subagent; click one to filter its work;
-- feed rows: agent start/finish, tool calls, `llm_query` scans, folds, answers, errors;
-- click a tool/fold/answer row to expand arguments, results, summaries, or the final text;
-- the dock keeps the latest run for ten minutes; collapse or close it. The RAF tab has the full per-agent tree.
+- the dock prefers a **running** run over a newer finished run, so a background title call cannot hide the active turn;
+- agent chips: `Root` (selected by default), `All agents`, then every `branch` subagent; click one to filter its work;
+- feed rows: agent start/finish with the agent question, steps with context size and block count, LLM calls with model/output/latency, model responses with reasoning, tool calls, `llm_query` scans, folds, answers, errors;
+- click an `llm`, response, tool, fold, or answer row to expand reasoning, arguments, results, summaries, or the final text;
+- a running run stays visible; a finished run lingers for five seconds, then the dock hides. Collapse or close it earlier. The RAF tab has the full per-agent tree.
 
 The dock is client-side UI over the runs API. The tool calls still are not native Session events.
 
@@ -108,6 +111,8 @@ The settings page writes `{ depth, reserve, concurrency }` to `localStorage` and
 | `sidebar.panellist` | `raf` | Sidebar entry and icon. |
 | `conversation.input.left` | `raf-engine` | Composer engine switch. |
 | `shell.overlay` | `raf-engine-menu` | Fixed engine menu above the composer. |
+| `conversation.view` | `raf-runs` | RAF run inspector tab. |
+| `conversation.input.dock` | `raf-live` | Live RAF activity above the composer. |
 
 ## Install
 
