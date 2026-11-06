@@ -57,6 +57,30 @@ const PROVIDER_REFUSAL = /\/1301\]|unsafe or sensitive/i;
 export const DEFAULT_MAX_OBSERVATION_TOKENS = 3200;
 export const DEFAULT_MIN_DEEP_FOLD_BLOCKS = 6;
 
+/** Normalize text for the answer-echo guard. */
+function echoText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/** Detect an answer that copies a long part of a fold summary. */
+function isSummaryEcho(answer: string, summary: string | undefined): boolean {
+  if (summary === undefined) return false;
+  const a = echoText(answer);
+  const s = echoText(summary);
+  if (a.length < 80 || s.length < 80) return false;
+  if (a === s || s.endsWith(a) || s.startsWith(a)) return true;
+  return a.length >= s.length * 0.6 && s.includes(a);
+}
+
+/** Detect an answer copied from the raw response before the <answer> tag. */
+function isRawAnswerEcho(raw: string, answer: string): boolean {
+  const a = echoText(answer);
+  if (a.length < 80) return false;
+  const match = /<\s*answer\b/i.exec(raw);
+  if (match === null) return false;
+  return echoText(raw.slice(0, match.index)).includes(a);
+}
+
 export interface AgentRunResult {
   answer: string | null;
   steps: number;
@@ -214,6 +238,15 @@ export class AgentFoldAgent {
         }
         const p = parseAgentResponse(text, { expectFolding, reasoning });
         if (forcing && !p.answer && p.errors.length === 0 && p.toolCall) p.errors.push('a final <answer> is required now');
+        if (p.errors.length === 0 && p.answer !== undefined) {
+          const lastBlock = state.blocks[state.blocks.length - 1];
+          const echo =
+            [p.folding?.summary, lastBlock?.summary].some((summary) => isSummaryEcho(p.answer ?? '', summary)) ||
+            isRawAnswerEcho(text, p.answer);
+          if (echo) {
+            p.errors.push('the <answer> repeats the folding summary; output a standalone final answer instead');
+          }
+        }
         if (p.errors.length === 0) {
           parsed = p;
           break;

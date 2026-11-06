@@ -687,3 +687,41 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
     expect(qRes.findings.every((f) => !f.error)).toBe(true);
   });
 });
+
+describe('answer echo guard', () => {
+  it('rejects an answer copied from the folding summary and retries', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const summary =
+      'ARCHITECTURE summary with many details about the engine loop, fold state, cache layout, llm_query chunks, branch recursion, prompts, parsers, and the applyFold transition.';
+    const echo = summary.slice(-120);
+    const responses = [
+      '<motivation>probe the context.</motivation><tool_call>{"name":"probe","arguments":{}}</tool_call>',
+      `<folding>{"range":[0,0],"summary":${JSON.stringify(summary)}}</folding><motivation>answer.</motivation><answer>${echo}</answer>`,
+      `<folding>{"range":[0,0],"summary":${JSON.stringify(summary)}}</folding><motivation>answer cleanly.</motivation><answer>clean final answer</answer>`,
+    ];
+    const llm = new ScriptedLLM((_req, index) => responses[Math.min(index, responses.length - 1)]!);
+    const events: AgentEvent[] = [];
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [
+        {
+          name: 'probe',
+          description: 'probe the context',
+          parameters: { type: 'object', properties: {} },
+          async execute() {
+            return 'observed';
+          },
+        },
+      ],
+      store,
+      maxSteps: 6,
+      maxFormatRetries: 1,
+      onEvent: (event) => events.push(event),
+    });
+    const result = await agent.run('summarize the project');
+    expect(result.answer).toBe('clean final answer');
+    expect(result.formatIssues).toBeGreaterThan(0);
+    expect(events.some((event) => event.type === 'format_error' && event.errors.some((error) => error.includes('repeats')))).toBe(true);
+  });
+});
