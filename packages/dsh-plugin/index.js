@@ -125,7 +125,21 @@ function renderContent(content) {
   return parts.join('\n').trim();
 }
 
+function isHumanUserMessage(message) {
+  return (
+    message !== null &&
+    typeof message === 'object' &&
+    message.role === 'user' &&
+    message.source !== null &&
+    typeof message.source === 'object' &&
+    message.source.kind === 'user'
+  );
+}
+
 function latestUserIndex(messages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (isHumanUserMessage(messages[index])) return index;
+  }
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message !== null && typeof message === 'object' && message.role === 'user') return index;
@@ -346,6 +360,93 @@ function sanitizeRunEvent(event) {
   }
 }
 
+
+const RAF_DSH_TOOLS = Object.freeze(
+  new Set(['read', 'glob', 'grep', 'bash', 'write', 'edit', 'apply_patch', 'lsp', 'web_search', 'web_fetch']),
+);
+
+function contentText(blocks) {
+  if (!Array.isArray(blocks)) return '';
+  const parts = [];
+  for (const block of blocks) {
+    if (block === null || typeof block !== 'object') continue;
+    if (block.type === 'text' && typeof block.text === 'string') parts.push(block.text);
+    else if (block.type === 'image') parts.push('[image]');
+    else if (block.type === 'file') {
+      const name = block.attachment !== null && typeof block.attachment === 'object' ? block.attachment.name : '';
+      parts.push(`[file ${typeof name === 'string' ? name : ''}]`);
+    }
+  }
+  return parts.join('\n').trim();
+}
+
+function toolResultText(result) {
+  const value = result === null || typeof result !== 'object' ? undefined : result.result;
+  if (value === null || typeof value !== 'object') return '';
+  const text = contentText(value.content);
+  if (value.isError === true) {
+    const reason = value.error !== null && typeof value.error === 'object' && typeof value.error.message === 'string' ? value.error.message : 'tool failed';
+    return text === '' ? `Tool error: ${reason}` : `Tool error: ${text}`;
+  }
+  if (text !== '') return text;
+  if (value.value !== undefined) {
+    try {
+      return typeof value.value === 'string' ? value.value : JSON.stringify(value.value);
+    } catch {
+      return String(value.value);
+    }
+  }
+  return '';
+}
+
+function createDshTools(ctx, sessionId, signal) {
+  const agents = ctx.get('agents');
+  const tools = ctx.get('tools');
+  if (agents === undefined || tools === undefined) return [];
+  const agent =
+    typeof agents.get === 'function'
+      ? agents.get(sessionId)
+      : typeof agents.currentInitiator === 'function'
+        ? agents.currentInitiator()
+        : undefined;
+  if (agent === undefined || typeof tools.definitions !== 'function' || typeof tools.execute !== 'function') return [];
+  const definitions = tools.definitions(agent);
+  if (!Array.isArray(definitions)) return [];
+  const extra = [];
+  for (const definition of definitions) {
+    if (definition === null || typeof definition !== 'object') continue;
+    if (typeof definition.name !== 'string' || typeof definition.execute !== 'function') continue;
+    if (definition.deferLoading === true) continue;
+    if (!RAF_DSH_TOOLS.has(definition.name)) continue;
+    extra.push({
+      name: `dsh_${definition.name}`,
+      description: definition.description,
+      parameters: definition.parameters,
+      execute: async (args, toolCtx) => {
+        try {
+          const batch = await tools.execute({
+            calls: [
+              {
+                type: 'tool-call',
+                id: randomUUID(),
+                name: definition.name,
+                arguments: JSON.stringify(args ?? {}),
+              },
+            ],
+            signal: toolCtx.signal ?? signal,
+            agent,
+          });
+          const first = Array.isArray(batch.results) ? batch.results[0] : undefined;
+          return toolResultText(first);
+        } catch (error) {
+          return `Tool ${definition.name} failed: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      },
+    });
+  }
+  return extra;
+}
+
 function createRunRegistry() {
   const runs = new Map();
   const trim = () => {
@@ -427,7 +528,8 @@ async function* rafStream(ctx, outer, settings, runs) {
     const userIndex = latestUserIndex(messages);
     const question = questionOf(messages, userIndex);
     const effectiveQuestion = question === '' ? 'Answer the latest request.' : question;
-    const transcript = renderTranscript(userIndex < 0 ? messages : messages.slice(0, userIndex));
+    const contextMessages = userIndex < 0 ? messages : messages.filter((_message, index) => index !== userIndex);
+    const transcript = renderTranscript(contextMessages);
     run = runs.create({
       sessionId: outer.sessionId,
       model: `${outer.provider}/${outer.model}`,
@@ -445,6 +547,7 @@ async function* rafStream(ctx, outer, settings, runs) {
     if (transcript !== '') store.add(transcript, { id: 'session', title: 'DSH session transcript' });
     const rootLLM = new DshLlmClient(ctx, outer, profile, outer.reasoningEffort);
     const queryLLM = new DshLlmClient(ctx, outer, profile, undefined);
+    const extraTools = createDshTools(ctx, outer.sessionId, signal);
     const events = [];
     const engine = new raf.RecursiveAgentFold({
       rootLLM,
@@ -453,6 +556,7 @@ async function* rafStream(ctx, outer, settings, runs) {
       maxDepth: settings.depth,
       llmQuery: { reserveRatio: settings.reserve, concurrency: settings.concurrency },
       rootMaxSteps: RAF_ROOT_MAX_STEPS,
+      extraTools,
       signal,
       onEvent: (event) => {
         events.push(event);

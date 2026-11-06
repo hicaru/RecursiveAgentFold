@@ -38,9 +38,10 @@ A profile links this checkout, so the relative import resolves. A packed copy of
 
 For a RAF Session, `llm/stream` builds a `ContextStore` from the Session transcript and runs `RecursiveAgentFold`:
 
-- the latest user message is the question;
-- earlier user, assistant, and tool-result messages are the document;
-- `llm_query`, `grep`, `read`, `tally`, `branch`, and `calculator` operate on that transcript;
+- the latest **human** message (`source.kind === 'user'`) is the question;
+- every other message — including DSH's synthetic instruction, runtime, skill, and time messages — is the document;
+- RAF's `llm_query`, `grep`, `read`, `tally`, `branch`, and `calculator` operate on that transcript;
+- DSH coding tools are exposed to RAF as `dsh_read`, `dsh_glob`, `dsh_grep`, `dsh_bash`, `dsh_write`, `dsh_edit`, `dsh_apply_patch`, `dsh_lsp`, `dsh_web_search`, and `dsh_web_fetch`;
 - the final `<answer>` becomes one assistant message in DSH;
 - RAF token usage is reported in the same message's usage chunk.
 
@@ -56,7 +57,7 @@ The plugin registers a dedicated **RAF** tab in the conversation view ring, betw
 - Header: run selector, live status, model, settings, steps, agents, tokens, cache hit rate, and duration.
 - New runs appear automatically; completed runs remain selectable. The Host keeps the latest 30 runs in memory, so a Host restart clears the list.
 
-The view shows the RAF tools (`llm_query`, `grep`, `read`, `tally`, `branch`, `calculator`), not DSH `bash`/`edit`. RAF branch agents are engine subagents, not DSH subagents.
+The view shows both RAF's context tools (`llm_query`, `grep`, `read`, `tally`, `branch`, `calculator`) and the `dsh_*` DSH tools. RAF branch agents are engine subagents; the DSH `subagent` tool is not exposed.
 
 The Host exposes the run data at `GET /plugins/@raf/dsh-plugin/runs?sessionId=...` and `GET /plugins/@raf/dsh-plugin/runs/<id>`.
 
@@ -72,9 +73,9 @@ The trace is capped at 12,000 characters and is skipped when a later RAF run reb
 
 Limits of this first integration:
 
-- RAF does not see DSH tools (`bash`, `edit`, `read` paths, and so on). Use `Standard` for coding tool work.
-- RAF steps are not native `tool/call`/`step` events. Trajectory shows them as diagnostic reasoning, not as separate tool rows; a custom Agent driver is required for native rows.
-- A context document should be in earlier messages; the latest user message is the question.
+- RAF's own `read`/`grep` tools scan the transcript. The `dsh_*` tools run the real DSH tools, with the normal approval policy.
+- DSH tool calls from RAF are shown in the RAF view. They are not native session `tool/call` events, so Chat and Trajectory do not render them as tool rows; a custom Agent driver is required for that.
+- DSH's synthetic user messages are context, not the question. The latest human message is the question.
 - The reader calls use the same model as the root with its default reasoning effort.
 
 ## Settings

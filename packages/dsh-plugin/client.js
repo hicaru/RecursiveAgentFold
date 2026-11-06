@@ -1074,9 +1074,10 @@ window.__ModuleLoader__.load({
 
     function toolBadge(name) {
       if (typeof name !== 'string') return '?';
-      const known = TOOL_BADGES[name];
+      const base = name.startsWith('dsh_') ? name.slice(4) : name;
+      const known = TOOL_BADGES[base];
       if (known !== undefined) return known;
-      return name.slice(0, 2).toUpperCase();
+      return base.slice(0, 2).toUpperCase();
     }
 
     function runStatusLabel(t, status) {
@@ -1339,6 +1340,7 @@ window.__ModuleLoader__.load({
     function RunTool({ t, tool, open, onToggle, agentById, onOpenAgent }) {
       const status = tool.error !== null ? 'error' : tool.result !== null ? 'done' : 'running';
       const child = tool.childAgentId === null ? undefined : agentById.get(tool.childAgentId);
+      const displayTool = tool.name.startsWith('dsh_') ? tool.name.slice(4) : tool.name;
       return h(
         'div',
         { className: 'rafx-toolWrap' },
@@ -1347,7 +1349,7 @@ window.__ModuleLoader__.load({
           {
             type: 'button',
             className: 'rafx-tool',
-            'data-tool': tool.name,
+            'data-tool': displayTool,
             'data-status': status,
             'aria-expanded': open,
             onClick: onToggle,
