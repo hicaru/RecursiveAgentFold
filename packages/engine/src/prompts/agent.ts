@@ -27,7 +27,7 @@ export const AGENT_SYSTEM_PROMPT_TEMPLATE = `你是 AgentFold，一个主动管�
 {"name": "<工具名>", "arguments": {...}}
 </tool_call>
 有最终答案时，用 <answer>最终答案</answer> 代替 <tool_call>，答案格式按题目要求。
-- **<answer> 是给用户的独立最终答案**：必须完整、可直接阅读。严禁复述、续写、引用或复制 <folding> 的 summary，也不要以标点或半句开头。
+- **<answer> 严格按题目要求的格式输出**：题目只要一个值、标签、列表或 JSON 时，只输出该内容，不要解释或改写。严禁复述、续写、引用或复制 <folding> 的 summary，也不要以标点或半句开头。
 可以先思考（<think>...</think> 或原生推理），但只解析上面的块。
 
 # 折叠规则（缓存优先）

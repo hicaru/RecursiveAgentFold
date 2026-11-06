@@ -68,17 +68,15 @@ function isSummaryEcho(answer: string, summary: string | undefined): boolean {
   const a = echoText(answer);
   const s = echoText(summary);
   if (a.length < 80 || s.length < 80) return false;
-  if (a === s || s.endsWith(a) || s.startsWith(a)) return true;
-  return a.length >= s.length * 0.6 && s.includes(a);
+  return a === s || s.endsWith(a) || s.startsWith(a);
 }
 
-/** Detect an answer copied from the raw response before the <answer> tag. */
+/** Detect a long answer copied from the raw folding block. */
 function isRawAnswerEcho(raw: string, answer: string): boolean {
   const a = echoText(answer);
-  if (a.length < 80) return false;
-  const match = /<\s*answer\b/i.exec(raw);
-  if (match === null) return false;
-  return echoText(raw.slice(0, match.index)).includes(a);
+  if (a.length < 160) return false;
+  const match = /<\s*folding\b[^>]*>([\s\S]*?)<\s*\/\s*folding\s*>/i.exec(raw);
+  return match !== null && echoText(match[1] ?? '').includes(a);
 }
 
 export interface AgentRunResult {
