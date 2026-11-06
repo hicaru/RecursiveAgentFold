@@ -317,63 +317,62 @@ window.__ModuleLoader__.load({
 @media (max-width:820px){.rafx-runsBody{grid-template-columns:1fr}.rafx-agents{max-height:150px;border-right:0;border-bottom:.5px solid var(--rafx-line)}.rafx-agentList{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}.rafx-timeline{padding:12px 14px 40px}.rafx-runsTop{padding:12px 14px 10px}}
 @media (prefers-reduced-motion:reduce){.rafx-runsChip[data-status=running] .rafx-runsDot,.rafx-agentDot[data-status=running]{animation:none}}
 
-.rafx-live{--rafx-ink:var(--dsw-alias-label-primary);--rafx-ink-2:var(--dsw-alias-label-secondary);--rafx-ink-3:var(--dsw-alias-label-tertiary);--rafx-line:var(--dsw-alias-border-l3);--rafx-surface:var(--dsw-alias-bg-layer-1);--rafx-surface-2:var(--dsw-alias-bg-layer-2);position:relative;width:100%;margin-bottom:8px;border:.5px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);color:var(--rafx-ink);overflow:hidden;font-size:12px;line-height:18px}
-.rafx-live :focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
-.rafx-liveHead{display:flex;align-items:center;gap:7px;min-height:38px;padding:6px 10px;flex-wrap:wrap}
-.rafx-liveMark{flex:none;padding:0 4px;border:.5px solid color-mix(in srgb,var(--dsw-alias-brand-primary) 32%,transparent);border-radius:4px;color:var(--dsw-alias-brand-primary);font-family:var(--ds-font-family-code,monospace);font-size:8.5px;font-weight:700;letter-spacing:.08em;line-height:15px}
-.rafx-liveStatus{display:inline-flex;align-items:center;gap:5px;flex:none;padding:0 5px;border-radius:4px;background:var(--rafx-surface-2);color:var(--rafx-ink-2);font-size:9.5px;font-weight:600;line-height:16px;letter-spacing:.04em;text-transform:uppercase}
-.rafx-liveStatus[data-status=running]{color:var(--dsw-alias-state-business-primary)}
-.rafx-liveStatus[data-status=done]{color:var(--dsw-alias-state-success-primary)}
-.rafx-liveStatus[data-status=error]{color:var(--dsw-alias-state-error-primary)}
-.rafx-liveStatus[data-status=aborted]{color:var(--dsw-alias-state-warn-primary)}
-.rafx-liveDot{width:5px;height:5px;flex:none;border-radius:50%;background:currentColor}
-.rafx-liveStatus[data-status=running] .rafx-liveDot{animation:rafx-pulse 1.4s ease-in-out infinite}
-.rafx-liveQuestion{flex:1 1 240px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--rafx-ink)}
-.rafx-liveMeta{font-family:var(--ds-font-family-code,monospace);font-size:9.5px;line-height:14px;color:var(--dsw-alias-label-caption);font-variant-numeric:tabular-nums;white-space:nowrap}
-.rafx-liveTokens{font-family:var(--ds-font-family-code,monospace);font-size:9.5px;line-height:14px;color:var(--dsw-alias-label-caption);font-variant-numeric:tabular-nums;white-space:nowrap}
-.rafx-liveActions{display:flex;align-items:center;gap:1px;margin-left:auto;flex:none}
-.rafx-liveIcon{display:grid;place-items:center;width:22px;height:22px;padding:0;border:0;border-radius:5px;background:transparent;color:var(--dsw-alias-label-caption);font:inherit;font-size:15px;line-height:16px;cursor:pointer}
-.rafx-liveIcon:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--rafx-ink)}
-.rafx-liveAgents{display:flex;align-items:center;gap:3px;overflow-x:auto;padding:0 10px 6px;scrollbar-width:none}
+.rafx-live{box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset));max-width:calc(var(--dsh-composer-card-max-width) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset));--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2);flex:none;margin:0 auto;border:0;border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);box-shadow:var(--dsw-elevation-panel);color:var(--dsw-alias-label-secondary);overflow:hidden;font-size:13px;line-height:20px}
+.rafx-live :focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
+.rafx-liveHead{display:flex;align-items:center;gap:8px;min-height:36px;padding:6px 12px;flex-wrap:nowrap}
+.rafx-liveTitle{flex:none;color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px}
+.rafx-liveStatus{display:inline-flex;align-items:center;gap:5px;flex:none;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px;white-space:nowrap}
+.rafx-liveDot{width:5px;height:5px;flex:none;border-radius:50%;background:var(--dsw-alias-label-tertiary)}
+.rafx-liveStatus[data-status=running] .rafx-liveDot{background:var(--dsw-alias-state-business-primary);animation:rafx-pulse 1.4s ease-in-out infinite}
+.rafx-liveStatus[data-status=done] .rafx-liveDot{background:var(--dsw-alias-state-success-primary)}
+.rafx-liveStatus[data-status=error] .rafx-liveDot{background:var(--dsw-alias-state-error-primary)}
+.rafx-liveStatus[data-status=aborted] .rafx-liveDot{background:var(--dsw-alias-state-warn-primary)}
+.rafx-liveQuestion{flex:1 1 120px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px}
+.rafx-liveMeta{flex:none;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.rafx-liveActions{display:flex;align-items:center;gap:2px;flex:none;margin-left:auto}
+.rafx-liveIcon{display:grid;place-items:center;width:22px;height:22px;padding:0;border:0;border-radius:5px;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:15px;line-height:20px;cursor:pointer}
+.rafx-liveIcon:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.rafx-liveChevronButton{display:inline-flex;color:inherit;transition:transform .12s}
+.rafx-liveChevronButton[data-collapsed=true]{transform:rotate(180deg)}
+.rafx-liveAgents{display:flex;align-items:center;gap:12px;overflow-x:auto;padding:0 12px 6px;scrollbar-width:none}
 .rafx-liveAgents::-webkit-scrollbar{display:none}
-.rafx-liveAgentChip{display:inline-flex;align-items:center;gap:4px;flex:none;height:21px;padding:0 7px;border:.5px solid var(--rafx-line);border-radius:5px;background:transparent;color:var(--rafx-ink-3);font:inherit;font-family:var(--ds-font-family-code,monospace);font-size:9.5px;line-height:15px;cursor:pointer;white-space:nowrap}
-.rafx-liveAgentChip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--rafx-ink)}
-.rafx-liveAgentChip[data-selected=true]{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary) 38%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 9%,transparent);color:var(--rafx-ink)}
-.rafx-liveAgentDot{width:4px;height:4px;flex:none;border-radius:50%;background:var(--dsw-alias-label-caption)}
+.rafx-liveAgentChip{display:inline-flex;align-items:center;gap:5px;flex:none;height:20px;padding:0;border:0;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12.5px;line-height:20px;cursor:pointer;white-space:nowrap}
+.rafx-liveAgentChip:hover{color:var(--dsw-alias-label-primary)}
+.rafx-liveAgentChip[data-selected=true]{color:var(--dsw-alias-label-primary);font-weight:500}
+.rafx-liveAgentDot{width:4px;height:4px;flex:none;border-radius:50%;background:var(--dsw-alias-label-tertiary)}
 .rafx-liveAgentDot[data-status=running]{background:var(--dsw-alias-state-business-primary);animation:rafx-pulse 1.4s ease-in-out infinite}
 .rafx-liveAgentDot[data-status=error]{background:var(--dsw-alias-state-error-primary)}
 .rafx-liveAgentDot[data-status=done]{background:var(--dsw-alias-state-success-primary)}
-.rafx-liveFeed{display:flex;flex-direction:column;gap:1px;max-height:260px;overflow:auto;padding:5px 6px 7px;border-top:.5px solid var(--rafx-line);scrollbar-gutter:stable;--dsh-scrollbar-width:8px;--dsh-scrollbar-thumb-border:2px}
-.rafx-liveItem{display:flex;flex-direction:column}
-.rafx-liveRow{display:flex;align-items:center;gap:6px;width:100%;min-height:24px;padding:3px 6px;border:0;border-radius:5px;background:transparent;color:var(--rafx-ink-2);font:inherit;text-align:left;cursor:pointer}
+.rafx-liveFeed{display:flex;flex-direction:column;gap:1px;max-height:220px;overflow:auto;padding:0 12px 8px;scrollbar-gutter:stable;--dsh-scrollbar-width:8px;--dsh-scrollbar-thumb-border:2px}
+.rafx-liveItem{display:flex;flex-direction:column;min-width:0}
+.rafx-liveRow{display:flex;align-items:center;gap:7px;width:100%;min-width:0;min-height:26px;padding:2px 4px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12.5px;line-height:20px;text-align:left;cursor:pointer}
 .rafx-liveRow:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.rafx-liveRow[data-kind=agent-start],.rafx-liveRow[data-kind=agent-end]{cursor:default;color:var(--dsw-alias-label-caption);font-size:10px}
+.rafx-liveRow[data-kind=agent-start],.rafx-liveRow[data-kind=agent-end]{min-height:24px;color:var(--dsw-alias-label-tertiary);font-size:12px;cursor:default}
 .rafx-liveRow[data-kind=agent-start]:hover,.rafx-liveRow[data-kind=agent-end]:hover{background:transparent}
-.rafx-liveAgentTag{flex:none;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--ds-font-family-code,monospace);font-size:9.5px;line-height:14px;color:var(--rafx-ink-3)}
-.rafx-liveAgentTag[data-depth="0"]{color:var(--dsw-alias-brand-primary);font-weight:600}
-.rafx-liveStep{flex:none;font-family:var(--ds-font-family-code,monospace);font-size:9px;line-height:14px;color:var(--dsw-alias-label-caption)}
-.rafx-liveText{flex:none;font-size:10px;line-height:14px;color:var(--rafx-ink-3)}
-.rafx-liveEnd{flex:none;font-family:var(--ds-font-family-code,monospace);font-size:9px;line-height:14px;color:var(--dsw-alias-label-caption)}
-.rafx-liveGlyph{display:grid;place-items:center;width:19px;height:19px;flex:none;border-radius:4px;background:var(--rafx-surface-2);color:var(--dsw-alias-label-caption);font-family:var(--ds-font-family-code,monospace);font-size:8px;font-weight:700;letter-spacing:-.03em}
-.rafx-liveGlyph[data-tool=llm_query]{color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 11%,transparent)}
-.rafx-liveGlyph[data-tool=branch]{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 10%,transparent)}
-.rafx-liveGlyph[data-tool=grep],.rafx-liveGlyph[data-tool=read],.rafx-liveGlyph[data-tool=glob],.rafx-liveGlyph[data-tool=bash]{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 10%,transparent)}
-.rafx-liveName{flex:none;font-family:var(--ds-font-family-code,monospace);font-size:10.5px;font-weight:600;line-height:15px;color:var(--rafx-ink)}
-.rafx-livePreview{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--ds-font-family-code,monospace);font-size:10px;line-height:15px;color:var(--dsw-alias-label-caption)}
-.rafx-liveKind{flex:none;font-family:var(--ds-font-family-code,monospace);font-size:9.5px;font-weight:600;line-height:15px;color:var(--dsw-alias-label-caption);text-transform:uppercase;letter-spacing:.05em}
-.rafx-liveKind[data-kind=answer]{color:var(--dsw-alias-state-success-primary)}
+.rafx-liveRow .rafx-liveMeta{font-size:11px}
+.rafx-liveAgentTag{flex:none;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary);font-size:11.5px;line-height:20px}
+.rafx-liveAgentTag[data-depth="0"]{color:var(--dsw-alias-label-secondary);font-weight:500}
+.rafx-liveStep{flex:none;color:var(--dsw-alias-label-tertiary);font-size:11.5px;line-height:20px}
+.rafx-liveText{flex:none;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px}
+.rafx-liveEnd{flex:none;color:var(--dsw-alias-label-tertiary);font-size:11.5px;line-height:20px}
+.rafx-liveName{flex:none;color:var(--dsw-alias-label-primary);font-family:var(--ds-font-family-code,monospace);font-size:11.5px;font-weight:600;line-height:20px}
+.rafx-livePreview{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:20px}
+.rafx-liveKind{flex:none;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px}
+.rafx-liveKind[data-kind=answer]{color:var(--dsw-alias-label-secondary)}
 .rafx-liveKind[data-kind=error]{color:var(--dsw-alias-state-error-primary)}
-.rafx-liveRange{flex:none;font-family:var(--ds-font-family-code,monospace);font-size:9px;line-height:15px;color:var(--dsw-alias-label-caption)}
+.rafx-liveRange{flex:none;color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,monospace);font-size:10.5px;line-height:20px}
 .rafx-liveLive{display:inline-flex;flex:none;margin-left:auto}
-.rafx-liveChevron{display:inline-flex;flex:none;color:var(--dsw-alias-label-caption)}
-.rafx-liveBody{display:flex;flex-direction:column;gap:3px;padding:3px 10px 7px 27px}
-.rafx-livePre{margin:0;padding:7px 8px;border-radius:5px;background:var(--dsw-alias-bg-base);color:var(--rafx-ink-2);font-family:var(--ds-font-family-code,monospace);font-size:10px;line-height:15px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto}
-.rafx-liveNote{margin:0;font-size:10.5px;line-height:16px;color:var(--rafx-ink-3);overflow-wrap:anywhere}
-.rafx-liveMetaLine{padding:0 8px;font-family:var(--ds-font-family-code,monospace);font-size:9.5px;line-height:14px;color:var(--dsw-alias-label-caption)}
-.rafx-liveEmpty{padding:14px 12px;text-align:center;font-size:11px;line-height:16px;color:var(--dsw-alias-label-caption)}
-.rafx-liveTruncated{padding:2px 7px 3px;font-size:9.5px;line-height:14px;color:var(--dsw-alias-label-caption)}
-@media (max-width:760px){.rafx-liveTokens{display:none}.rafx-liveMeta{display:none}.rafx-liveFeed{max-height:200px}.rafx-liveQuestion{flex-basis:130px}}
-@media (prefers-reduced-motion:reduce){.rafx-liveStatus[data-status=running] .rafx-liveDot,.rafx-liveAgentDot[data-status=running]{animation:none}}
+.rafx-liveChevron{display:inline-flex;flex:none;color:var(--dsw-alias-label-tertiary)}
+.rafx-liveBody{display:flex;flex-direction:column;gap:4px;padding:2px 4px 7px}
+.rafx-liveLabel{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+.rafx-livePre{margin:0;padding:7px 8px;border-radius:6px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary);font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:17px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto}
+.rafx-liveNote{margin:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.rafx-liveMetaLine{color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,monospace);font-size:10.5px;line-height:16px}
+.rafx-liveError{margin:0;color:var(--dsw-alias-state-error-primary);font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:17px;white-space:pre-wrap;overflow-wrap:anywhere}
+.rafx-liveEmpty{padding:2px 0 8px;color:var(--dsw-alias-label-tertiary);font-size:12.5px;line-height:20px}
+.rafx-liveTruncated{padding:2px 4px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+@media (max-width:760px){.rafx-liveQuestion{display:none}.rafx-liveMeta{display:none}.rafx-liveFeed{max-height:180px}}
+@media (prefers-reduced-motion:reduce){.rafx-liveStatus[data-status=running] .rafx-liveDot,.rafx-liveAgentDot[data-status=running],.rafx-liveChevronButton{animation:none;transition:none}}
 
 `;
 
@@ -2063,7 +2062,7 @@ window.__ModuleLoader__.load({
           entries.push({ key, kind: 'error', agent, depth, step: Number(event.step ?? 0), at, message: String(event.message ?? event.type) });
         }
       }
-      return { agents, entries, usage: usageOfRun(run) };
+      return { agents, entries };
     }
 
     function RafLiveRow({ t, item, open, onToggle }) {
@@ -2089,7 +2088,6 @@ window.__ModuleLoader__.load({
         head.push(
           agentTag,
           stepTag,
-          h('span', { className: 'rafx-liveGlyph', 'data-tool': item.name.startsWith('dsh_') ? item.name.slice(4) : item.name, 'aria-hidden': true }, toolBadge(item.name)),
           h('span', { className: 'rafx-liveName' }, item.name),
           h('span', { className: 'rafx-livePreview' }, compactJson(item.args, 80)),
           item.query === null ? null : h('span', { className: 'rafx-liveMeta' }, `chunks ${item.query.chunks} · rel ${item.query.relevant}`),
@@ -2142,13 +2140,13 @@ window.__ModuleLoader__.load({
               : h(
                   'div',
                   { className: 'rafx-field' },
-                  h('span', { className: 'rafx-fieldLabel' }, t('live.motivation')),
+                  h('span', { className: 'rafx-liveLabel' }, t('live.motivation')),
                   h('p', { className: 'rafx-liveNote' }, item.motivation),
                 ),
             h(
               'div',
               { className: 'rafx-field' },
-              h('span', { className: 'rafx-fieldLabel' }, t('view.arguments')),
+              h('span', { className: 'rafx-liveLabel' }, t('view.arguments')),
               h('pre', { className: 'rafx-livePre' }, prettyJson(item.args)),
             ),
             item.query === null
@@ -2159,10 +2157,10 @@ window.__ModuleLoader__.load({
               : h(
                   'div',
                   { className: 'rafx-field' },
-                  h('span', { className: 'rafx-fieldLabel' }, t('view.result')),
+                  h('span', { className: 'rafx-liveLabel' }, t('view.result')),
                   h('pre', { className: 'rafx-livePre' }, item.result === '' ? '—' : item.result),
                 ),
-            item.error === null ? null : h('div', { className: 'rafx-error' }, item.error),
+            item.error === null ? null : h('div', { className: 'rafx-liveError' }, item.error),
           );
         } else if (item.kind === 'fold') {
           body = h(
@@ -2174,7 +2172,7 @@ window.__ModuleLoader__.load({
         } else if (item.kind === 'answer') {
           body = h('div', { className: 'rafx-liveBody' }, h('pre', { className: 'rafx-livePre' }, item.answer === '' ? '—' : item.answer));
         } else if (item.kind === 'error') {
-          body = h('div', { className: 'rafx-liveBody' }, h('div', { className: 'rafx-error' }, item.message));
+          body = h('div', { className: 'rafx-liveBody' }, h('div', { className: 'rafx-liveError' }, item.message));
         }
       }
       if (!expandable) return h('div', base, ...head);
@@ -2256,7 +2254,6 @@ window.__ModuleLoader__.load({
       if (engine !== ENGINE_RAF || run === null || run.id === dismissed) return null;
 
       const duration = (run.endedAt ?? Date.now()) - run.startedAt;
-      const usage = feed.usage;
       const status = run.status;
 
       return h(
@@ -2265,7 +2262,7 @@ window.__ModuleLoader__.load({
         h(
           'header',
           { className: 'rafx-liveHead' },
-          h('span', { className: 'rafx-liveMark', 'aria-hidden': true }, 'RAF'),
+          h('span', { className: 'rafx-liveTitle' }, 'RAF'),
           h(
             'span',
             { className: 'rafx-liveStatus', 'data-status': status },
@@ -2280,11 +2277,6 @@ window.__ModuleLoader__.load({
           ),
           h(
             'span',
-            { className: 'rafx-liveTokens' },
-            `${formatTokens(usage.input)} in / ${formatTokens(usage.output)} out · ${formatPercent(usage.cacheHitRate)} cache`,
-          ),
-          h(
-            'span',
             { className: 'rafx-liveActions' },
             h(
               'button',
@@ -2295,7 +2287,7 @@ window.__ModuleLoader__.load({
                 title: collapsed ? t('live.expand') : t('live.collapse'),
                 onClick: () => setCollapsed((value) => !value),
               },
-              collapsed ? h(PlusGlyph, { size: 12 }) : h(MinusGlyph, { size: 12 }),
+              h('span', { className: 'rafx-liveChevronButton', 'data-collapsed': collapsed ? 'true' : undefined }, h(ChevronGlyph, { size: 12 })),
             ),
             h(
               'button',

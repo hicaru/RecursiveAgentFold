@@ -49,7 +49,7 @@ RAF runs inside one outer model request. Its internal model calls use the Sessio
 
 ### Live RAF activity above the composer
 
-RAF Sessions also get a full-width live dock above the composer, next to the todo/goal docks. It polls the run registry and shows the current run in chronological order:
+RAF Sessions also get a live dock above the composer, aligned with the composer card like the todo/goal docks. It polls the run registry and shows the current run in chronological order:
 
 - agent chips: `Root`, then every `branch` subagent; click one to filter its work;
 - feed rows: agent start/finish, tool calls, `llm_query` scans, folds, answers, errors;
