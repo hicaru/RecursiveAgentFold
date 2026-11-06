@@ -424,6 +424,7 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
         throw new ToolArgumentError('start_line/end_line 要求恰好一个文档');
       }
       const categories = argStringList(args, 'categories');
+      const before = ctx.usage.byRole()['llm_query'];
       const res = await engine.query({
         query,
         mode: modeRaw,
@@ -436,6 +437,13 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
         usage: ctx.usage,
         agent: ctx.agentName,
       });
+      const after = ctx.usage.byRole()['llm_query'];
+      const delta = {
+        promptTokens: (after?.promptTokens ?? 0) - (before?.promptTokens ?? 0),
+        completionTokens: (after?.completionTokens ?? 0) - (before?.completionTokens ?? 0),
+        cachedTokens: (after?.cachedTokens ?? 0) - (before?.cachedTokens ?? 0),
+        reasoningTokens: (after?.reasoningTokens ?? 0) - (before?.reasoningTokens ?? 0),
+      };
       ctx.emit({
         type: 'llm_query',
         agent: ctx.agentName,
@@ -446,6 +454,8 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
         errors: res.findings.filter((f) => f.error).length,
         memoHits: res.findings.filter((f) => f.memoHit).length,
         chunkTokens: res.chunkTokens,
+        calls: (after?.calls ?? 0) - (before?.calls ?? 0),
+        usage: delta,
       });
       return res.report;
     },

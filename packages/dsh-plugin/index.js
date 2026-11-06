@@ -297,11 +297,15 @@ function formatTrace(events, settings, outer) {
           `  [result ${event.name}] tokens=${event.tokens}${event.error ? ` error=${event.error}` : ''} ${shortText(event.observation, 700)}`,
         );
         break;
-      case 'llm_query':
+      case 'llm_query': {
+        const extra = event.usage
+          ? ` calls=${event.calls ?? 0} in=${event.usage.promptTokens} out=${event.usage.completionTokens} cached=${event.usage.cachedTokens}`
+          : '';
         lines.push(
-          `  [llm_query] mode=${event.mode} chunks=${event.chunks} relevant=${event.relevant} errors=${event.errors} memo=${event.memoHits} chunkTokens=${event.chunkTokens} query=${shortText(event.query, 300)}`,
+          `  [llm_query] mode=${event.mode} chunks=${event.chunks} relevant=${event.relevant} errors=${event.errors} memo=${event.memoHits} chunkTokens=${event.chunkTokens}${extra} query=${shortText(event.query, 300)}`,
         );
         break;
+      }
       case 'format_error':
         lines.push(`  [format_error step ${event.step}] ${shortText(event.errors.join('; '), 500)}`);
         break;

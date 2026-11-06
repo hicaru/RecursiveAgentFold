@@ -241,7 +241,7 @@ window.__ModuleLoader__.load({
 .rafx-response{border:.5px solid var(--rafx-line);border-radius:8px;background:var(--rafx-surface-2);padding:0 8px}
 .rafx-response summary,.rafx-llm summary{display:flex;align-items:center;gap:8px;min-height:28px;cursor:pointer;font-size:11.5px;font-weight:500;line-height:18px;color:var(--rafx-ink-2);list-style:none}
 .rafx-response summary::-webkit-details-marker,.rafx-llm summary::-webkit-details-marker{display:none}
-.rafx-responseMeta,.rafx-llmMeta{margin-left:auto;font-family:var(--ds-font-family-code,monospace);font-size:10px;font-weight:400;color:var(--dsw-alias-label-caption);font-variant-numeric:tabular-nums}
+.rafx-llmMeta{margin-left:auto;font-family:var(--ds-font-family-code,monospace);font-size:10px;font-weight:400;color:var(--dsw-alias-label-caption);font-variant-numeric:tabular-nums}
 .rafx-response[open],.rafx-llm[open]{padding-bottom:8px}
 .rafx-pre{margin:0;padding:8px;border-radius:6px;background:var(--dsw-alias-bg-base);color:var(--rafx-ink-2);font-family:var(--ds-font-family-code,monospace);font-size:10.5px;line-height:16px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto}
 .rafx-field{display:flex;flex-direction:column;gap:4px;margin-top:6px}
@@ -1104,6 +1104,33 @@ window.__ModuleLoader__.load({
       };
     }
 
+    function mergeUsage(left, right) {
+      const input = Number(left.input ?? 0) + Number(right.input ?? 0);
+      const output = Number(left.output ?? 0) + Number(right.output ?? 0);
+      const cached = Number(left.cached ?? 0) + Number(right.cached ?? 0);
+      const calls = Number(left.calls ?? 0) + Number(right.calls ?? 0);
+      return {
+        input,
+        output,
+        cached,
+        calls,
+        cacheHitRate: input > 0 ? cached / input : 0,
+      };
+    }
+
+    function usageOfQueries(queries) {
+      const usage = { input: 0, output: 0, cached: 0, calls: 0 };
+      for (const query of queries) {
+        if (query === null || typeof query !== 'object' || query.usage === null || typeof query.usage !== 'object') continue;
+        usage.input += Number(query.usage.promptTokens ?? 0);
+        usage.output += Number(query.usage.completionTokens ?? 0);
+        usage.cached += Number(query.usage.cachedTokens ?? 0);
+        usage.calls += Number(query.calls ?? 0);
+      }
+      usage.cacheHitRate = usage.input > 0 ? usage.cached / usage.input : 0;
+      return usage;
+    }
+
     function usageOfRun(run) {
       if (run === null || typeof run !== 'object') return usageOfCalls([]);
       if (run.usage !== null && typeof run.usage === 'object') {
@@ -1117,10 +1144,19 @@ window.__ModuleLoader__.load({
           cacheHitRate: Number(run.usage.cacheHitRate ?? 0),
         };
       }
-      const calls = (Array.isArray(run.events) ? run.events : [])
-        .map((entry) => entry.event)
-        .filter((event) => event !== null && typeof event === 'object' && event.type === 'llm_call');
-      return usageOfCalls(calls);
+      let usage = { input: 0, output: 0, cached: 0, calls: 0, cacheHitRate: 0 };
+      for (const entry of Array.isArray(run.events) ? run.events : []) {
+        const event = entry === null || typeof entry !== 'object' ? null : entry.event;
+        if (event === null || typeof event !== 'object') continue;
+        if (event.type === 'llm_call' && event.usage !== null && typeof event.usage === 'object') {
+          const extra = usageOfCalls([event]);
+          usage = mergeUsage(usage, extra);
+        } else if (event.type === 'llm_query') {
+          usage = mergeUsage(usage, usageOfQueries([event]));
+        }
+      }
+      usage.cacheHitRate = usage.input > 0 ? usage.cached / usage.input : 0;
+      return usage;
     }
 
     function agentStatus(agent) {
@@ -1290,10 +1326,12 @@ window.__ModuleLoader__.load({
           if (step.endedAt === null) {
             step.endedAt = next !== undefined ? next.at : agent.endedAt ?? run.endedAt ?? now;
           }
-          step.usage = usageOfCalls(step.llmCalls);
+          step.usage = mergeUsage(usageOfCalls(step.llmCalls), usageOfQueries(step.queries));
         }
-        const calls = agent.steps.flatMap((step) => step.llmCalls);
-        agent.usage = usageOfCalls(calls);
+        agent.usage = agent.steps.reduce(
+          (total, step) => mergeUsage(total, step.usage),
+          { input: 0, output: 0, cached: 0, calls: 0, cacheHitRate: 0 },
+        );
       }
       return { agents };
     }
@@ -1438,7 +1476,18 @@ window.__ModuleLoader__.load({
                   h(
                     'span',
                     { className: 'rafx-queryMeta' },
-                    `mode=${query.mode} · chunks=${query.chunks} · relevant=${query.relevant} · memo=${query.memoHits} · ${formatTokens(query.chunkTokens)} tok/chunk`,
+                    [
+                      `mode=${query.mode}`,
+                      `chunks=${query.chunks}`,
+                      `relevant=${query.relevant}`,
+                      `memo=${query.memoHits}`,
+                      `${formatTokens(query.chunkTokens)} tok/chunk`,
+                      query.usage === undefined
+                        ? null
+                        : `${formatTokens(query.usage.promptTokens)} in / ${formatTokens(query.usage.completionTokens)} out · cache ${formatPercent(query.usage.promptTokens > 0 ? query.usage.cachedTokens / query.usage.promptTokens : 0)}`,
+                    ]
+                      .filter((value) => value !== null)
+                      .join(' · '),
                   ),
                   h('p', { className: 'rafx-queryText' }, query.query),
                 ),

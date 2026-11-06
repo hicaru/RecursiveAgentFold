@@ -20,7 +20,19 @@ export type AgentEvent =
   | { type: 'tool_result'; agent: string; step: number; name: string; observation: string; tokens: number; error?: string }
   | { type: 'answer'; agent: string; step: number; answer: string }
   | { type: 'run_end'; agent: string; depth: number; steps: number; terminated: string }
-  | { type: 'llm_query'; agent: string; query: string; mode: string; chunks: number; relevant: number; errors: number; memoHits: number; chunkTokens: number }
+  | {
+      type: 'llm_query';
+      agent: string;
+      query: string;
+      mode: string;
+      chunks: number;
+      relevant: number;
+      errors: number;
+      memoHits: number;
+      chunkTokens: number;
+      calls?: number;
+      usage?: LLMUsage;
+    }
   | { type: 'error'; agent: string; step?: number; message: string };
 
 export type EventSink = (e: AgentEvent) => void;
