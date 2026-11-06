@@ -14,6 +14,10 @@ import { createMockModels } from './mock.js';
 import { promptCheck } from './prompt-check.js';
 import { priceFor } from './pricing.js';
 import { runTasks, summarize, writeSummary, type BenchTask, type Method } from './runner.js';
+import { buildMrcrTasks } from './mrcr/mrcr.js';
+import { buildRulerTasks } from './ruler/ruler.js';
+import { fetchLongBenchPro } from './longbench-pro/dataset.js';
+import { buildLongBenchProTasks } from './longbench-pro/tasks.js';
 
 const HELP = `Recursive AgentFold benchmarks
 
@@ -27,7 +31,10 @@ Commands:
   oolong                         Run OOLONG-synth (trec_coarse@131K etc.)
   needle                         Run the synthetic mega-context needle/count benchmark
   codegraph                      Run the multi-document codebase & diamond-dependency benchmark
-  fetch-longbench                Download + cache LongBench-v2 rows from HuggingFace
+  ruler                          Run RULER-style synthetic long-context suite (11 subtasks)
+  mrcr                           Run MRCR-style multi-round co-reference benchmark (item F1)
+  fetch-longbench-pro            Download + cache LongBench-Pro rows from HuggingFace
+  longbench-pro                  Run LongBench-Pro real-world long-context QA
   longbench                      Run LongBench-v2 multi-document & codebase QA
 Common options:
   --method raf|agentfold|direct  (default raf)  raf = AgentFold + llm_query + branch,
@@ -69,6 +76,16 @@ codegraph:
   --tasks <n>                    number of questions (default 6)
   --hops <n>                     dependency chain hops 1..3 (default 3)
 
+ruler:
+  --tokens <n>                   haystack size (default 131072)
+  --tasks <n>                    tasks per subtask (default 1 → 11 tasks)
+  --subtasks a,b,c               subset of the 11 RULER subtasks (default all)
+mrcr:
+  --tokens <n>                   context size (default 131072)
+  --tasks <n>                    number of questions (default 6)
+longbench-pro / fetch-longbench-pro:
+  --domain <name>                domain filter (default: all)
+  --length short|medium|long     optional length filter
 longbench / fetch-longbench:
   --domain <name>                domain filter (default: Code Repository Understanding + Multi-Document QA)
   --difficulty easy|hard         optional difficulty filter
@@ -104,6 +121,7 @@ async function main() {
       windows: { type: 'string' },
       'no-hint': { type: 'boolean', default: false },
       'no-share-memo': { type: 'boolean', default: false },
+      subtasks: { type: 'string' },
       only: { type: 'string' },
       'system-extra': { type: 'string' },
       mock: { type: 'boolean', default: false },
@@ -190,6 +208,21 @@ async function main() {
     log: (s: string) => console.log(s),
   };
 
+  const longBenchProOpts = {
+    domain: values.domain,
+    length: values.length,
+    limit: opt(values.limit, Number),
+    cacheDir,
+    hfToken: process.env.HF_TOKEN || undefined,
+    log: (s: string) => console.log(s),
+  };
+
+  if (cmd === 'fetch-longbench-pro') {
+    const rows = await fetchLongBenchPro(longBenchProOpts);
+    console.log(`${rows.length} LongBench-Pro rows cached`);
+    return;
+  }
+
   if (cmd === 'fetch-longbench') {
     const rows = await fetchLongBenchV2(longBenchOpts);
     console.log(`${rows.length} LongBench-v2 rows cached`);
@@ -217,6 +250,22 @@ async function main() {
       hops: Number(values.hops ?? 3),
       seed: Number(values.seed),
     });
+  } else if (cmd === 'ruler') {
+    tasks = buildRulerTasks({
+      tokens: Number(values.tokens ?? 131072),
+      tasks: Number(values.tasks ?? 1),
+      seed: Number(values.seed),
+      ...(values.subtasks ? { subtasks: values.subtasks.split(',').map((s) => s.trim()).filter(Boolean) } : {}),
+    });
+  } else if (cmd === 'mrcr') {
+    tasks = buildMrcrTasks({
+      tokens: Number(values.tokens ?? 131072),
+      tasks: Number(values.tasks ?? 6),
+      seed: Number(values.seed),
+    });
+  } else if (cmd === 'longbench-pro') {
+    const rows = await fetchLongBenchPro(longBenchProOpts);
+    tasks = buildLongBenchProTasks(rows);
   } else if (cmd === 'longbench') {
     const rows = await fetchLongBenchV2(longBenchOpts);
     tasks = buildLongBenchTasks(rows);

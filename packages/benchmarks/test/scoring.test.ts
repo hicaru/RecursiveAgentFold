@@ -3,6 +3,9 @@ import { parseGold, parseOolongAnswer, scoreOolong, scoreOolongLenient } from '.
 import { buildNeedleTasks } from '../src/needle/needle.js';
 import { buildCodeGraphTasks } from '../src/codegraph/codegraph.js';
 import { parseChoiceLetter, splitContextIntoDocuments } from '../src/longbench/tasks.js';
+import { buildLongBenchProTasks } from '../src/longbench-pro/tasks.js';
+import { buildRulerTasks, parseAnswerList } from '../src/ruler/ruler.js';
+import { buildMrcrTasks, parseBullets } from '../src/mrcr/mrcr.js';
 describe('OOLONG scoring (official port)', () => {
   it('parses gold literals', () => {
     expect(parseGold("['location']").value).toBe('location');
@@ -78,5 +81,84 @@ describe('codegraph & longbench generators', () => {
     expect(docs[1]?.id).toBe('doc_2');
     expect(parseChoiceLetter('Answer: B')).toBe('B');
     expect(parseChoiceLetter('After checking all modules, the correct option is (C).')).toBe('C');
+  });
+});
+
+describe('ruler / mrcr / longbench-pro generators', () => {
+  it('ruler is deterministic, sized, and gold is findable in the haystack', () => {
+    const a = buildRulerTasks({ tokens: 20_000, tasks: 1, seed: 7 });
+    const b = buildRulerTasks({ tokens: 20_000, tasks: 1, seed: 7 });
+    expect(a).toHaveLength(11);
+    const first = a[0];
+    const firstB = b[0];
+    if (!first || !firstB) throw new Error('missing ruler task');
+    expect(first.documents[0]?.text).toBe(firstB.documents[0]?.text);
+    expect(first.documents[0]?.tokens).toBeGreaterThan(18_000);
+    // gold answer must literally appear in the haystack for retrieval subtasks
+    for (const t of a.slice(0, 8)) {
+      const gold = String(t.meta.gold ?? '');
+      expect(t.documents[0]?.text).toContain(gold.split(',')[0] ?? gold);
+    }
+    // scoring: exact gold → 1, junk → 0
+    const single = a.find((t) => t.meta.task === 'niah_single_1');
+    if (!single) throw new Error('missing niah_single_1');
+    expect(single.score(`Answer: ${String(single.meta.gold)}`).score).toBe(1);
+    expect(single.score('Answer: 000000').score).toBe(0);
+    // cwe: all 10 → 1, partial → 0 with correct extra
+    const cwe = a.find((t) => t.meta.task === 'cwe');
+    if (!cwe) throw new Error('missing cwe');
+    const goldList = String(cwe.meta.gold).split(',');
+    expect(cwe.score(`Answer: ${goldList.join(', ')}`).score).toBe(1);
+    const partial = cwe.score(`Answer: ${goldList.slice(0, 6).join(', ')}`);
+    expect(partial.score).toBe(0);
+    expect(partial.extra?.correct).toBe(6);
+    // vt chain contains X1..XchainLen
+    const vt = a.find((t) => t.meta.task === 'vt');
+    if (!vt) throw new Error('missing vt');
+    // one group per task: the runner shares a document store across a group,
+    // and each ruler task owns a different haystack
+    expect(new Set(a.map((t) => t.group)).size).toBe(a.length);
+    expect(new Set(a.map((t) => t.documents[0]?.text)).size).toBe(a.length);
+  });
+
+  it('mrcr is deterministic and scores item-level F1', () => {
+    const a = buildMrcrTasks({ tokens: 20_000, tasks: 3, seed: 5 });
+    const b = buildMrcrTasks({ tokens: 20_000, tasks: 3, seed: 5 });
+    expect(a).toHaveLength(3);
+    expect(a[0]?.documents[0]?.text).toBe(b[0]?.documents[0]?.text);
+    const t = a[0];
+    if (!t) throw new Error('missing mrcr task');
+    const gold = String(t.meta.gold).split(' || ');
+    expect(gold.length).toBeGreaterThanOrEqual(1);
+    const perfect = t.score(gold.map((g, i) => `- ${g}${i === 0 ? '.' : ''}`).join('\n'));
+    expect(perfect.score).toBe(1);
+    const half = t.score(`- ${gold[0]}`);
+    expect(half.score).toBeGreaterThan(0);
+    expect(half.score).toBeLessThan(1);
+    expect(t.score('- completely unrelated sentence.').score).toBe(0);
+    expect(parseBullets('1. alpha\n- beta\nAnswer: below').length).toBe(2);
+  });
+
+  it('longbench-pro builds free-form tasks with lenient containment scoring', () => {
+    const rows = [
+      {
+        _id: 'x1',
+        domain: 'Academic Papers',
+        difficulty: 'hard',
+        length: 'long',
+        question: 'What does the paper conclude?',
+        answer: 'the model scales linearly',
+        context: '=== paper.txt ===\n'.padEnd(300, 'x') + 'the model scales linearly',
+        token_length: 200_000,
+      },
+    ];
+    const tasks = buildLongBenchProTasks(rows);
+    const t = tasks[0];
+    if (!t) throw new Error('missing longbench-pro task');
+    expect(t.id).toBe('longbench-pro-x1');
+    expect(t.documents.length).toBeGreaterThanOrEqual(1);
+    expect(t.score('Answer: The model scales linearly.').score).toBe(1);
+    expect(t.score('Answer: something else entirely').score).toBe(0);
+    expect(t.score('The paper says the model scales linearly overall. Answer: model scales linearly').score).toBe(1);
   });
 });

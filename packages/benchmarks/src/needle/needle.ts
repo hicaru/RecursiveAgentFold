@@ -1,16 +1,5 @@
 import type { BenchTask } from '../runner.js';
-
-/** Mulberry32 seeded PRNG for deterministic haystacks. */
-function rng(seed: number) {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+import { pick, rng } from '../util/rng.js';
 
 const SUBJECTS = ['The committee', 'A local farmer', 'The museum guide', 'Our neighbour', 'The river pilot', 'A visiting scholar', 'The night baker', 'The archivist', 'A street musician', 'The ferry captain'];
 const VERBS = ['described', 'remembered', 'complained about', 'wrote a note on', 'argued over', 'sketched', 'photographed', 'measured', 'catalogued', 'praised'];
@@ -35,18 +24,18 @@ export interface NeedleOptions {
  */
 export function buildNeedleTasks(o: NeedleOptions): BenchTask[] {
   const r = rng(o.seed ?? 42);
-  const pick = <T>(xs: readonly T[]) => xs[Math.floor(r() * xs.length)]!;
+  const p = (xs: readonly string[]) => pick(r, xs);
   const charsTarget = o.tokens * 4;
   const factsN = o.facts ?? Math.max(12, Math.min(NAMES.length * 4, Math.round(o.tokens / 4000)));
   const facts = Array.from({ length: factsN }, (_, i) => ({
     name: `${NAMES[i % NAMES.length]}${i >= NAMES.length ? ` ${String.fromCharCode(65 + Math.floor(i / NAMES.length))}.` : ''}`,
-    city: pick(CITIES),
+    city: p(CITIES),
     badge: 1000 + Math.floor(r() * 9000),
   }));
   const lines: string[] = [];
   let chars = 0;
   while (chars < charsTarget) {
-    const l = `${pick(SUBJECTS)} ${pick(VERBS)} ${pick(OBJECTS)} ${pick(TAILS)}`;
+    const l = `${p(SUBJECTS)} ${p(VERBS)} ${p(OBJECTS)} ${p(TAILS)}`;
     lines.push(l);
     chars += l.length + 1;
   }
@@ -73,7 +62,7 @@ export function buildNeedleTasks(o: NeedleOptions): BenchTask[] {
         },
       });
     } else {
-      const city = pick(CITIES);
+      const city = p(CITIES);
       const gold = facts.filter((f) => f.city === city).length;
       tasks.push({
         id: `needle-${o.tokens}-count-${i}`,
