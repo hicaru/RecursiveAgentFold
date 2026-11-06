@@ -47,6 +47,17 @@ For a RAF Session, `llm/stream` builds a `ContextStore` from the Session transcr
 
 RAF runs inside one outer model request. Its internal model calls use the Session provider and model through `ctx.llm`. Root and reader calls use temperature 0. Internal calls are tagged with an `AsyncLocalStorage` guard so the listener does not intercept them again.
 
+### Live RAF activity above the composer
+
+RAF Sessions also get a full-width live dock above the composer, next to the todo/goal docks. It polls the run registry and shows the current run in chronological order:
+
+- agent chips: `Root`, then every `branch` subagent; click one to filter its work;
+- feed rows: agent start/finish, tool calls, `llm_query` scans, folds, answers, errors;
+- click a tool/fold/answer row to expand arguments, results, summaries, or the final text;
+- the dock keeps the latest run for ten minutes; collapse or close it. The RAF tab has the full per-agent tree.
+
+The dock is client-side UI over the runs API. The tool calls still are not native Session events.
+
 ### RAF runs view
 
 The plugin registers a dedicated **RAF** tab in the conversation view ring, between Trajectory and Statistics. It reads the Host run registry and polls while a run is active.

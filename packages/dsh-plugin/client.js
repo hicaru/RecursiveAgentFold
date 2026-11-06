@@ -78,6 +78,20 @@ window.__ModuleLoader__.load({
       'view.llmCalls': 'LLM calls',
       'view.openAgent': 'Open subagent',
       'view.parent': 'Back',
+      'live.all': 'All agents',
+      'live.waiting': 'Waiting for the first step…',
+      'live.started': 'started',
+      'live.finished': 'finished',
+      'live.steps': '{count} steps',
+      'live.step': 'step {step}',
+      'live.fold': 'fold',
+      'live.answer': 'answer',
+      'live.error': 'error',
+      'live.collapse': 'Collapse',
+      'live.expand': 'Expand',
+      'live.close': 'Close',
+      'live.motivation': 'motivation',
+      'live.truncated': 'Showing the latest activity.',
     });
 
     const RU = Object.freeze({
@@ -131,6 +145,20 @@ window.__ModuleLoader__.load({
       'view.llmCalls': 'Вызовы LLM',
       'view.openAgent': 'Открыть суб-агента',
       'view.parent': 'Назад',
+      'live.all': 'Все агенты',
+      'live.waiting': 'Ждём первый шаг…',
+      'live.started': 'старт',
+      'live.finished': 'финиш',
+      'live.steps': '{count} шагов',
+      'live.step': 'шаг {step}',
+      'live.fold': 'фолд',
+      'live.answer': 'ответ',
+      'live.error': 'ошибка',
+      'live.collapse': 'Свернуть',
+      'live.expand': 'Развернуть',
+      'live.close': 'Закрыть',
+      'live.motivation': 'мотивация',
+      'live.truncated': 'Показаны последние события.',
     });
 
     const CSS = `
@@ -288,6 +316,64 @@ window.__ModuleLoader__.load({
 @keyframes rafx-pulse{0%{opacity:.35}50%{opacity:1}100%{opacity:.35}}
 @media (max-width:820px){.rafx-runsBody{grid-template-columns:1fr}.rafx-agents{max-height:150px;border-right:0;border-bottom:.5px solid var(--rafx-line)}.rafx-agentList{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}.rafx-timeline{padding:12px 14px 40px}.rafx-runsTop{padding:12px 14px 10px}}
 @media (prefers-reduced-motion:reduce){.rafx-runsChip[data-status=running] .rafx-runsDot,.rafx-agentDot[data-status=running]{animation:none}}
+
+.rafx-live{--rafx-ink:var(--dsw-alias-label-primary);--rafx-ink-2:var(--dsw-alias-label-secondary);--rafx-ink-3:var(--dsw-alias-label-tertiary);--rafx-line:var(--dsw-alias-border-l3);--rafx-surface:var(--dsw-alias-bg-layer-1);--rafx-surface-2:var(--dsw-alias-bg-layer-2);position:relative;width:100%;margin-bottom:8px;border:.5px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);color:var(--rafx-ink);overflow:hidden;font-size:12px;line-height:18px}
+.rafx-live :focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
+.rafx-liveHead{display:flex;align-items:center;gap:7px;min-height:38px;padding:6px 10px;flex-wrap:wrap}
+.rafx-liveMark{flex:none;padding:0 4px;border:.5px solid color-mix(in srgb,var(--dsw-alias-brand-primary) 32%,transparent);border-radius:4px;color:var(--dsw-alias-brand-primary);font-family:var(--ds-font-family-code,monospace);font-size:8.5px;font-weight:700;letter-spacing:.08em;line-height:15px}
+.rafx-liveStatus{display:inline-flex;align-items:center;gap:5px;flex:none;padding:0 5px;border-radius:4px;background:var(--rafx-surface-2);color:var(--rafx-ink-2);font-size:9.5px;font-weight:600;line-height:16px;letter-spacing:.04em;text-transform:uppercase}
+.rafx-liveStatus[data-status=running]{color:var(--dsw-alias-state-business-primary)}
+.rafx-liveStatus[data-status=done]{color:var(--dsw-alias-state-success-primary)}
+.rafx-liveStatus[data-status=error]{color:var(--dsw-alias-state-error-primary)}
+.rafx-liveStatus[data-status=aborted]{color:var(--dsw-alias-state-warn-primary)}
+.rafx-liveDot{width:5px;height:5px;flex:none;border-radius:50%;background:currentColor}
+.rafx-liveStatus[data-status=running] .rafx-liveDot{animation:rafx-pulse 1.4s ease-in-out infinite}
+.rafx-liveQuestion{flex:1 1 240px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--rafx-ink)}
+.rafx-liveMeta{font-family:var(--ds-font-family-code,monospace);font-size:9.5px;line-height:14px;color:var(--dsw-alias-label-caption);font-variant-numeric:tabular-nums;white-space:nowrap}
+.rafx-liveTokens{font-family:var(--ds-font-family-code,monospace);font-size:9.5px;line-height:14px;color:var(--dsw-alias-label-caption);font-variant-numeric:tabular-nums;white-space:nowrap}
+.rafx-liveActions{display:flex;align-items:center;gap:1px;margin-left:auto;flex:none}
+.rafx-liveIcon{display:grid;place-items:center;width:22px;height:22px;padding:0;border:0;border-radius:5px;background:transparent;color:var(--dsw-alias-label-caption);font:inherit;font-size:15px;line-height:16px;cursor:pointer}
+.rafx-liveIcon:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--rafx-ink)}
+.rafx-liveAgents{display:flex;align-items:center;gap:3px;overflow-x:auto;padding:0 10px 6px;scrollbar-width:none}
+.rafx-liveAgents::-webkit-scrollbar{display:none}
+.rafx-liveAgentChip{display:inline-flex;align-items:center;gap:4px;flex:none;height:21px;padding:0 7px;border:.5px solid var(--rafx-line);border-radius:5px;background:transparent;color:var(--rafx-ink-3);font:inherit;font-family:var(--ds-font-family-code,monospace);font-size:9.5px;line-height:15px;cursor:pointer;white-space:nowrap}
+.rafx-liveAgentChip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--rafx-ink)}
+.rafx-liveAgentChip[data-selected=true]{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary) 38%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 9%,transparent);color:var(--rafx-ink)}
+.rafx-liveAgentDot{width:4px;height:4px;flex:none;border-radius:50%;background:var(--dsw-alias-label-caption)}
+.rafx-liveAgentDot[data-status=running]{background:var(--dsw-alias-state-business-primary);animation:rafx-pulse 1.4s ease-in-out infinite}
+.rafx-liveAgentDot[data-status=error]{background:var(--dsw-alias-state-error-primary)}
+.rafx-liveAgentDot[data-status=done]{background:var(--dsw-alias-state-success-primary)}
+.rafx-liveFeed{display:flex;flex-direction:column;gap:1px;max-height:260px;overflow:auto;padding:5px 6px 7px;border-top:.5px solid var(--rafx-line);scrollbar-gutter:stable;--dsh-scrollbar-width:8px;--dsh-scrollbar-thumb-border:2px}
+.rafx-liveItem{display:flex;flex-direction:column}
+.rafx-liveRow{display:flex;align-items:center;gap:6px;width:100%;min-height:24px;padding:3px 6px;border:0;border-radius:5px;background:transparent;color:var(--rafx-ink-2);font:inherit;text-align:left;cursor:pointer}
+.rafx-liveRow:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.rafx-liveRow[data-kind=agent-start],.rafx-liveRow[data-kind=agent-end]{cursor:default;color:var(--dsw-alias-label-caption);font-size:10px}
+.rafx-liveRow[data-kind=agent-start]:hover,.rafx-liveRow[data-kind=agent-end]:hover{background:transparent}
+.rafx-liveAgentTag{flex:none;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--ds-font-family-code,monospace);font-size:9.5px;line-height:14px;color:var(--rafx-ink-3)}
+.rafx-liveAgentTag[data-depth="0"]{color:var(--dsw-alias-brand-primary);font-weight:600}
+.rafx-liveStep{flex:none;font-family:var(--ds-font-family-code,monospace);font-size:9px;line-height:14px;color:var(--dsw-alias-label-caption)}
+.rafx-liveText{flex:none;font-size:10px;line-height:14px;color:var(--rafx-ink-3)}
+.rafx-liveEnd{flex:none;font-family:var(--ds-font-family-code,monospace);font-size:9px;line-height:14px;color:var(--dsw-alias-label-caption)}
+.rafx-liveGlyph{display:grid;place-items:center;width:19px;height:19px;flex:none;border-radius:4px;background:var(--rafx-surface-2);color:var(--dsw-alias-label-caption);font-family:var(--ds-font-family-code,monospace);font-size:8px;font-weight:700;letter-spacing:-.03em}
+.rafx-liveGlyph[data-tool=llm_query]{color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 11%,transparent)}
+.rafx-liveGlyph[data-tool=branch]{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 10%,transparent)}
+.rafx-liveGlyph[data-tool=grep],.rafx-liveGlyph[data-tool=read],.rafx-liveGlyph[data-tool=glob],.rafx-liveGlyph[data-tool=bash]{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 10%,transparent)}
+.rafx-liveName{flex:none;font-family:var(--ds-font-family-code,monospace);font-size:10.5px;font-weight:600;line-height:15px;color:var(--rafx-ink)}
+.rafx-livePreview{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--ds-font-family-code,monospace);font-size:10px;line-height:15px;color:var(--dsw-alias-label-caption)}
+.rafx-liveKind{flex:none;font-family:var(--ds-font-family-code,monospace);font-size:9.5px;font-weight:600;line-height:15px;color:var(--dsw-alias-label-caption);text-transform:uppercase;letter-spacing:.05em}
+.rafx-liveKind[data-kind=answer]{color:var(--dsw-alias-state-success-primary)}
+.rafx-liveKind[data-kind=error]{color:var(--dsw-alias-state-error-primary)}
+.rafx-liveRange{flex:none;font-family:var(--ds-font-family-code,monospace);font-size:9px;line-height:15px;color:var(--dsw-alias-label-caption)}
+.rafx-liveLive{display:inline-flex;flex:none;margin-left:auto}
+.rafx-liveChevron{display:inline-flex;flex:none;color:var(--dsw-alias-label-caption)}
+.rafx-liveBody{display:flex;flex-direction:column;gap:3px;padding:3px 10px 7px 27px}
+.rafx-livePre{margin:0;padding:7px 8px;border-radius:5px;background:var(--dsw-alias-bg-base);color:var(--rafx-ink-2);font-family:var(--ds-font-family-code,monospace);font-size:10px;line-height:15px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto}
+.rafx-liveNote{margin:0;font-size:10.5px;line-height:16px;color:var(--rafx-ink-3);overflow-wrap:anywhere}
+.rafx-liveMetaLine{padding:0 8px;font-family:var(--ds-font-family-code,monospace);font-size:9.5px;line-height:14px;color:var(--dsw-alias-label-caption)}
+.rafx-liveEmpty{padding:14px 12px;text-align:center;font-size:11px;line-height:16px;color:var(--dsw-alias-label-caption)}
+.rafx-liveTruncated{padding:2px 7px 3px;font-size:9.5px;line-height:14px;color:var(--dsw-alias-label-caption)}
+@media (max-width:760px){.rafx-liveTokens{display:none}.rafx-liveMeta{display:none}.rafx-liveFeed{max-height:200px}.rafx-liveQuestion{flex-basis:130px}}
+@media (prefers-reduced-motion:reduce){.rafx-liveStatus[data-status=running] .rafx-liveDot,.rafx-liveAgentDot[data-status=running]{animation:none}}
 
 `;
 
@@ -1841,6 +1927,451 @@ window.__ModuleLoader__.load({
       );
     }
 
+
+    const LIVE_LINGER_MS = 10 * 60_000;
+    const LIVE_FEED_LIMIT = 160;
+
+    function compactJson(value, limit = 90) {
+      let text;
+      try {
+        text = JSON.stringify(value ?? {});
+      } catch {
+        text = String(value);
+      }
+      if (typeof text !== 'string') text = '';
+      return text.length > limit ? `${text.slice(0, limit)}…` : text;
+    }
+
+    function buildRunFeed(run) {
+      const agents = [];
+      const entries = [];
+      const pending = new Map();
+      const depthByAgent = new Map();
+      const records = run !== null && typeof run === 'object' && Array.isArray(run.events) ? run.events : [];
+      for (const record of records) {
+        const event = record === null || typeof record !== 'object' ? null : record.event;
+        if (event === null || typeof event !== 'object') continue;
+        const seq = typeof record.seq === 'number' ? record.seq : entries.length;
+        const key = `e${seq}`;
+        const at = record.at;
+        const type = event.type;
+        if (type === 'run_start') {
+          const agent = String(event.agent ?? 'agent');
+          const depth = Number(event.depth ?? 0);
+          depthByAgent.set(agent, depth);
+          agents.push({ name: agent, depth, status: 'running', terminated: '', steps: 0 });
+          entries.push({ key, kind: 'agent-start', agent, depth, at });
+          continue;
+        }
+        const agent = String(event.agent ?? 'root');
+        const depth = depthByAgent.get(agent) ?? 0;
+        if (type === 'run_end') {
+          const meta = agents.find((candidate) => candidate.name === agent);
+          const terminated = String(event.terminated ?? '');
+          if (meta !== undefined) {
+            meta.status = terminated === 'error' || terminated === 'filtered' ? 'error' : 'done';
+            meta.terminated = terminated;
+            meta.steps = Number(event.steps ?? 0);
+          }
+          entries.push({ key, kind: 'agent-end', agent, depth, at, terminated, steps: Number(event.steps ?? 0) });
+          continue;
+        }
+        if (type === 'tool_call') {
+          const action = event.action !== null && typeof event.action === 'object' ? event.action : {};
+          const name = String(action.name ?? 'tool');
+          const item = {
+            key,
+            kind: 'tool',
+            agent,
+            depth,
+            step: Number(event.step ?? 0),
+            at,
+            name,
+            args: action.arguments ?? {},
+            motivation: String(event.motivation ?? ''),
+            result: null,
+            tokens: null,
+            error: null,
+            endedAt: null,
+            query: null,
+          };
+          entries.push(item);
+          const pkey = `${agent}\u0000${item.step}\u0000${name}`;
+          const list = pending.get(pkey) ?? [];
+          list.push(item);
+          pending.set(pkey, list);
+          continue;
+        }
+        if (type === 'tool_result') {
+          const pkey = `${agent}\u0000${Number(event.step ?? 0)}\u0000${String(event.name ?? '')}`;
+          const list = pending.get(pkey);
+          const item = list === undefined ? undefined : list.shift();
+          if (item !== undefined) {
+            item.result = String(event.observation ?? '');
+            item.tokens = Number(event.tokens ?? 0);
+            item.error = event.error === undefined ? null : String(event.error);
+            item.endedAt = at;
+          }
+          continue;
+        }
+        if (type === 'llm_query') {
+          const pkey = `${agent}\u0000${Number(event.step ?? 0)}\u0000llm_query`;
+          const list = pending.get(pkey);
+          const item = list === undefined ? undefined : list[list.length - 1];
+          const query = {
+            chunks: Number(event.chunks ?? 0),
+            relevant: Number(event.relevant ?? 0),
+            memo: Number(event.memoHits ?? 0),
+            usage: event.usage ?? null,
+          };
+          if (item !== undefined) item.query = query;
+          else entries.push({ key, kind: 'query', agent, depth, step: Number(event.step ?? 0), at, query });
+          continue;
+        }
+        if (type === 'fold') {
+          const directive = event.outcome?.directive ?? event.requested;
+          entries.push({
+            key,
+            kind: 'fold',
+            agent,
+            depth,
+            step: Number(event.step ?? 0),
+            at,
+            range: Array.isArray(directive?.range) ? directive.range : null,
+            summary: String(directive?.summary ?? ''),
+            corrections: Array.isArray(event.outcome?.corrections) ? event.outcome.corrections : [],
+          });
+          continue;
+        }
+        if (type === 'answer') {
+          entries.push({ key, kind: 'answer', agent, depth, step: Number(event.step ?? 0), at, answer: String(event.answer ?? '') });
+          continue;
+        }
+        if (type === 'format_error') {
+          entries.push({
+            key,
+            kind: 'error',
+            agent,
+            depth,
+            step: Number(event.step ?? 0),
+            at,
+            message: Array.isArray(event.errors) ? event.errors.join('; ') : 'format error',
+          });
+          continue;
+        }
+        if (type === 'error') {
+          entries.push({ key, kind: 'error', agent, depth, step: Number(event.step ?? 0), at, message: String(event.message ?? event.type) });
+        }
+      }
+      return { agents, entries, usage: usageOfRun(run) };
+    }
+
+    function RafLiveRow({ t, item, open, onToggle }) {
+      const expandable = item.kind === 'tool' || item.kind === 'fold' || item.kind === 'answer' || item.kind === 'error';
+      const base = {
+        className: 'rafx-liveRow',
+        'data-kind': item.kind,
+        style: { paddingLeft: `${6 + item.depth * 12}px` },
+      };
+      const agentTag = h('span', { className: 'rafx-liveAgentTag', 'data-depth': item.depth }, item.agent);
+      const stepTag = item.step === undefined ? null : h('span', { className: 'rafx-liveStep' }, t('live.step', { step: item.step }));
+      const head = [];
+      if (item.kind === 'agent-start') {
+        head.push(agentTag, h('span', { className: 'rafx-liveText' }, t('live.started')));
+      } else if (item.kind === 'agent-end') {
+        head.push(
+          agentTag,
+          h('span', { className: 'rafx-liveText' }, t('live.finished')),
+          h('span', { className: 'rafx-liveEnd' }, item.terminated),
+          h('span', { className: 'rafx-liveMeta' }, t('live.steps', { count: item.steps })),
+        );
+      } else if (item.kind === 'tool') {
+        head.push(
+          agentTag,
+          stepTag,
+          h('span', { className: 'rafx-liveGlyph', 'data-tool': item.name.startsWith('dsh_') ? item.name.slice(4) : item.name, 'aria-hidden': true }, toolBadge(item.name)),
+          h('span', { className: 'rafx-liveName' }, item.name),
+          h('span', { className: 'rafx-livePreview' }, compactJson(item.args, 80)),
+          item.query === null ? null : h('span', { className: 'rafx-liveMeta' }, `chunks ${item.query.chunks} · rel ${item.query.relevant}`),
+          item.result === null
+            ? h('span', { className: 'rafx-liveLive', 'aria-hidden': true }, h('span', { className: 'rafx-liveDot' }))
+            : h('span', { className: 'rafx-liveMeta' }, [item.tokens === null ? null : `${formatTokens(item.tokens)} tok`, formatDuration((item.endedAt ?? Date.now()) - item.at)].filter(Boolean).join(' · ')),
+          h('span', { className: 'rafx-liveChevron', 'aria-hidden': true }, h(ChevronGlyph, { size: 11 })),
+        );
+      } else if (item.kind === 'fold') {
+        head.push(
+          agentTag,
+          stepTag,
+          h('span', { className: 'rafx-liveKind' }, t('live.fold')),
+          h('span', { className: 'rafx-liveRange' }, item.range === null ? '' : `[${item.range.join(',')}]`),
+          h('span', { className: 'rafx-livePreview' }, item.summary),
+          h('span', { className: 'rafx-liveChevron', 'aria-hidden': true }, h(ChevronGlyph, { size: 11 })),
+        );
+      } else if (item.kind === 'answer') {
+        head.push(
+          agentTag,
+          stepTag,
+          h('span', { className: 'rafx-liveKind', 'data-kind': 'answer' }, t('live.answer')),
+          h('span', { className: 'rafx-livePreview' }, item.answer),
+          h('span', { className: 'rafx-liveChevron', 'aria-hidden': true }, h(ChevronGlyph, { size: 11 })),
+        );
+      } else if (item.kind === 'error') {
+        head.push(
+          agentTag,
+          stepTag,
+          h('span', { className: 'rafx-liveKind', 'data-kind': 'error' }, t('live.error')),
+          h('span', { className: 'rafx-livePreview' }, item.message),
+          h('span', { className: 'rafx-liveChevron', 'aria-hidden': true }, h(ChevronGlyph, { size: 11 })),
+        );
+      } else if (item.kind === 'query') {
+        head.push(
+          agentTag,
+          stepTag,
+          h('span', { className: 'rafx-liveKind' }, 'llm_query'),
+          h('span', { className: 'rafx-liveMeta' }, `chunks ${item.query.chunks} · rel ${item.query.relevant}`),
+        );
+      }
+      let body = null;
+      if (expandable && open) {
+        if (item.kind === 'tool') {
+          body = h(
+            'div',
+            { className: 'rafx-liveBody' },
+            item.motivation === ''
+              ? null
+              : h(
+                  'div',
+                  { className: 'rafx-field' },
+                  h('span', { className: 'rafx-fieldLabel' }, t('live.motivation')),
+                  h('p', { className: 'rafx-liveNote' }, item.motivation),
+                ),
+            h(
+              'div',
+              { className: 'rafx-field' },
+              h('span', { className: 'rafx-fieldLabel' }, t('view.arguments')),
+              h('pre', { className: 'rafx-livePre' }, prettyJson(item.args)),
+            ),
+            item.query === null
+              ? null
+              : h('div', { className: 'rafx-liveMetaLine' }, `llm_query · chunks ${item.query.chunks} · relevant ${item.query.relevant} · memo ${item.query.memo}`),
+            item.result === null
+              ? h('div', { className: 'rafx-liveNote' }, runStatusLabel(t, 'running'))
+              : h(
+                  'div',
+                  { className: 'rafx-field' },
+                  h('span', { className: 'rafx-fieldLabel' }, t('view.result')),
+                  h('pre', { className: 'rafx-livePre' }, item.result === '' ? '—' : item.result),
+                ),
+            item.error === null ? null : h('div', { className: 'rafx-error' }, item.error),
+          );
+        } else if (item.kind === 'fold') {
+          body = h(
+            'div',
+            { className: 'rafx-liveBody' },
+            h('pre', { className: 'rafx-livePre' }, item.summary === '' ? '—' : item.summary),
+            item.corrections.length === 0 ? null : h('div', { className: 'rafx-liveMetaLine' }, item.corrections.join('; ')),
+          );
+        } else if (item.kind === 'answer') {
+          body = h('div', { className: 'rafx-liveBody' }, h('pre', { className: 'rafx-livePre' }, item.answer === '' ? '—' : item.answer));
+        } else if (item.kind === 'error') {
+          body = h('div', { className: 'rafx-liveBody' }, h('div', { className: 'rafx-error' }, item.message));
+        }
+      }
+      if (!expandable) return h('div', base, ...head);
+      return h(
+        'div',
+        { className: 'rafx-liveItem' },
+        h('button', { ...base, type: 'button', 'aria-expanded': open, onClick: onToggle }, ...head),
+        body,
+      );
+    }
+
+    function RafLiveDock({ t, sessionId }) {
+      const engine = useEngine(sessionId);
+      const [run, setRun] = React.useState(null);
+      const [selectedAgent, setSelectedAgent] = React.useState('all');
+      const [openKey, setOpenKey] = React.useState(null);
+      const [collapsed, setCollapsed] = React.useState(false);
+      const [dismissed, setDismissed] = React.useState(null);
+      const feedRef = React.useRef(null);
+      const stickRef = React.useRef(true);
+
+      React.useEffect(() => {
+        if (engine !== ENGINE_RAF || typeof sessionId !== 'string' || !sessionId) {
+          setRun(null);
+          return undefined;
+        }
+        let active = true;
+        let timer = 0;
+        const tick = async () => {
+          try {
+            const list = await getRuns(sessionId);
+            if (!active) return;
+            const latest = list[0];
+            if (
+              latest === undefined ||
+              (latest.status !== 'running' && (typeof latest.endedAt !== 'number' || Date.now() - latest.endedAt > LIVE_LINGER_MS))
+            ) {
+              setRun(null);
+              timer = window.setTimeout(tick, 2000);
+              return;
+            }
+            const detail = await getRun(latest.id);
+            if (!active) return;
+            setRun(detail);
+            timer = window.setTimeout(tick, detail.status === 'running' ? 700 : 2000);
+          } catch {
+            if (active) timer = window.setTimeout(tick, 2000);
+          }
+        };
+        void tick();
+        return () => {
+          active = false;
+          if (timer !== 0) window.clearTimeout(timer);
+        };
+      }, [engine, sessionId]);
+
+      React.useEffect(() => {
+        setSelectedAgent('all');
+        setOpenKey(null);
+        setCollapsed(false);
+        stickRef.current = true;
+      }, [run?.id]);
+
+      React.useEffect(() => {
+        setDismissed(null);
+      }, [sessionId]);
+
+      const feed = React.useMemo(() => buildRunFeed(run), [run]);
+      const visible = feed.entries.filter((item) => selectedAgent === 'all' || item.agent === selectedAgent);
+      const shown = visible.length > LIVE_FEED_LIMIT ? visible.slice(-LIVE_FEED_LIMIT) : visible;
+
+      React.useEffect(() => {
+        if (collapsed) return;
+        const element = feedRef.current;
+        if (element === null || !stickRef.current) return;
+        element.scrollTop = element.scrollHeight;
+      }, [shown.length, selectedAgent, collapsed]);
+
+      if (engine !== ENGINE_RAF || run === null || run.id === dismissed) return null;
+
+      const duration = (run.endedAt ?? Date.now()) - run.startedAt;
+      const usage = feed.usage;
+      const status = run.status;
+
+      return h(
+        'section',
+        { className: 'rafx-live', 'data-status': status },
+        h(
+          'header',
+          { className: 'rafx-liveHead' },
+          h('span', { className: 'rafx-liveMark', 'aria-hidden': true }, 'RAF'),
+          h(
+            'span',
+            { className: 'rafx-liveStatus', 'data-status': status },
+            h('span', { className: 'rafx-liveDot', 'aria-hidden': true }),
+            runStatusLabel(t, status),
+          ),
+          h('span', { className: 'rafx-liveQuestion', title: run.question }, run.question),
+          h(
+            'span',
+            { className: 'rafx-liveMeta' },
+            `${formatDuration(duration)} · ${run.stepCount} ${t('view.steps').toLowerCase()} · ${feed.agents.length} ${t('view.agents').toLowerCase()}`,
+          ),
+          h(
+            'span',
+            { className: 'rafx-liveTokens' },
+            `${formatTokens(usage.input)} in / ${formatTokens(usage.output)} out · ${formatPercent(usage.cacheHitRate)} cache`,
+          ),
+          h(
+            'span',
+            { className: 'rafx-liveActions' },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'rafx-liveIcon',
+                'aria-label': collapsed ? t('live.expand') : t('live.collapse'),
+                title: collapsed ? t('live.expand') : t('live.collapse'),
+                onClick: () => setCollapsed((value) => !value),
+              },
+              collapsed ? h(PlusGlyph, { size: 12 }) : h(MinusGlyph, { size: 12 }),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'rafx-liveIcon',
+                'aria-label': t('live.close'),
+                title: t('live.close'),
+                onClick: () => setDismissed(run.id),
+              },
+              '×',
+            ),
+          ),
+        ),
+        collapsed
+          ? null
+          : h(
+              React.Fragment,
+              null,
+              h(
+                'div',
+                { className: 'rafx-liveAgents' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'rafx-liveAgentChip',
+                    'data-selected': selectedAgent === 'all' ? 'true' : undefined,
+                    onClick: () => setSelectedAgent('all'),
+                  },
+                  t('live.all'),
+                ),
+                feed.agents.map((agent) =>
+                  h(
+                    'button',
+                    {
+                      key: agent.name,
+                      type: 'button',
+                      className: 'rafx-liveAgentChip',
+                      'data-selected': selectedAgent === agent.name ? 'true' : undefined,
+                      'data-depth': agent.depth,
+                      style: { paddingLeft: `${6 + agent.depth * 10}px` },
+                      onClick: () => setSelectedAgent(agent.name),
+                    },
+                    h('span', { className: 'rafx-liveAgentDot', 'data-status': agent.status, 'aria-hidden': true }),
+                    agent.depth === 0 ? t('view.root') : agent.name,
+                  ),
+                ),
+              ),
+              shown.length === 0
+                ? h('div', { className: 'rafx-liveEmpty' }, status === 'running' ? t('live.waiting') : t('view.noEvents'))
+                : h(
+                    'div',
+                    {
+                      className: 'rafx-liveFeed',
+                      ref: feedRef,
+                      onScroll: (event) => {
+                        const element = event.currentTarget;
+                        stickRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 32;
+                      },
+                    },
+                    visible.length > shown.length ? h('div', { className: 'rafx-liveTruncated' }, t('live.truncated')) : null,
+                    shown.map((item) =>
+                      h(RafLiveRow, {
+                        key: item.key,
+                        t,
+                        item,
+                        open: openKey === item.key,
+                        onToggle: () => setOpenKey((current) => (current === item.key ? null : item.key)),
+                      }),
+                    ),
+                  ),
+            ),
+      );
+    }
+
     function apply(ctx) {
       ctx.effect(() => {
         const style = document.createElement('style');
@@ -1892,6 +2423,22 @@ window.__ModuleLoader__.load({
             ),
           ),
         'raf: settings panel',
+      );
+
+      ctx.effect(
+        () =>
+          ctx.slots.inject('conversation.input.dock', () =>
+            ctx.slots.register(
+              {
+                name: 'conversation.input.dock',
+                id: 'raf-live',
+                order: 5,
+                locale: NS,
+              },
+              RafLiveDock,
+            ),
+          ),
+        'raf: live activity dock',
       );
 
       ctx.effect(
