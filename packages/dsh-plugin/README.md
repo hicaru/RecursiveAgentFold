@@ -45,7 +45,7 @@ For a RAF Session, `llm/stream` builds a `ContextStore` from the Session transcr
 - the final `<answer>` becomes one assistant message in DSH;
 - RAF token usage is reported in the same message's usage chunk.
 
-RAF runs inside one outer model request. Its internal model calls use the Session provider and model through `ctx.llm`. Root and reader calls use temperature 0. Internal calls are tagged with an `AsyncLocalStorage` guard so the listener does not intercept them again.
+RAF runs inside one outer model request. Its internal model calls use the Session provider and model through `ctx.llm`. Root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 4,096 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. Internal calls are tagged with an `AsyncLocalStorage` guard so the listener does not intercept them again.
 
 ### Live RAF activity above the composer
 
@@ -87,6 +87,7 @@ Limits of this first integration:
 - RAF's own `read`/`grep` tools scan the transcript. The `dsh_*` tools run the real DSH tools, with the normal approval policy.
 - DSH tool calls from RAF are shown in the RAF view. They are not native session `tool/call` events, so Chat and Trajectory do not render them as tool rows; a custom Agent driver is required for that.
 - DSH's synthetic user messages are context, not the question. The latest human message is the question.
+- An answer cut by the output limit or an unclosed `<answer>` is rejected and retried with a shorter complete answer.
 - The reader calls use the same model as the root with its default reasoning effort. The benchmark harness uses a separate non-thinking reader model; set that route before judging benchmark accuracy.
 
 ## Settings

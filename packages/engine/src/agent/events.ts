@@ -11,6 +11,7 @@ export type AgentEvent =
       model: string;
       usage: LLMUsage;
       latencyMs: number;
+      finishReason?: string;
       attempt?: number;
     }
   | { type: 'llm_response'; agent: string; step: number; text: string; reasoning?: string }

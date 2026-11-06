@@ -725,3 +725,44 @@ describe('answer echo guard', () => {
     expect(events.some((event) => event.type === 'format_error' && event.errors.some((error) => error.includes('repeats')))).toBe(true);
   });
 });
+
+describe('truncated answer guard', () => {
+  it('rejects an answer cut by the output limit and retries', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const summary = 'A compact summary of the probe step with enough detail to satisfy the folding contract and keep the state consistent.';
+    const responses: Array<string | { readonly text: string; readonly finishReason: string }> = [
+      '<motivation>probe the context.</motivation><tool_call>{"name":"probe","arguments":{}}</tool_call>',
+      {
+        text: `<folding>{"range":[0,0],"summary":${JSON.stringify(summary)}}</folding><motivation>answer.</motivation><answer>partial answer that is cut`,
+        finishReason: 'length',
+      },
+      {
+        text: `<folding>{"range":[0,0],"summary":${JSON.stringify(summary)}}</folding><motivation>answer.</motivation><answer>complete answer</answer>`,
+        finishReason: 'stop',
+      },
+    ];
+    const llm = new ScriptedLLM((_req, index) => responses[Math.min(index, responses.length - 1)]!);
+    const events: AgentEvent[] = [];
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [
+        {
+          name: 'probe',
+          description: 'probe the context',
+          parameters: { type: 'object', properties: {} },
+          async execute() {
+            return 'observed';
+          },
+        },
+      ],
+      store,
+      maxSteps: 6,
+      maxFormatRetries: 1,
+      onEvent: (event) => events.push(event),
+    });
+    const result = await agent.run('summarize the project');
+    expect(result.answer).toBe('complete answer');
+    expect(events.some((event) => event.type === 'format_error' && event.errors.some((error) => error.includes('output token limit')))).toBe(true);
+  });
+});

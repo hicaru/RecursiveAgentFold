@@ -190,6 +190,7 @@ export class AgentFoldAgent {
       }
       const expectFolding = state.latest !== undefined;
       let parsed: ParsedResponse | undefined;
+      let outputTruncated = false;
       let tail: string | undefined = forcing ? FORCE_ANSWER : undefined;
       const maxRetries = this.cfg.maxFormatRetries ?? 2;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -210,9 +211,19 @@ export class AgentFoldAgent {
         try {
           const res = await this.cfg.llm.complete({ messages, temperature: this.cfg.temperature, signal: this.cfg.signal, purpose: role });
           this.usage.record(role, res.usage, res.latencyMs);
-          this.emit({ type: 'llm_call', agent: this.name, role, model: res.model, usage: res.usage, latencyMs: res.latencyMs, attempt });
+          this.emit({
+            type: 'llm_call',
+            agent: this.name,
+            role,
+            model: res.model,
+            usage: res.usage,
+            latencyMs: res.latencyMs,
+            ...(res.finishReason !== undefined ? { finishReason: res.finishReason } : {}),
+            attempt,
+          });
           text = res.text;
           reasoning = res.reasoning;
+          outputTruncated = res.finishReason === 'length' || res.finishReason === 'max-tokens';
           truncatedReasoning =
             text.trim() === '' &&
             (res.finishReason === 'length' || (res.usage.reasoningTokens ?? 0) >= 8000);
@@ -236,6 +247,15 @@ export class AgentFoldAgent {
         }
         const p = parseAgentResponse(text, { expectFolding, reasoning });
         if (forcing && !p.answer && p.errors.length === 0 && p.toolCall) p.errors.push('a final <answer> is required now');
+        if (p.errors.length === 0 && p.answer !== undefined) {
+          const answerOpen = /<\s*answer\b/i.test(text);
+          const answerClosed = /<\s*\/\s*answer\s*>/i.test(text);
+          if (outputTruncated) {
+            p.errors.push('the <answer> hit the output token limit; produce a complete, shorter final answer');
+          } else if (answerOpen && !answerClosed) {
+            p.errors.push('the <answer> is not closed; produce a complete final answer');
+          }
+        }
         if (p.errors.length === 0 && p.answer !== undefined) {
           const lastBlock = state.blocks[state.blocks.length - 1];
           const echo =

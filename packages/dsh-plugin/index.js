@@ -21,6 +21,8 @@ const MAX_ENGINE_ENTRIES = 2000;
 const MAX_RUNS = 30;
 const MAX_RUN_EVENTS = 2000;
 const RAF_ROOT_MAX_STEPS = 32;
+const RAF_ROOT_MAX_OUTPUT = 16000;
+const RAF_QUERY_MAX_OUTPUT = 4096;
 
 export const inject = ['llm'];
 
@@ -229,7 +231,11 @@ class DshLlmClient {
       messages: request.messages.map((message) => dshMessage(message, this.outer)),
       sessionId: this.outer.sessionId,
       ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-      ...(request.maxTokens !== undefined ? { maxTokens: request.maxTokens } : {}),
+      ...(request.maxTokens !== undefined
+        ? { maxTokens: request.maxTokens }
+        : this.profile.maxOutputTokens !== undefined
+          ? { maxTokens: this.profile.maxOutputTokens }
+          : {}),
       ...(this.reasoningEffort !== undefined ? { reasoningEffort: this.reasoningEffort } : {}),
       ...(signal !== undefined ? { signal } : {}),
     };
@@ -288,7 +294,7 @@ function formatTrace(events, settings, outer) {
         break;
       case 'llm_call':
         lines.push(
-          `  [llm ${event.role}] ${event.model} in=${event.usage.promptTokens} out=${event.usage.completionTokens} cached=${event.usage.cachedTokens} ${event.latencyMs}ms`,
+          `  [llm ${event.role}] ${event.model} in=${event.usage.promptTokens} out=${event.usage.completionTokens} cached=${event.usage.cachedTokens} ${event.latencyMs}ms${event.finishReason !== undefined ? ` finish=${event.finishReason}` : ''}`,
         );
         break;
       case 'llm_response':
@@ -538,15 +544,20 @@ async function* rafStream(ctx, outer, settings, runs) {
     });
     const raf = await loadRaf();
     const contextWindow = contextWindowOf(ctx, outer.sessionId);
-    const profile = {
+    const rootProfile = {
       name: outer.model,
       contextWindow,
-      maxOutputTokens: 4096,
+      maxOutputTokens: RAF_ROOT_MAX_OUTPUT,
+    };
+    const queryProfile = {
+      name: outer.model,
+      contextWindow,
+      maxOutputTokens: RAF_QUERY_MAX_OUTPUT,
     };
     const store = new raf.ContextStore();
     if (transcript !== '') store.add(transcript, { id: 'session', title: 'DSH session transcript' });
-    const rootLLM = new DshLlmClient(ctx, outer, profile, outer.reasoningEffort);
-    const queryLLM = new DshLlmClient(ctx, outer, profile, undefined);
+    const rootLLM = new DshLlmClient(ctx, outer, rootProfile, outer.reasoningEffort);
+    const queryLLM = new DshLlmClient(ctx, outer, queryProfile, undefined);
     const extraTools = createDshTools(ctx, outer.sessionId, signal);
     const events = [];
     const engine = new raf.RecursiveAgentFold({
