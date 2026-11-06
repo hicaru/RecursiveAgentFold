@@ -29,10 +29,17 @@ A profile links this checkout, so the relative import resolves. A packed copy of
 
 ## Engine switch
 
-- The switch is **per Session**. The Host stores `{ [sessionId]: 'raf' }` in `~/.dsh/raf-engine/state.json`; absence means `standard`.
+- The switch is **per Session**. The Host stores each Session's choice and a default in `~/.dsh/raf-engine/state.json`; a Session without an entry uses the default.
 - The client calls the Host route `POST /plugins/@raf/dsh-plugin/engine` with `{ sessionId, engine, settings }`.
 - The route is authenticated through the DSH connection service. The page's same-origin cookie admits it.
-- The next model request in that Session runs RAF. The choice survives a restart. It is not written to the session log, so a fork starts on `Standard`.
+- The next model request in that Session runs RAF. The choice survives a restart. It is not written to the session log, so a fork with no entry starts on the default.
+
+The switch also stores the last selection as the default for new Sessions:
+
+- the Host persists `defaultEngine` next to the per-Session map in `~/.dsh/raf-engine/state.json`;
+- a Session without an entry uses `defaultEngine`;
+- selecting RAF makes the next new Session start on RAF; selecting Standard makes it start on Standard;
+- an old state file without `defaultEngine` gets RAF when at least one Session is already on RAF.
 
 ## RAF execution
 
@@ -59,20 +66,6 @@ RAF writes native Session events while it runs, so Chat and Trajectory show its 
 - subagent calls carry their `branch` label, so the root and every subagent show their own tools in order.
 
 The events are synthetic: RAF already executed the tool, and the Host appends only the display records. The tool is not executed again. The separate live dock was removed; the **RAF** tab remains the detailed per-agent inspector.
-
-### RAF runs view
-
-The plugin registers a dedicated **RAF** tab in the conversation view ring, between Trajectory and Statistics. It reads the Host run registry and polls while a run is active.
-
-- Left column: every agent in the run. RAF `branch` subagents appear as nested agents; click one to inspect only its steps and tools.
-- Main column: the selected agent's steps. Each step shows context size, blocks, the model response/reasoning, folds, tool calls and results, `llm_query` scans, per-call LLM tokens/cache/latency, errors, and the final answer.
-- Tool rows expand to show arguments and result text. A `branch` tool links to its subagent.
-- Header: run selector, live status, model, settings, steps, agents, tokens, cache hit rate, and duration.
-- New runs appear automatically; completed runs remain selectable. The Host keeps the latest 30 runs in memory, so a Host restart clears the list.
-
-The view shows both RAF's context tools (`llm_query`, `grep`, `read`, `tally`, `branch`, `calculator`) and the bridged DSH file tools. RAF branch agents are engine subagents; the DSH `subagent` tool is not exposed.
-
-The Host exposes the run data at `GET /plugins/@raf/dsh-plugin/runs?sessionId=...` and `GET /plugins/@raf/dsh-plugin/runs/<id>`.
 
 ### Trajectory trace
 
@@ -110,7 +103,6 @@ The settings page writes `{ depth, reserve, concurrency }` to `localStorage` and
 | `sidebar.panellist` | `raf` | Sidebar entry and icon. |
 | `conversation.input.left` | `raf-engine` | Composer engine switch. |
 | `shell.overlay` | `raf-engine-menu` | Fixed engine menu above the composer. |
-| `conversation.view` | `raf-runs` | RAF run inspector tab. |
 
 ## Install
 

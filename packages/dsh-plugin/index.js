@@ -65,35 +65,47 @@ function statePath() {
 }
 
 function loadState() {
-  const fallback = { engines: Object.create(null), settings: DEFAULT_SETTINGS };
+  const fallback = { defaultEngine: ENGINE_STANDARD, engines: Object.create(null), settings: DEFAULT_SETTINGS };
   try {
     const parsed = JSON.parse(readFileSync(statePath(), 'utf8'));
     if (parsed === null || typeof parsed !== 'object') return fallback;
     const engines = Object.create(null);
     if (parsed.engines !== null && typeof parsed.engines === 'object') {
       for (const [sessionId, value] of Object.entries(parsed.engines)) {
-        if (sanitizeEngine(value) === ENGINE_RAF) engines[sessionId] = ENGINE_RAF;
+        engines[sessionId] = sanitizeEngine(value);
       }
     }
-    return { engines, settings: sanitizeSettings(parsed.settings) };
+    const stored = parsed.defaultEngine;
+    const defaultEngine =
+      stored === undefined
+        ? Object.values(engines).includes(ENGINE_RAF)
+          ? ENGINE_RAF
+          : ENGINE_STANDARD
+        : sanitizeEngine(stored);
+    return { defaultEngine, engines, settings: sanitizeSettings(parsed.settings) };
   } catch {
     return fallback;
   }
 }
 
 function stateJson(state) {
-  return JSON.stringify({ version: 1, engines: state.engines, settings: state.settings }, null, 2);
+  return JSON.stringify(
+    { version: 1, defaultEngine: state.defaultEngine, engines: state.engines, settings: state.settings },
+    null,
+    2,
+  );
 }
 
 function engineOf(state, sessionId) {
-  if (typeof sessionId !== 'string' || !sessionId) return ENGINE_STANDARD;
-  return state.engines[sessionId] === ENGINE_RAF ? ENGINE_RAF : ENGINE_STANDARD;
+  if (typeof sessionId !== 'string' || !sessionId) return state.defaultEngine;
+  return state.engines[sessionId] ?? state.defaultEngine;
 }
 
 function setEngine(state, sessionId, engine) {
   if (typeof sessionId !== 'string' || !sessionId) return;
-  if (sanitizeEngine(engine) === ENGINE_RAF) state.engines[sessionId] = ENGINE_RAF;
-  else delete state.engines[sessionId];
+  const next = sanitizeEngine(engine);
+  state.engines[sessionId] = next;
+  state.defaultEngine = next;
   const keys = Object.keys(state.engines);
   while (keys.length > MAX_ENGINE_ENTRIES) {
     const oldest = keys.shift();
@@ -844,6 +856,7 @@ export function apply(ctx) {
               if (req.method === 'GET') {
                 sendJson(res, 200, {
                   ...(sessionId === undefined ? {} : { engine: engineOf(state, sessionId) }),
+                  defaultEngine: state.defaultEngine,
                   settings: state.settings,
                 });
                 return;
@@ -868,6 +881,7 @@ export function apply(ctx) {
               sendJson(res, 200, {
                 ok: true,
                 ...(sessionId === undefined ? {} : { engine: engineOf(state, sessionId) }),
+                defaultEngine: state.defaultEngine,
                 settings: state.settings,
               });
             } catch (error) {

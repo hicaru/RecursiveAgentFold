@@ -1898,23 +1898,6 @@ window.__ModuleLoader__.load({
 
       ctx.effect(
         () =>
-          ctx.slots.inject('conversation.view', () =>
-            ctx.slots.register(
-              {
-                name: 'conversation.view',
-                id: 'raf-runs',
-                order: 30,
-                locale: NS,
-                label: () => t('view.label'),
-              },
-              RafRunsView,
-            ),
-          ),
-        'raf: runs view',
-      );
-
-      ctx.effect(
-        () =>
           ctx.slots.inject('sidebar.panellist', () =>
             ctx.slots.register(
               {
