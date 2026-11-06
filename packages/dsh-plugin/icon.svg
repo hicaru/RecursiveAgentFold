@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="raf-fold" x1="10" y1="10" x2="54" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6EE7FF"/>
+      <stop offset="1" stop-color="#9F8CFF"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="17" fill="#0C111E"/>
+  <path d="M14 24.4 32 14l18 10.4L32 34.8 14 24.4Z" fill="none" stroke="url(#raf-fold)" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M14 33.4 32 43.8l18-10.4" fill="none" stroke="url(#raf-fold)" stroke-width="3" stroke-linejoin="round" opacity=".62"/>
+  <path d="M14 42.4 32 52.8l18-10.4" fill="none" stroke="url(#raf-fold)" stroke-width="3" stroke-linejoin="round" opacity=".32"/>
+  <circle cx="49.5" cy="14.5" r="3" fill="#6EE7FF"/>
+</svg>
