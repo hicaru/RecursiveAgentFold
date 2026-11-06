@@ -40,8 +40,9 @@ Common options:
   --method raf|agentfold|direct  (default raf)  raf = AgentFold + llm_query + branch,
                                  agentfold = plain AgentFold with grep/read, direct = single call
   --root-model <id>              override RAF_ROOT_MODEL
+  --branch-model <id>            override RAF_BRANCH_MODEL (default: root model)
   --query-model <id>             override RAF_QUERY_MODEL
-  --reserve-ratio <0..1>         llm_query chunk = window * (1 - ratio)   (default 0.3)
+  --query-base-url <url>         override RAF_QUERY_BASE_URL
   --max-chunk-tokens <n>         cap llm_query chunk size
   --query-concurrency <n>        parallel llm_query chunk calls
   --max-steps <n>                root step budget (default 30)
@@ -105,7 +106,9 @@ async function main() {
     options: {
       method: { type: 'string', default: 'raf' },
       'root-model': { type: 'string' },
+      'branch-model': { type: 'string' },
       'query-model': { type: 'string' },
+      'query-base-url': { type: 'string' },
       'reserve-ratio': { type: 'string' },
       'max-chunk-tokens': { type: 'string' },
       'query-concurrency': { type: 'string' },
@@ -162,7 +165,9 @@ async function main() {
   const outDir = values.out ? resolve(process.env.INIT_CWD ?? process.cwd(), values.out) : join(root, 'results', `${stamp}-${cmd}-${method}`);
   const modelOverrides = {
     rootModel: values['root-model'],
+    branchModel: values['branch-model'],
     queryModel: values['query-model'],
+    queryBaseUrl: values['query-base-url'],
     reserveRatio: opt(values['reserve-ratio'], Number),
     maxChunkTokens: opt(values['max-chunk-tokens'], Number),
     queryConcurrency: opt(values['query-concurrency'], Number),
@@ -296,6 +301,7 @@ async function main() {
   const results = await runTasks(tasks, {
     method,
     root: models.root,
+    branch: models.branch,
     query: models.query,
     llmQuery: models.llmQuery,
     maxDepth: opt(values['max-depth'], Number),
@@ -313,7 +319,11 @@ async function main() {
     systemPromptExtra: values['system-extra'],
     outDir,
   });
-  const prices = { root: priceFor(models.root.profile.name), query: priceFor(models.query.profile.name) };
+  const prices = {
+    root: priceFor(models.root.profile.name),
+    branch: priceFor(models.branch.profile.name),
+    query: priceFor(models.query.profile.name),
+  };
   const md = writeSummary(outDir, summarize(results, { bench: cmd, method }, prices));
   console.log(`\n${md}`);
 }

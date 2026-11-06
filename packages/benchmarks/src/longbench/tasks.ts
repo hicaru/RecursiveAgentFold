@@ -1,22 +1,22 @@
+import { defaultEstimator } from '@raf/engine';
 import type { BenchDocument, BenchTask } from '../runner.js';
 import type { LongBenchRow } from './dataset.js';
 
 const HEADER_DELIMITER =
-  /(?:^|\n)(?=(?:={3,}\s*[^\n]+?\s*={3,}|-{3,}\s*(?:File|Document|Passage)[^\n]*|###\s*(?:File|Document|Passage)\b[^\n]*|(?:Document|Passage)\s+\d+\s*[:\n]))/g;
+  /(?:^|\n)(?=(?:={3,}\s*[^\n]+?\s*={3,}|-{3,}\s*(?:File|Document|Passage)[^\n]*|###\s*(?:File|Document|Passage)\b[^\n]*|(?:Document|Passage)\s+\d+\s*[:\n]|篇[一二三四五六七八九十\d]+\s*[：:]|片段\s*[A-Z\d]+\s*[：:]|\d+\s+[^\n]{2,40}论文[：:]|[A-Z]\.\n[A-Z][^\n]{10,150}\n))/g;
 
 export function splitContextIntoDocuments(context: string, maxDocs = 32): BenchDocument[] {
   const parts = context
     .split(HEADER_DELIMITER)
     .map((s) => s.trim())
     .filter((s) => s.length >= 200);
-
   if (parts.length <= 1) {
     return [
       {
         id: 'context',
         title: 'LongBench-v2 context',
         text: context,
-        tokens: Math.round(context.length / 4),
+        tokens: defaultEstimator.count(context),
       },
     ];
   }
@@ -30,13 +30,18 @@ export function splitContextIntoDocuments(context: string, maxDocs = 32): BenchD
         ];
 
   return capped.map((segment, idx) => {
-    const firstLine = (segment.split('\n')[0] ?? `Document ${idx + 1}`).replace(/^[=#-\s]+|[=#-\s]+$/g, '').slice(0, 80);
+    const lines = segment.split('\n');
+    const rawTitle =
+      lines[0] && /^[A-Z]\.$/.test(lines[0].trim()) && lines[1]
+        ? `${lines[0].trim()} ${lines[1].trim()}`
+        : (lines[0] ?? `Document ${idx + 1}`);
+    const firstLine = rawTitle.replace(/^[=#-\s]+|[=#-\s]+$/g, '').slice(0, 80);
     const id = `doc_${idx + 1}`;
     return {
       id,
       title: firstLine || `Document ${idx + 1}`,
       text: segment,
-      tokens: Math.round(segment.length / 4),
+      tokens: defaultEstimator.count(segment),
     };
   });
 }

@@ -83,16 +83,19 @@ export class ContextStore {
       if (raw.length <= this.maxLineChars) lines.push(raw);
       else for (let i = 0; i < raw.length; i += this.maxLineChars) lines.push(raw.slice(i, i + this.maxLineChars));
     }
+    const baseCount = this.estimator.count(text);
+    const calibratedRatio =
+      opts.tokens && opts.tokens > 0 && text.length > 0 ? Math.max(0.8, text.length / opts.tokens) : undefined;
     const estimator =
-      opts.tokens && opts.tokens > 0 && text.length > 0
-        ? new CharRatioEstimator(Math.max(1, text.length / opts.tokens))
+      calibratedRatio !== undefined && opts.tokens !== baseCount
+        ? new CharRatioEstimator(calibratedRatio, Math.min(calibratedRatio, 1.4))
         : this.estimator;
     const doc: StoredDocument = {
       id,
       title: opts.title ?? id,
       lines,
       chars: text.length,
-      tokens: opts.tokens ?? estimator.count(text),
+      tokens: opts.tokens ?? baseCount,
       estimator,
     };
     this.docs.set(id, doc);

@@ -34,9 +34,10 @@ export interface BranchToolOptions {
   maxBranchSteps?: number;
   maxResultTokens?: number;
   consultOnly?: boolean;
+  readonly ownScope?: string;
 }
 
-interface SubTaskSpec {
+export interface SubTaskSpec {
   readonly scope?: string;
   readonly task: string;
 }
@@ -111,6 +112,34 @@ function parseSubTasks(raw: unknown, fallbackScope: string | undefined): SubTask
   throw new ToolArgumentError('参数 "tasks" 必须是任务列表');
 }
 
+export function mergeSubTasksByScope(specs: readonly SubTaskSpec[], store: ContextStore): SubTaskSpec[] {
+  if (specs.length <= 1) return [...specs];
+  const groups = new Map<string, { firstScope: string | undefined; tasks: string[]; seenTasks: Set<string> }>();
+  for (const spec of specs) {
+    const scopeKey = inferScope(spec.scope, spec.task, store);
+    const normT = normalizeTaskKey(spec.task);
+    let g = groups.get(scopeKey);
+    if (!g) {
+      g = { firstScope: spec.scope, tasks: [], seenTasks: new Set<string>() };
+      groups.set(scopeKey, g);
+    } else if (!g.firstScope && spec.scope) {
+      g.firstScope = spec.scope;
+    }
+    if (!g.seenTasks.has(normT)) {
+      g.seenTasks.add(normT);
+      g.tasks.push(spec.task);
+    }
+  }
+  const merged: SubTaskSpec[] = new Array(groups.size);
+  let idx = 0;
+  for (const [scopeKey, g] of groups) {
+    const combinedTask =
+      g.tasks.length === 1 ? (g.tasks[0] ?? '') : g.tasks.map((t, i) => `(${i + 1}) ${t}`).join('；');
+    const finalScope = g.firstScope ?? (g.tasks.length > 1 ? scopeKey : undefined);
+    merged[idx++] = finalScope ? { scope: finalScope, task: combinedTask } : { task: combinedTask };
+  }
+  return merged;
+}
 /**
  * `branch` spawns or queries a scoped specialist child AgentFold agent (depth + 1)
  * over the same document store. Each `scope` preserves its folded state in
@@ -159,6 +188,9 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
 
       const runSingle = async (subTask: string, subScope?: string): Promise<string> => {
         const scopeKey = inferScope(subScope, subTask, ctx.store);
+        if (opts.ownScope && scopeKey === normalizeScopeKey(opts.ownScope)) {
+          return `[scope=${scopeKey}] 你当前已经是负责 [${scopeKey}] 的专家子代理，严禁对自身 scope 调用 branch！请直接使用 grep / read / tally 工具在本域文档中查证。`;
+        }
         const stack = ctx.callStack ?? [];
         if (stack.includes(scopeKey)) {
           const existingSummary = ctx.board?.getSpecialist(scopeKey)?.latestSummary;
@@ -173,29 +205,34 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
         }
         const nextStack = [...stack, scopeKey];
         if (ctx.board) {
-          const { result } = await ctx.board.runScopedBranch(scopeKey, subTask, async (sInput) => {
-            const r = await run(sInput.initialTask, {
-              depth: ctx.depth + 1,
-              maxSteps,
-              parent: ctx.agentName,
-              scope: scopeKey,
-              initialState: sInput.previousState,
-              followUpQuestion: sInput.followUpQuestion,
-              initialBoardCount: sInput.initialBoardCount,
-              initialBoardSnapshot: sInput.initialBoardSnapshot,
-              agentName: sInput.agentName,
-              callStack: nextStack,
-              signal: ctx.signal,
-            });
-            const status = `[scope=${scopeKey}] branch 完成：${r.terminated}，共 ${r.steps} 步${r.error ? `（错误：${r.error}）` : ''}`;
-            const body = r.answer ?? '（未产生答案）';
-            const resultText = `${status}\n结果：\n${body}`;
-            return {
-              resultText,
-              answer: r.answer,
-              state: r.state ?? { blocks: [], latest: undefined },
-            };
-          });
+          const { result } = await ctx.board.runScopedBranch(
+            scopeKey,
+            subTask,
+            async (sInput) => {
+              const r = await run(sInput.initialTask, {
+                depth: ctx.depth + 1,
+                maxSteps,
+                parent: ctx.agentName,
+                scope: scopeKey,
+                initialState: sInput.previousState,
+                followUpQuestion: sInput.followUpQuestion,
+                initialBoardCount: sInput.initialBoardRev,
+                initialBoardSnapshot: sInput.initialBoardSnapshot,
+                agentName: sInput.agentName,
+                callStack: nextStack,
+                signal: ctx.signal,
+              });
+              const status = `[scope=${scopeKey}] branch 完成：${r.terminated}，共 ${r.steps} 步${r.error ? `（错误：${r.error}）` : ''}`;
+              const body = r.answer ?? '（未产生答案）';
+              const resultText = `${status}\n结果：\n${body}`;
+              return {
+                resultText,
+                answer: r.answer,
+                state: r.state ?? { blocks: [], latest: undefined },
+              };
+            },
+            { depth: ctx.depth + 1, parent: ctx.agentName },
+          );
           return result;
         }
         const r = await run(subTask, {
@@ -212,17 +249,17 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
       };
 
       if (tasks.length > 0) {
-        const results = await Promise.all(tasks.map((t) => runSingle(t.task, t.scope)));
+        const mergedTasks = mergeSubTasksByScope(tasks, ctx.store);
+        const results = await Promise.all(mergedTasks.map((t) => runSingle(t.task, t.scope)));
         const summary = results
           .map((r, i) => {
-            const spec = tasks[i];
+            const spec = mergedTasks[i];
             const label = spec?.scope ? `[scope=${spec.scope}] ${spec.task}` : (spec?.task ?? '');
             return `[子任务 #${i + 1}] ${label}\n${r}`;
           })
           .join('\n\n');
         return truncateToTokens(summary, opts.maxResultTokens ?? 6000).text;
       }
-
       return truncateToTokens(await runSingle(task ?? '', explicitScope), opts.maxResultTokens ?? 3000).text;
     },
   };

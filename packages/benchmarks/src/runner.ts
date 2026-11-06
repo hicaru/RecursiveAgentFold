@@ -6,6 +6,7 @@ import {
   DEFAULT_MAX_DEPTH,
   LLMQueryEngine,
   RecursiveAgentFold,
+  ResearchBoard,
   UsageTracker,
   createLimiter,
   type AgentEvent,
@@ -38,6 +39,7 @@ export interface BenchTask {
 export interface RunConfig {
   method: Method;
   root: LLMClient;
+  branch?: LLMClient;
   query?: LLMClient;
   llmQuery?: LLMQueryOptions;
   maxDepth?: number;
@@ -137,11 +139,14 @@ export async function runTasks(tasks: BenchTask[], cfg: RunConfig): Promise<Task
 
   await Promise.all(
     [...groups.values()].map((group) => {
-      const store = cfg.method === 'direct' ? undefined : buildStore(group[0]!.documents);
-      // One llm_query engine per document group: memo + chunk cache shared across its questions.
+      const firstTask = group[0];
+      if (!firstTask) return Promise.resolve();
+      const store = cfg.method === 'direct' ? undefined : buildStore(firstTask.documents);
+      const board = cfg.method === 'direct' ? undefined : new ResearchBoard();
+      // One llm_query engine + ResearchBoard per document group: memo + chunk cache + specialists shared across its questions.
       const queryEngine =
         toolPreset(cfg).llm_query && cfg.query && store && cfg.shareQueryMemo !== false
-          ? new LLMQueryEngine(cfg.query, store, new UsageTracker(), cfg.llmQuery)
+          ? new LLMQueryEngine(cfg.query, store, new UsageTracker(), { ...cfg.llmQuery, board })
           : undefined;
       return Promise.all(
         group.map((task) =>
@@ -166,11 +171,14 @@ export async function runTasks(tasks: BenchTask[], cfg: RunConfig): Promise<Task
           let r: Pick<TaskResult, 'output' | 'steps' | 'terminated' | 'error' | 'formatIssues'>;
           if (cfg.method === 'direct') r = await runDirect(task, cfg, usage);
           else {
+            if (!store) throw new Error('ContextStore missing for non-direct run');
             const raf = new RecursiveAgentFold({
               rootLLM: cfg.root,
+              branchLLM: cfg.branch ?? cfg.root,
               queryLLM: toolPreset(cfg).llm_query ? cfg.query : undefined,
               queryEngine,
-              store: store!,
+              store,
+              board,
               llmQuery: cfg.llmQuery,
               maxDepth: toolPreset(cfg).branch ? (cfg.maxDepth ?? DEFAULT_MAX_DEPTH) : 0,
               rootMaxSteps: cfg.rootMaxSteps ?? 30,
@@ -218,9 +226,9 @@ export async function runTasks(tasks: BenchTask[], cfg: RunConfig): Promise<Task
 
 export interface SummaryPrices {
   root?: TokenPrice;
+  branch?: TokenPrice;
   query?: TokenPrice;
 }
-
 export function summarize(results: TaskResult[], extra: Record<string, unknown> = {}, prices: SummaryPrices = {}) {
   const n = results.length;
   const mean = (f: (r: TaskResult) => number, rs: TaskResult[] = results) =>
@@ -255,7 +263,7 @@ export function summarize(results: TaskResult[], extra: Record<string, unknown> 
   let totalUsd = 0;
   let cacheSavedUsd = 0;
   for (const [role, b] of Object.entries(roles)) {
-    const price = role === 'llm_query' ? prices.query : prices.root;
+    const price = role === 'llm_query' ? prices.query : role === 'branch' ? (prices.branch ?? prices.root) : prices.root;
     if (!price) continue;
     byRoleUsd[role] = usd(costOf(price, b));
     totalUsd += costOf(price, b);

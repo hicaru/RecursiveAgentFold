@@ -23,14 +23,20 @@ export interface ParsedResponse {
   warnings: string[];
 }
 
-const TAGS = ['think', 'folding', 'motivation', 'tool_call', 'answer'] as const;
+const TAGS = ['think', 'folding', 'folded_output', 'fold', '折叠', 'motivation', 'explanation', '动机', 'tool_call', 'answer'] as const;
 type Tag = (typeof TAGS)[number];
-
+const FOLD_TAGS = ['folding', 'folded_output', 'fold', '折叠'] as const;
+const MOTIVATION_TAGS = ['motivation', 'explanation', '动机'] as const;
+const TOOL_TAG_ALIASES = ['grep', 'read', 'tally', 'calculator', 'branch', 'llm_query', 'list_documents'] as const;
 function tagRegex(tag: string): RegExp {
   // tolerant of `</ folding >`, attributes and casing
   return new RegExp(`<\\s*${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\s*\\/\\s*${tag}\\s*>`, 'i');
 }
 
+function groupTagRegex(tags: readonly string[]): RegExp {
+  const alt = tags.join('|');
+  return new RegExp(`<\\s*(${alt})(?:\\s[^>]*)?>([\\s\\S]*?)<\\s*\\/\\s*(?:${alt})\\s*>`, 'i');
+}
 function openTagIndex(text: string, tag: string): number {
   const m = new RegExp(`<\\s*${tag}(?:\\s[^>]*)?>`, 'i').exec(text);
   return m ? m.index + m[0].length : -1;
@@ -58,6 +64,17 @@ function parseFolding(raw: string, warnings: string[], errors: string[]): FoldDi
   try {
     obj = parseLooseJSON<Record<string, unknown>>(raw);
   } catch (e) {
+    const mRange = /"range"\s*:\s*\[\s*(-?\d+)\s*(?:,\s*(-?\d+)\s*)?\]/.exec(raw);
+    const mSum = /"summary"\s*:\s*"([\s\S]*?)"?\s*\}?\s*$/.exec(raw);
+    if (mRange?.[1] !== undefined && mSum?.[1] !== undefined) {
+      const start = Number(mRange[1]);
+      const end = Number(mRange[2] ?? mRange[1]);
+      const summary = mSum[1].trim();
+      if (summary) {
+        warnings.push('folding parsed via regex fallback');
+        return { range: [start, end], summary };
+      }
+    }
     errors.push(`<folding> 不是合法 JSON：${(e as Error).message}`);
     return undefined;
   }
@@ -79,7 +96,26 @@ function parseFolding(raw: string, warnings: string[], errors: string[]): FoldDi
   return { range: [start, end], summary };
 }
 
-function parseToolCall(raw: string, errors: string[]): ToolAction | undefined {
+function inferBareToolName(obj: Record<string, unknown>, contextText: string): string | undefined {
+  if (typeof obj.expression === 'string') return 'calculator';
+  if (typeof obj.pattern === 'string') {
+    if ('top' in obj || 'group' in obj || /\btally\b/i.test(contextText)) return 'tally';
+    return 'grep';
+  }
+  if (('start_line' in obj || 'end_line' in obj || 'document' in obj) && !('pattern' in obj) && !('query' in obj)) {
+    return 'read';
+  }
+  if ('task' in obj || 'tasks' in obj || 'scope' in obj) return 'branch';
+  if ('query' in obj || 'categories' in obj) return 'llm_query';
+  return undefined;
+}
+
+function parseToolCall(
+  raw: string,
+  errors: string[],
+  fallbackName?: string,
+  contextText?: string,
+): ToolAction | undefined {
   let obj: Record<string, unknown>;
   try {
     obj = parseLooseJSON<Record<string, unknown>>(raw);
@@ -89,7 +125,12 @@ function parseToolCall(raw: string, errors: string[]): ToolAction | undefined {
   }
   // Accept OpenAI-style {"function": {"name", "arguments": "<json>"}} as well.
   const fn = (obj.function ?? obj) as Record<string, unknown>;
-  const name = fn.name ?? fn.tool ?? fn.tool_name;
+  const name =
+    fn.name ??
+    fn.tool ??
+    fn.tool_name ??
+    fallbackName ??
+    (contextText !== undefined ? inferBareToolName(fn, contextText) : undefined);
   if (typeof name !== 'string' || !name) {
     errors.push('tool_call.name 缺失');
     return undefined;
@@ -131,28 +172,64 @@ export function parseAgentResponse(text: string, opts: ParseOptions): ParsedResp
   const body = thinkRaw !== undefined ? text.replace(tagRegex('think'), '') : text;
   const out: ParsedResponse = { errors, warnings, think: thinkRaw ?? opts.reasoning };
 
-  const foldRaw = extractTag(body, 'folding');
+  const foldGroupMatch = groupTagRegex(FOLD_TAGS).exec(body);
+  const foldTag =
+    foldGroupMatch && foldGroupMatch[1]?.toLowerCase() === 'folding' ? foldGroupMatch[2]?.trim() : extractTag(body, 'folding');
+  const foldAlias =
+    foldTag === undefined
+      ? (foldGroupMatch?.[2]?.trim() ?? extractTag(body, 'folded_output') ?? extractTag(body, 'fold') ?? extractTag(body, '折叠'))
+      : undefined;
+  const foldRaw = foldTag ?? foldAlias;
+  if (foldAlias !== undefined) warnings.push('使用了 <folded_output>/<fold> 标签代替 <folding>');
   if (foldRaw !== undefined && foldRaw.trim() !== '') out.folding = parseFolding(foldRaw, warnings, errors);
   else if (opts.expectFolding) warnings.push('缺少 <folding>');
 
-  const motivation = extractTag(body, 'motivation') ?? extractTag(body, 'explanation' as Tag);
+  const motGroupMatch = groupTagRegex(MOTIVATION_TAGS).exec(body);
+  const motivation =
+    motGroupMatch?.[2]?.trim() ?? extractTag(body, 'motivation') ?? extractTag(body, 'explanation') ?? extractTag(body, '动机');
   if (motivation !== undefined) out.motivation = motivation;
-
   const answer = extractTag(body, 'answer');
   const toolRaw = extractTag(body, 'tool_call');
   if (answer !== undefined) {
     out.answer = answer;
     if (toolRaw !== undefined) warnings.push('同时出现 <answer> 和 <tool_call>，采用 <answer>');
   } else if (toolRaw !== undefined) {
-    out.toolCall = parseToolCall(toolRaw, errors);
+    out.toolCall = parseToolCall(toolRaw, errors, undefined, body);
   } else {
-    // Last resort: bare JSON tool call without tags.
-    const bare = extractBalanced(normalizeQuotes(body));
-    if (bare && /"name"\s*:/.test(bare) && /"arguments"\s*:/.test(bare)) {
-      out.toolCall = parseToolCall(bare, errors);
-      warnings.push('工具调用没有 <tool_call> 标签');
+    let aliasMatch: { name: string; content: string } | undefined;
+    for (const toolName of TOOL_TAG_ALIASES) {
+      const m = tagRegex(toolName).exec(body);
+      if (m?.[1] !== undefined) {
+        aliasMatch = { name: toolName, content: m[1].trim() };
+        break;
+      }
+    }
+    if (aliasMatch) {
+      out.toolCall = parseToolCall(aliasMatch.content, errors, aliasMatch.name, body);
+      warnings.push(`使用 <${aliasMatch.name}> 标签代替 <tool_call>`);
     } else {
-      errors.push('回复既没有 <tool_call> 也没有 <answer>');
+      // Last resort: bare JSON tool call without tags (excluding folding/motivation tags).
+      const restBody = body
+        .replace(groupTagRegex(FOLD_TAGS), '')
+        .replace(groupTagRegex(MOTIVATION_TAGS), '');
+      const bare = extractBalanced(restBody) ?? extractBalanced(normalizeQuotes(restBody));
+      if (bare) {
+        const tempErrors: string[] = [];
+        const parsedTool = parseToolCall(bare, tempErrors, undefined, restBody);
+        if (parsedTool) {
+          out.toolCall = parsedTool;
+          warnings.push('工具调用没有 <tool_call> 标签');
+          if (!out.motivation) {
+            const idx = restBody.indexOf('{');
+            const pre = idx > 0 ? restBody.slice(0, idx).trim() : '';
+            if (pre) out.motivation = pre;
+          }
+        } else {
+          errors.push('回复既没有 <tool_call> 也没有 <answer>');
+        }
+      } else {
+        errors.push('回复既没有 <tool_call> 也没有 <answer>');
+      }
     }
   }
   if (!out.motivation && !out.answer) warnings.push('缺少 <motivation>');

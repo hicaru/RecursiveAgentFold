@@ -1,15 +1,19 @@
 /** USD per 1M tokens. */
 export interface TokenPrice {
-  input: number;
-  cached: number;
-  output: number;
+  readonly input: number;
+  readonly cached: number;
+  readonly output: number;
 }
 
+const FREE_PRICE: TokenPrice = Object.freeze({ input: 0, cached: 0, output: 0 });
+
 /** Z.ai list prices. Models not listed here get no cost estimate. */
-const PRICES: Record<string, TokenPrice> = {
-  'glm-5.3': { input: 1.4, cached: 0.26, output: 4.4 },
-  'glm-5.3-flash': { input: 0.15, cached: 0.03, output: 0.5 },
-};
+const PRICES: Readonly<Record<string, TokenPrice>> = Object.freeze({
+  'glm-5.3': Object.freeze({ input: 1.4, cached: 0.26, output: 4.4 }),
+  'glm-5.1': Object.freeze({ input: 1.4, cached: 0.26, output: 4.4 }),
+  'glm-5.3-flash': Object.freeze({ input: 0.15, cached: 0.03, output: 0.5 }),
+  'glm-4.5-air': Object.freeze({ input: 0.15, cached: 0.03, output: 0.5 }),
+});
 
 /** Env override for any model: RAF_PRICE_INPUT / RAF_PRICE_CACHED / RAF_PRICE_OUTPUT. */
 function envPrice(): TokenPrice | undefined {
@@ -17,13 +21,14 @@ function envPrice(): TokenPrice | undefined {
   const cached = process.env.RAF_PRICE_CACHED;
   const output = process.env.RAF_PRICE_OUTPUT;
   if (input === undefined || cached === undefined || output === undefined) return undefined;
-  return { input: Number(input), cached: Number(cached), output: Number(output) };
+  return Object.freeze({ input: Number(input), cached: Number(cached), output: Number(output) });
 }
 
 export function priceFor(model: string): TokenPrice | undefined {
-  return envPrice() ?? PRICES[model];
+  const norm = model.trim().toLowerCase();
+  if (norm.endsWith(':free') || norm.includes('free')) return FREE_PRICE;
+  return envPrice() ?? PRICES[model] ?? PRICES[norm];
 }
-
 export interface TokenCounts {
   promptTokens: number;
   cachedTokens: number;

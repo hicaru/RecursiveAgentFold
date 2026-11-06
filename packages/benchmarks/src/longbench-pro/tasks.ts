@@ -21,7 +21,13 @@ export function normalizeItem(s: string): string {
 
 /** Payload after the LAST answer marker ([答案]/[Answer]/Answer:), else the text. */
 export function extractAnswerPayload(out: string): string {
-  const markers = [...out.matchAll(/\[?(?:答案|answer)\]?\s*[:：]?/gi)];
+  const bracketed = [...out.matchAll(/\[(?:答案|answer)\]\s*[:：]?/gi)];
+  const lastBracket = bracketed[bracketed.length - 1];
+  if (lastBracket) {
+    const tail = out.slice((lastBracket.index ?? 0) + lastBracket[0].length).trim();
+    return tail.replace(/\n\s*(?:Answer|答案)\s*[:：][\s\S]*$/i, '').trim();
+  }
+  const markers = [...out.matchAll(/(?:答案|answer)\s*[:：]?/gi)];
   const last = markers[markers.length - 1];
   if (!last) return out.trim();
   return out.slice((last.index ?? 0) + last[0].length).trim();
@@ -29,7 +35,7 @@ export function extractAnswerPayload(out: string): string {
 
 export function parseAnswerItems(out: string): string[] {
   return extractAnswerPayload(out)
-    .split(/[\n,，;；]+/)
+    .split(/[\n,，;；|]+/)
     .map(normalizeItem)
     .filter(Boolean);
 }
@@ -39,17 +45,19 @@ export function buildLongBenchProTasks(rows: readonly LongBenchProRow[]): BenchT
     const documents = splitContextIntoDocuments(row.context);
     const totalTokens = documents.reduce((acc, d) => acc + (d.tokens ?? 0), 0);
     const gold = row.answer
-      .split(/[,，;；]+/)
+      .split(/[\n,，;；|]+/)
       .map(normalizeItem)
       .filter(Boolean);
     const goldJoined = gold.join('|');
     const goldSet = new Set(gold);
+    const hasNativeFormat = /\[(?:答案|answer)\]/i.test(row.question);
     const formattedQuestion = [
       row.question.trim(),
       '',
-      "Answer based strictly on the provided document(s). Give your final answer in the form 'Answer: <items>' (comma-separated if several).",
+      hasNativeFormat
+        ? 'Answer based strictly on the provided document(s).'
+        : "Answer based strictly on the provided document(s). Give your final answer in the form 'Answer: <items>' (comma-separated if several).",
     ].join('\n');
-
     return {
       id: `longbench-pro-${row._id}`,
       group: `longbench-pro-${row._id}`,

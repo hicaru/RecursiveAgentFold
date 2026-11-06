@@ -37,7 +37,8 @@ export class PrefixCacheSimulator {
   }
 }
 
-export type ScriptFn = (req: LLMRequest, callIndex: number) => string | Promise<string>;
+export type ScriptOut = string | (Partial<LLMResponse> & { readonly text: string });
+export type ScriptFn = (req: LLMRequest, callIndex: number) => ScriptOut | Promise<ScriptOut>;
 
 /**
  * Deterministic LLM for tests and offline dry-runs. The script receives the
@@ -70,12 +71,15 @@ export class ScriptedLLM implements LLMClient {
       throw new Error(`ScriptedLLM: prompt (${promptTokens}) exceeds context window (${this.profile.contextWindow})`);
     }
     const cachedTokens = Math.min(this.cache.observe(prompt), promptTokens);
-    const text = await this.script(req, idx);
+    const raw = await this.script(req, idx);
+    const obj = typeof raw === 'string' ? { text: raw } : raw;
     return {
-      text,
-      model: this.profile.name,
-      latencyMs: 0,
-      usage: { promptTokens, completionTokens: this.estimator.count(text), cachedTokens },
+      text: obj.text,
+      ...(obj.reasoning !== undefined ? { reasoning: obj.reasoning } : {}),
+      ...(obj.finishReason !== undefined ? { finishReason: obj.finishReason } : {}),
+      model: obj.model ?? this.profile.name,
+      latencyMs: obj.latencyMs ?? 0,
+      usage: obj.usage ?? { promptTokens, completionTokens: this.estimator.count(obj.text), cachedTokens },
     };
   }
 }

@@ -46,51 +46,114 @@ export function extractBalanced(s: string, open = '{', close = '}'): string | un
   return undefined;
 }
 
-/** Escape raw newlines/tabs that appear inside JSON string literals. */
-function escapeControlCharsInStrings(s: string): string {
-  let out = '';
+/**
+ * Escape raw newlines/tabs, fix invalid single-backslash escapes (e.g. `\.`, `\d`),
+ * and close a truncated trailing string before the final `}`.
+ */
+export function repairJSONStringLiterals(s: string, escapeInnerQuotes = false): string {
+  const out: string[] = [];
+  const openStack: string[] = [];
   let inStr = false;
-  let esc = false;
-  for (const c of s) {
+  const len = s.length;
+  for (let i = 0; i < len; i++) {
+    const c = s[i] ?? '';
     if (inStr) {
-      if (esc) {
-        esc = false;
-        out += c;
-        continue;
-      }
       if (c === '\\') {
-        esc = true;
-        out += c;
+        const next = s[i + 1];
+        if (next === undefined) {
+          out.push('\\\\');
+          continue;
+        }
+        if (
+          next === '"' ||
+          next === '\\' ||
+          next === '/' ||
+          next === 'b' ||
+          next === 'f' ||
+          next === 'n' ||
+          next === 'r' ||
+          next === 't' ||
+          (next === 'u' && /^[0-9a-fA-F]{4}$/.test(s.slice(i + 2, i + 6)))
+        ) {
+          out.push('\\', next);
+          i++;
+          continue;
+        }
+        out.push('\\\\');
         continue;
       }
-      if (c === '"') inStr = false;
+      if (c === '"') {
+        if (escapeInnerQuotes) {
+          let j = i + 1;
+          while (j < len && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n' || s[j] === '\r')) j++;
+          const nextChar = s[j];
+          const isClosing =
+            nextChar === undefined ||
+            nextChar === ':' ||
+            nextChar === '}' ||
+            nextChar === ']' ||
+            (nextChar === ',' && /^\s*(?:["{\[\-\d]|true\b|false\b|null\b|[}\]])/.test(s.slice(j + 1)));
+          if (!isClosing) {
+            out.push('\\"');
+            continue;
+          }
+        }
+        inStr = false;
+        out.push(c);
+        continue;
+      }
+      if (c === '}' && /^\s*$/.test(s.slice(i + 1))) {
+        inStr = false;
+        out.push('"', '}');
+        if (openStack[openStack.length - 1] === '}') openStack.pop();
+        continue;
+      }
       if (c === '\n') {
-        out += '\\n';
+        out.push('\\n');
         continue;
       }
       if (c === '\r') continue;
       if (c === '\t') {
-        out += '\\t';
+        out.push('\\t');
         continue;
       }
-      out += c;
+      out.push(c);
     } else {
       if (c === '"') inStr = true;
-      out += c;
+      else if (c === '{') openStack.push('}');
+      else if (c === '[') openStack.push(']');
+      else if ((c === '}' || c === ']') && openStack[openStack.length - 1] === c) openStack.pop();
+      out.push(c);
     }
   }
-  return out;
+  if (inStr) out.push('"');
+  while (openStack.length > 0) out.push(openStack.pop() ?? '');
+  return out.join('');
 }
 
 export function parseLooseJSON<T = unknown>(input: string): T {
-  const attempts: string[] = [];
-  const base = normalizeQuotes(stripFences(input)).trim();
-  attempts.push(base);
-  const obj = extractBalanced(base);
-  if (obj) attempts.push(obj);
+  const raw = stripFences(input).trim();
+  const normalized = normalizeQuotes(raw);
+  const bases: string[] = [raw];
+  const balancedRaw = extractBalanced(raw);
+  if (balancedRaw && balancedRaw !== raw) bases.push(balancedRaw);
+  if (normalized !== raw) {
+    bases.push(normalized);
+    const balancedNorm = extractBalanced(normalized);
+    if (balancedNorm && balancedNorm !== normalized) bases.push(balancedNorm);
+  }
   const errors: string[] = [];
-  for (const a of attempts) {
-    for (const candidate of [a, escapeControlCharsInStrings(a), escapeControlCharsInStrings(a).replace(/,\s*([}\]])/g, '$1')]) {
+  for (const a of bases) {
+    const repairedBasic = repairJSONStringLiterals(a, false);
+    const repairedQuotes = repairJSONStringLiterals(a, true);
+    const candidates = [
+      a,
+      repairedBasic,
+      repairedBasic.replace(/,\s*([}\]])/g, '$1'),
+      repairedQuotes,
+      repairedQuotes.replace(/,\s*([}\]])/g, '$1'),
+    ];
+    for (const candidate of candidates) {
       try {
         return JSON.parse(candidate) as T;
       } catch (e) {
@@ -98,7 +161,7 @@ export function parseLooseJSON<T = unknown>(input: string): T {
       }
     }
   }
-  throw new Error(`Invalid JSON: ${errors[errors.length - 1] ?? 'unknown'}`);
+  throw new Error(`Invalid JSON: ${errors[0] ?? 'unknown'}`);
 }
 
 export function tryParseLooseJSON<T = unknown>(input: string): T | undefined {

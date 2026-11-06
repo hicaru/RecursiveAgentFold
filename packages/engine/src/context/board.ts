@@ -3,6 +3,7 @@ import { defaultEstimator, truncateToTokens } from '../tokens.js';
 
 export interface BoardEntry {
   readonly id: number;
+  readonly rev: number;
   readonly agent: string;
   readonly kind: 'llm_query' | 'tally' | 'grep' | 'branch';
   readonly scope: string;
@@ -14,11 +15,17 @@ export interface BoardEntry {
 export interface SpecialistSession {
   readonly scope: string;
   readonly agentName: string;
+  readonly depth: number;
+  readonly parentAgent: string;
   readonly initialTask: string;
+  readonly initialBoardRev: number;
   readonly initialBoardCount: number;
   readonly initialBoardSnapshot?: string;
+  status: 'running' | 'ready';
+  activeTask?: string;
   state: FoldStateSnapshot;
   latestSummary: string;
+  readonly historySummaries: string[];
   readonly qaMemo: Map<string, string>;
   queue: Promise<void>;
 }
@@ -28,11 +35,11 @@ export interface ScopedBranchRunInput {
   readonly initialTask: string;
   readonly followUpQuestion?: string;
   readonly previousState?: FoldStateSnapshot;
+  readonly initialBoardRev: number;
   readonly initialBoardCount: number;
   readonly initialBoardSnapshot?: string;
   readonly agentName: string;
 }
-
 export interface ScopedBranchRunOutput {
   readonly resultText: string;
   readonly answer: string | null;
@@ -47,6 +54,28 @@ export function normalizeTaskKey(task: string): string {
   return task.trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Check whether all code/constant identifiers requested in `taskText`
+ * are already resolved as explicit `IDENT = <number>` facts in `summaryText`.
+ */
+export function canAnswerFromSummary(taskText: string, summaryText: string, scopeKey?: string): boolean {
+  if (!summaryText) return false;
+  const allCodeIds = taskText.match(/\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+\b/g);
+  if (!allCodeIds || allCodeIds.length === 0) return false;
+  const filtered = allCodeIds.filter((id) => !scopeKey || id.toLowerCase() !== scopeKey.toLowerCase());
+  if (filtered.length === 0) return false;
+  for (const id of new Set(filtered)) {
+    if (!/^[A-Z][A-Z0-9_]{3,}$/.test(id)) return false;
+    const pat = new RegExp(`\\b${escapeRegExp(id)}\\s*=\\s*[-+]?\\d+`);
+    if (!pat.test(summaryText)) return false;
+  }
+  return true;
+}
+
 /**
  * Shared, append-only research board across root, branch sub-agents,
  * and sequential tasks sharing an LLMQueryEngine or ContextStore.
@@ -55,8 +84,14 @@ export class ResearchBoard {
   private readonly _entries: BoardEntry[] = [];
   private readonly _specialists = new Map<string, SpecialistSession>();
   private _specialistCounter = 0;
+  private _rev = 0;
 
-  record(entry: Omit<BoardEntry, 'id'>): BoardEntry {
+  currentRev(): number {
+    return this._rev;
+  }
+
+  record(entry: Omit<BoardEntry, 'id' | 'rev'>): BoardEntry {
+    const rev = ++this._rev;
     const dedupKey = `${entry.kind}|${entry.scope}|${entry.key}`;
     const idx = this._entries.findIndex((e) => `${e.kind}|${e.scope}|${e.key}` === dedupKey);
     if (idx >= 0) {
@@ -64,6 +99,7 @@ export class ResearchBoard {
       if (existing) {
         const updated: BoardEntry = {
           id: existing.id,
+          rev,
           agent: entry.agent,
           kind: entry.kind,
           scope: entry.scope,
@@ -77,6 +113,7 @@ export class ResearchBoard {
     }
     const created: BoardEntry = {
       id: this._entries.length + 1,
+      rev,
       agent: entry.agent,
       kind: entry.kind,
       scope: entry.scope,
@@ -123,16 +160,31 @@ export class ResearchBoard {
     return truncateToTokens(lines.join('\n'), maxTokens, defaultEstimator).text;
   }
 
-  renderSince(startIndex: number, maxTokens = 800): string | undefined {
-    if (this._entries.length <= startIndex) return undefined;
-    const lines = this._entries.slice(startIndex).map((e) => this.formatEntry(e));
-    return truncateToTokens(lines.join('\n'), maxTokens, defaultEstimator).text;
+  renderSince(
+    sinceRev: number,
+    excludeScopeOrMaxTokens?: string | number,
+    maxTokens = 1200,
+  ): string | undefined {
+    const excludeScope =
+      typeof excludeScopeOrMaxTokens === 'string' ? normalizeScopeKey(excludeScopeOrMaxTokens) : undefined;
+    const budget = typeof excludeScopeOrMaxTokens === 'number' ? excludeScopeOrMaxTokens : maxTokens;
+    const lines: string[] = [];
+    for (const e of this._entries) {
+      if (e.rev <= sinceRev) continue;
+      if (excludeScope !== undefined && e.kind === 'branch' && normalizeScopeKey(e.scope) === excludeScope) {
+        continue;
+      }
+      lines.push(this.formatEntry(e));
+    }
+    if (lines.length === 0) return undefined;
+    return truncateToTokens(lines.join('\n'), budget, defaultEstimator).text;
   }
 
   async runScopedBranch(
     scope: string,
     task: string,
     fn: (input: ScopedBranchRunInput) => Promise<ScopedBranchRunOutput>,
+    meta?: { readonly depth?: number; readonly parent?: string },
   ): Promise<{ result: string; reused: boolean; scope: string }> {
     const normScope = normalizeScopeKey(scope);
     const normTask = normalizeTaskKey(task);
@@ -141,21 +193,48 @@ export class ResearchBoard {
     if (fastMemo !== undefined) {
       return { result: fastMemo, reused: true, scope: normScope };
     }
+    if (
+      existingSession &&
+      existingSession.status === 'ready' &&
+      existingSession.latestSummary !== '' &&
+      canAnswerFromSummary(task, existingSession.latestSummary)
+    ) {
+      return { result: existingSession.latestSummary, reused: true, scope: normScope };
+    }
     let session = existingSession;
     if (!session) {
-      const initCount = this._entries.length;
+      const initRev = this._rev;
+      const initSnap = this._entries.length > 0 ? this.render() : undefined;
+      const depth = meta?.depth ?? 1;
+      const parentAgent = meta?.parent ?? 'root';
+      const idx = ++this._specialistCounter;
+      const agentName =
+        depth > 1 ? `specialist#${idx}@d${depth}[${normScope}]` : `specialist#${idx}[${normScope}]`;
       session = {
         scope: normScope,
-        agentName: `specialist#${++this._specialistCounter}[${normScope}]`,
+        agentName,
+        depth,
+        parentAgent,
         initialTask: task.trim(),
-        initialBoardCount: initCount,
-        ...(initCount > 0 ? { initialBoardSnapshot: this.render() } : {}),
+        initialBoardRev: initRev,
+        initialBoardCount: initRev,
+        ...(initSnap !== undefined ? { initialBoardSnapshot: initSnap } : {}),
+        status: 'running',
+        activeTask: task.trim(),
         state: { blocks: [], latest: undefined },
         latestSummary: '',
+        historySummaries: [],
         qaMemo: new Map<string, string>(),
         queue: Promise.resolve(),
       };
       this._specialists.set(normScope, session);
+      this.record({
+        agent: session.agentName,
+        kind: 'branch',
+        scope: normScope,
+        key: normScope,
+        summary: `[进行中] ${session.agentName} (parent=${session.parentAgent}) 正在研读域 "${normScope}"：${task.trim().slice(0, 140)}`,
+      });
     }
     const targetSession = session;
     const runTask = async (): Promise<{ result: string; reused: boolean; scope: string }> => {
@@ -165,32 +244,49 @@ export class ResearchBoard {
       }
       if (
         targetSession.latestSummary !== '' &&
-        normTask === normalizeTaskKey(targetSession.initialTask)
+        (normTask === normalizeTaskKey(targetSession.initialTask) ||
+          canAnswerFromSummary(task, targetSession.latestSummary, normScope))
       ) {
         return { result: targetSession.latestSummary, reused: true, scope: normScope };
       }
       const isFollowUp = targetSession.state.blocks.length > 0 || targetSession.latestSummary !== '';
-      const out = await fn({
-        isFollowUp,
-        initialTask: targetSession.initialTask,
-        ...(isFollowUp ? { followUpQuestion: task.trim(), previousState: targetSession.state } : {}),
-        initialBoardCount: targetSession.initialBoardCount,
-        ...(targetSession.initialBoardSnapshot !== undefined
-          ? { initialBoardSnapshot: targetSession.initialBoardSnapshot }
-          : {}),
-        agentName: targetSession.agentName,
-      });
-      targetSession.state = out.state;
-      targetSession.latestSummary = out.resultText;
-      targetSession.qaMemo.set(normTask, out.resultText);
-      this.record({
-        agent: targetSession.agentName,
-        kind: 'branch',
-        scope: normScope,
-        key: normScope,
-        summary: out.answer ? `${targetSession.agentName}: ${out.answer}` : out.resultText,
-      });
-      return { result: out.resultText, reused: false, scope: normScope };
+      targetSession.status = 'running';
+      targetSession.activeTask = task.trim();
+      try {
+        const out = await fn({
+          isFollowUp,
+          initialTask: targetSession.initialTask,
+          ...(isFollowUp ? { followUpQuestion: task.trim(), previousState: targetSession.state } : {}),
+          initialBoardRev: targetSession.initialBoardRev,
+          initialBoardCount: targetSession.initialBoardRev,
+          ...(targetSession.initialBoardSnapshot !== undefined
+            ? { initialBoardSnapshot: targetSession.initialBoardSnapshot }
+            : {}),
+          agentName: targetSession.agentName,
+        });
+        targetSession.state = out.state;
+        const cleanAns = (out.answer ?? out.resultText).replace(/\s+/g, ' ').trim().slice(0, 500);
+        if (cleanAns && !targetSession.historySummaries.includes(cleanAns)) {
+          targetSession.historySummaries.push(cleanAns);
+        }
+        const combinedSummary = targetSession.historySummaries.join(' | ');
+        targetSession.latestSummary =
+          isFollowUp && targetSession.latestSummary !== '' && !targetSession.latestSummary.includes(out.resultText)
+            ? `${targetSession.latestSummary}\n\n[追问补充] ${out.resultText}`
+            : out.resultText;
+        targetSession.qaMemo.set(normTask, out.resultText);
+        this.record({
+          agent: targetSession.agentName,
+          kind: 'branch',
+          scope: normScope,
+          key: normScope,
+          summary: `${targetSession.agentName}: ${combinedSummary}`,
+        });
+        return { result: out.resultText, reused: false, scope: normScope };
+      } finally {
+        targetSession.status = 'ready';
+        targetSession.activeTask = undefined;
+      }
     };
     const chained = targetSession.queue.then(runTask, runTask);
     targetSession.queue = chained.then(

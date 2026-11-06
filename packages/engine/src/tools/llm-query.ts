@@ -13,9 +13,10 @@ export interface LLMQueryOptions {
   readonly reserveRatio?: number;
   /** Hard cap on chunk size (tokens). Dense tasks (counting) benefit from smaller chunks. */
   readonly maxChunkTokens?: number;
+  /** Default chunk size (tokens) for mode === 'locate' when maxChunkTokens is not set. Default 32768. */
+  readonly defaultLocateChunkTokens?: number;
   /** Default chunk size (tokens) for mode === 'extract'. Default 8192. */
   readonly defaultExtractChunkTokens?: number;
-  /** Lower bound for chunk size (tokens). Default 1024. */
   readonly minChunkTokens?: number;
   /** Parallel chunk calls. Default 4. */
   readonly concurrency?: number;
@@ -114,13 +115,14 @@ export class LLMQueryEngine {
   }
 
   get defaultChunkTokens(): number {
-    return computeChunkTokens(this.llm.profile, this.opts);
+    const computed = computeChunkTokens(this.llm.profile, this.opts);
+    if (this.opts.maxChunkTokens !== undefined) return computed;
+    return Math.min(computed, this.opts.defaultLocateChunkTokens ?? 32_768);
   }
 
   get defaultExtractChunkTokens(): number {
     return Math.min(this.defaultChunkTokens, this.opts.defaultExtractChunkTokens ?? 8192);
   }
-
   selectChunks(docIds: readonly string[], chunkTokens: number, startLine?: number, endLine?: number): Chunk[] {
     const out: Chunk[] = [];
     for (const id of docIds) {
@@ -152,7 +154,7 @@ export class LLMQueryEngine {
     for (const id of docIds) this.store.get(id); // validate
     const modeMax = mode === 'extract' ? this.defaultExtractChunkTokens : this.defaultChunkTokens;
     const chunkTokens = args.chunkTokens
-      ? quantizeChunkTokens(args.chunkTokens, this.defaultChunkTokens, this.opts.minChunkTokens)
+      ? quantizeChunkTokens(args.chunkTokens, modeMax, this.opts.minChunkTokens)
       : modeMax;
     const chunks = this.selectChunks(docIds, chunkTokens, args.startLine, args.endLine);
     const scan = chunks.reduce((a, c) => a + c.tokens, 0);
@@ -228,25 +230,31 @@ export class LLMQueryEngine {
 
     const execPromise = (async () => {
       const doc = this.store.get(chunk.docId);
-      const messages = [
-        { role: 'system' as const, content: LLM_QUERY_SYSTEM },
-        {
-          role: 'user' as const,
-          content: renderChunkMessage({
-            docId: chunk.docId,
-            title: doc.title,
-            index: chunk.index,
-            total: chunk.total,
-            startLine: chunk.startLine,
-            endLine: chunk.endLine,
-            body: this.store.renderChunk(chunk, lineNumbers),
-          }),
-          cacheBreakpoint: true,
-        },
-        { role: 'user' as const, content: renderQueryMessage(query, mode) },
-      ];
+      const baseQueryContent = renderQueryMessage(query, mode);
+      const chunkMsg = {
+        role: 'user' as const,
+        content: renderChunkMessage({
+          docId: chunk.docId,
+          title: doc.title,
+          index: chunk.index,
+          total: chunk.total,
+          startLine: chunk.startLine,
+          endLine: chunk.endLine,
+          body: this.store.renderChunk(chunk, lineNumbers),
+        }),
+        cacheBreakpoint: true,
+      };
       let lastErr = '';
       for (let attempt = 0; attempt < 2; attempt++) {
+        const queryContent =
+          attempt > 0 && lastErr === 'reader response truncated or empty'
+            ? `${baseQueryContent}\n【重要：严禁逐行思考或列出中间过程，内部推理不超过 50 字，立即直接输出最终 JSON 对象！】`
+            : baseQueryContent;
+        const messages = [
+          { role: 'system' as const, content: LLM_QUERY_SYSTEM },
+          chunkMsg,
+          { role: 'user' as const, content: queryContent },
+        ];
         try {
           const res = await this.llm.complete({
             messages,
@@ -387,7 +395,7 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
   return {
     name: 'llm_query',
     description:
-      `用快速非推理阅读器模型（${engine.llm.profile.name}，${engine.llm.profile.contextWindow.toLocaleString('en-US')} token 窗口）扫描大文档。文档按约 ${engine.defaultChunkTokens.toLocaleString('en-US')} token 固定分块，查询并行作用于每个分块，返回带行号的各块发现。mode "locate"：定位内容；mode "extract"：在全部块上做抽取/分类/计数（由你汇总）。`,
+      `用快速非推理阅读器模型（${engine.llm.profile.name}，${engine.llm.profile.contextWindow.toLocaleString('en-US')} token 窗口）扫描大文档。locate 默认按约 ${engine.defaultChunkTokens.toLocaleString('en-US')} token 分块，extract 默认按约 ${engine.defaultExtractChunkTokens.toLocaleString('en-US')} token 分块，查询并行作用于每个分块，返回带行号的各块发现。mode "locate"：定位内容；mode "extract"：在全部块上做抽取/分类/计数（由你汇总）。`,
     parameters: {
       type: 'object',
       properties: {
@@ -396,7 +404,7 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
         documents: { type: 'array', items: { type: 'string' }, description: '文档 id（默认：全部）。' },
         start_line: { type: 'integer', description: '可选：只扫描与此行区间重叠的分块（仅限单个文档）。' },
         end_line: { type: 'integer' },
-        chunk_tokens: { type: 'integer', description: `可选：密集任务用更小的分块（2 的幂，最大 ${engine.defaultChunkTokens}）。` },
+        chunk_tokens: { type: 'integer', description: `可选：密集任务用更小的分块（2 的幂，locate 最大 ${engine.defaultChunkTokens}，extract 最大 ${engine.defaultExtractChunkTokens}）。` },
         categories: {
           type: 'array',
           items: { type: 'string' },
@@ -406,7 +414,7 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
       required: ['query'],
     },
     async execute(args, ctx) {
-      const query = argString(args, 'query')!;
+      const query = argString(args, 'query') ?? '';
       const modeRaw = argString(args, 'mode', false) ?? 'locate';
       if (modeRaw !== 'locate' && modeRaw !== 'extract') throw new ToolArgumentError('mode 必须是 "locate" 或 "extract"');
       const documents = argStringList(args, 'documents');

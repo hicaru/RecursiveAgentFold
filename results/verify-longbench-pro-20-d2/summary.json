@@ -1,0 +1,98 @@
+{
+  "bench": "longbench-pro",
+  "method": "raf",
+  "n": 20,
+  "meanScore": 0.75,
+  "correct": 14,
+  "meanOfficial": 0.75,
+  "meanLenient": 0.75,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 0.75,
+  "meanSteps": 3.75,
+  "meanWallSec": 156.73270000000002,
+  "formatIssues": 3,
+  "folds": {
+    "granular": 55,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 2,
+  "tokens": {
+    "prompt": 434242,
+    "cached": 207296,
+    "completion": 183542,
+    "cacheHitRate": 0.47737436728828625
+  },
+  "byRole": {
+    "root": {
+      "calls": 75,
+      "promptTokens": 281233,
+      "completionTokens": 181135,
+      "cachedTokens": 204992,
+      "reasoningTokens": 158346,
+      "latencyMs": 3033769,
+      "errors": 0,
+      "cacheHitRate": 0.7289045026721616
+    },
+    "llm_query": {
+      "calls": 16,
+      "promptTokens": 153009,
+      "completionTokens": 2407,
+      "cachedTokens": 2304,
+      "reasoningTokens": 233,
+      "latencyMs": 301981,
+      "errors": 0,
+      "cacheHitRate": 0.015057937768366567
+    }
+  },
+  "byTask": {
+    "T1. Retrieval & Ranking": {
+      "n": 3,
+      "score": 0.6666666666666666
+    },
+    "T2. Sequencing & Structure Reconstruction": {
+      "n": 3,
+      "score": 0.8333333333333334
+    },
+    "T5. Attribution & Citation Alignment": {
+      "n": 2,
+      "score": 1
+    },
+    "T6. Aggregation & Clustering": {
+      "n": 7,
+      "score": 0.7857142857142857
+    },
+    "T9. Version & Code Diff Analysis": {
+      "n": 1,
+      "score": 1
+    },
+    "T3. Evidence-Grounded QA": {
+      "n": 1,
+      "score": 0
+    },
+    "T10. Rule Induction & In-Context Learning": {
+      "n": 1,
+      "score": 1
+    },
+    "T7. Consistency & Compliance Checking": {
+      "n": 2,
+      "score": 0.5
+    }
+  },
+  "byAnswerType": {
+    "?": {
+      "n": 20,
+      "score": 0.75
+    }
+  },
+  "cost": {
+    "totalUsd": 0.980908,
+    "perTaskUsd": 0.049045,
+    "cacheSavedUsd": 0.233967,
+    "byRoleUsd": {
+      "root": 0.957029,
+      "llm_query": 0.023878
+    }
+  }
+}

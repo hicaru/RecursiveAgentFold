@@ -6,6 +6,7 @@ import { parseChoiceLetter, splitContextIntoDocuments } from '../src/longbench/t
 import { buildLongBenchProTasks, parseAnswerItems } from '../src/longbench-pro/tasks.js';
 import { buildRulerTasks, parseAnswerList } from '../src/ruler/ruler.js';
 import { buildMrcrTasks, parseBullets } from '../src/mrcr/mrcr.js';
+import { priceFor } from '../src/pricing.js';
 describe('OOLONG scoring (official port)', () => {
   it('parses gold literals', () => {
     expect(parseGold("['location']").value).toBe('location');
@@ -178,5 +179,32 @@ describe('ruler / mrcr / longbench-pro generators', () => {
     expect(shuffled.extra?.unordered).toBe(1);
     expect(en.score('Answer: B,D,C,F,A,E').score).toBe(1);
     expect(parseAnswerItems('[Answer]\nB\nD\nC\nF\nA\nE')).toEqual(['b', 'd', 'c', 'f', 'a', 'e']);
+
+    // B9a: dual [Answer] + Answer: with pipe delimiter (from longbench-pro-00e65818...)
+    expect(zh.question).not.toContain("Give your final answer in the form 'Answer: <items>'");
+    expect(en.question).toContain("Give your final answer in the form 'Answer: <items>'");
+    expect(
+      en.score('[Answer]\nB.\nD.\nC.\nF.\nA.\nE.\n\nAnswer: [Answer] B. | D. | C. | F. | A. | E.').score,
+    ).toBe(1);
+
+    // B9b: multi-document splitting on Chinese 篇一..篇三 and English A.\nTitle..C.\nTitle
+    const zhMulti = [
+      '篇一：量子计算综述\n' + '量子比特与超导电路研究进展。'.repeat(25),
+      '篇二：拓扑绝缘体\n' + '表面态与自旋轨道耦合实验。'.repeat(25),
+      '篇三：光子芯片\n' + '硅基光波导集成与纠缠源。'.repeat(25),
+    ].join('\n\n');
+    const zhDocs = splitContextIntoDocuments(zhMulti);
+    expect(zhDocs.length).toBe(3);
+
+    const enMulti = [
+      'A.\nThe Impact of Climate Change on Coral Reefs\n' + 'Coral bleaching events have increased. '.repeat(10),
+      'B.\nDeep Sea Hydrothermal Vent Ecosystems\n' + 'Chemosynthetic bacteria support diverse fauna. '.repeat(10),
+    ].join('\n\n');
+    const enDocs = splitContextIntoDocuments(enMulti);
+    expect(enDocs.length).toBe(2);
+    expect(enDocs[0]?.title).toContain('A. The Impact of Climate Change');
+
+    // Free model pricing check
+    expect(priceFor('qwen/qwen3.8-27b:free')).toEqual({ input: 0, cached: 0, output: 0 });
   });
 });

@@ -89,12 +89,19 @@ export const FORMAT_REMINDER = (step: number, latest: number | undefined) =>
     ? `### 当前步骤\n当前是第 ${step} 步。${step === 0 ? '没有历史' : '上一步已归档'}：输出 <motivation> 和 <tool_call>（或 <answer>），不要 <folding>。`
     : `### 当前步骤\n当前是第 ${step} 步。输出 <folding>（range 终点必须是 ${latest}）、<motivation>，然后 <tool_call> 或 <answer>。`;
 
-export const FORMAT_REPAIR = (errors: string[], step: number, latest: number | undefined) =>
+export const FORMAT_REPAIR = (
+  errors: string[],
+  step: number,
+  latest: number | undefined,
+  truncatedReasoning?: boolean,
+) =>
+  (truncatedReasoning
+    ? '【严重警告：你上一条回复的内部思考（reasoning）过长，耗尽了输出 token 上限，导致正文为空！】本次重试严禁长篇推导，内部思考必须控制在 200 字以内，立即输出正文标签！\n'
+    : '') +
   `你的上一条回复无法解析：${errors.join('；')}。\n` +
   `请重新输出第 ${step} 步的完整回复，并严格使用规定的标签` +
   (latest === undefined
-    ? '（第 0 步不要 <folding>，空标签也不要）。'
+    ? '（当前无待折叠交互，严禁输出 <folding>，空标签也不要）。'
     : `（<folding> 的 range 终点必须是 ${latest}；summary 必须是单行 JSON 字符串，英文双引号要转义）。`);
-
 export const FORCE_ANSWER =
   '已达到步数上限。不要再调用工具。立即在 <answer>...</answer> 中给出最佳最终答案（照常包含 <folding>）。';

@@ -491,4 +491,199 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
     const prefix1 = msg1.split('### 历史步骤')[0];
     expect(prefix1).toBe(prefix0);
   });
+
+  it('Hierarchical pipeline root -> subagent#0..2 -> llm_query + sub_agent@d2 -> llm_query with in-flight visibility, rev tracking, and cumulative summaries (B1, B2, B3)', async () => {
+    const store = new ContextStore();
+    store.add('MOD_0_BASE = 10\n', { id: 'mod_0', title: 'module 0' });
+    store.add('MOD_1_KEY = 25\nMOD_1_BONUS = 87\n', { id: 'mod_1', title: 'module 1' });
+    store.add('MOD_2_FACTOR = 3\n', { id: 'mod_2', title: 'module 2' });
+    store.add('LEAF_OFFSET = 7\n', { id: 'mod_leaf', title: 'leaf module' });
+
+    let mod0SawInFlightMod1 = false;
+    let mod2SpawnedLeaf = false;
+    let leafCalledLlmQuery = false;
+    let selfBranchRejected = false;
+
+    const queryLLM = new ScriptedLLM(
+      (req) => {
+        const chunk = req.messages[1]?.content ?? '';
+        if (chunk.includes('LEAF_OFFSET')) {
+          leafCalledLlmQuery = true;
+          return JSON.stringify({ relevant: true, answer: 'LEAF_OFFSET = 7', evidence: [{ line: 1, quote: 'LEAF_OFFSET = 7' }] });
+        }
+        return JSON.stringify({ relevant: true, answer: 'MOD_2_FACTOR = 3', evidence: [{ line: 1, quote: 'MOD_2_FACTOR = 3' }] });
+      },
+      { name: 'query-reader', contextWindow: 128_000, maxOutputTokens: 1024 },
+    );
+
+    const root = new ScriptedLLM((req) => {
+      const user = req.messages[req.messages.length - 1]?.content ?? '';
+      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      if (step === 0) {
+        return '<motivation>Spawn 3 parallel specialists for mod_0, mod_1, mod_2</motivation><tool_call>{"name":"branch","arguments":{"tasks":[{"scope":"mod_0","task":"Compute mod_0 + mod_1"},{"scope":"mod_1","task":"Find MOD_1_KEY and MOD_1_BONUS in mod_1"},{"scope":"mod_2","task":"Analyze mod_2 and mod_leaf"}]}}</tool_call>';
+      }
+      return '<folding>{"range":[0,0],"summary":"All 3 specialists completed"}</folding><answer>hierarchy-ok</answer>';
+    });
+
+    const branch = new ScriptedLLM((req) => {
+      const user = req.messages[req.messages.length - 1]?.content ?? '';
+      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      if (user.includes('专职负责域 [scope=mod_0]')) {
+        if (user.includes('[进行中]') && user.includes('mod_1')) mod0SawInFlightMod1 = true;
+        if (step === 0) {
+          return '<motivation> Try self branch first to test B2 guard </motivation><tool_call>{"name":"branch","arguments":{"scope":"mod_0","task":"self call"}}</tool_call>';
+        }
+        if (step === 1) {
+          if (user.includes('严禁对自身 scope 调用 branch')) selfBranchRejected = true;
+          return '<folding>{"range":[0,0],"summary":"self branch blocked"}</folding><motivation>Query peer mod_1 for MOD_1_KEY</motivation><tool_call>{"name":"branch","arguments":{"scope":"mod_1","task":"What is MOD_1_KEY?"}}</tool_call>';
+        }
+        return '<folding>{"range":[1,1],"summary":"got MOD_1_KEY=25"}</folding><answer>MOD_0_BASE = 10, MOD_1_KEY = 25</answer>';
+      }
+      if (user.includes('专职负责域 [scope=mod_1]')) {
+        return '<motivation>Read mod_1</motivation><answer>MOD_1_KEY = 25, MOD_1_BONUS = 87</answer>';
+      }
+      if (user.includes('专职负责域 [scope=mod_2]')) {
+        if (step === 0) {
+          return '<motivation>Run llm_query on mod_2</motivation><tool_call>{"name":"llm_query","arguments":{"query":"Find MOD_2_FACTOR","documents":["mod_2"]}}</tool_call>';
+        }
+        if (step === 1) {
+          mod2SpawnedLeaf = true;
+          return '<folding>{"range":[0,0],"summary":"MOD_2_FACTOR = 3"}</folding><motivation>Spawn child specialist at depth 2 for mod_leaf</motivation><tool_call>{"name":"branch","arguments":{"scope":"mod_leaf","task":"Find LEAF_OFFSET in mod_leaf"}}</tool_call>';
+        }
+        return '<folding>{"range":[1,1],"summary":"LEAF_OFFSET = 7"}</folding><answer>MOD_2_FACTOR = 3, LEAF_OFFSET = 7</answer>';
+      }
+      if (user.includes('专职负责域 [scope=mod_leaf]')) {
+        if (step === 0) {
+          return '<motivation>Leaf specialist calls llm_query</motivation><tool_call>{"name":"llm_query","arguments":{"query":"Find LEAF_OFFSET","documents":["mod_leaf"]}}</tool_call>';
+        }
+        return '<folding>{"range":[0,0],"summary":"LEAF_OFFSET = 7"}</folding><answer>LEAF_OFFSET = 7</answer>';
+      }
+      return '<answer>fallback</answer>';
+    });
+
+    const raf = new RecursiveAgentFold({ rootLLM: root, branchLLM: branch, queryLLM, store, maxDepth: 2 });
+    const res = await raf.run('Run hierarchical test');
+    expect(res.answer).toBe('hierarchy-ok');
+    expect(mod0SawInFlightMod1).toBe(true);
+    expect(selfBranchRejected).toBe(true);
+    expect(mod2SpawnedLeaf).toBe(true);
+    expect(leafCalledLlmQuery).toBe(true);
+
+    // Verify B1: updating an existing entry on the board increases rev and is visible in renderSince
+    const revBefore = raf.board.currentRev();
+    raf.board.record({
+      agent: 'specialist#2[mod_1]',
+      kind: 'branch',
+      scope: 'mod_1',
+      key: 'mod_1',
+      summary: 'Updated mod_1 summary',
+    });
+    expect(raf.board.renderSince(revBefore)).toContain('Updated mod_1 summary');
+    expect(raf.board.renderSince(revBefore, 'mod_1')).toBeUndefined();
+
+    // Verify B3: narrow follow-up to specialist does not erase earlier constants from board summary
+    const board2 = new ResearchBoard();
+    await board2.runScopedBranch('lib_auth', 'Find all constants', async () => ({
+      resultText: 'AUTH_KDF_ROUNDS = 10, AUTH_SALT_OFFSET = 296, AUTH_ISSUER_BONUS = 87',
+      answer: 'AUTH_KDF_ROUNDS = 10, AUTH_SALT_OFFSET = 296, AUTH_ISSUER_BONUS = 87',
+      state: { blocks: [{ from: 0, to: 0, summary: 'init' }], latest: undefined },
+    }));
+    // Follow-up asking for already-known constants should fast-reuse without calling fn!
+    let fnCalled = false;
+    const fastReuse = await board2.runScopedBranch('lib_auth', 'What are AUTH_KDF_ROUNDS and AUTH_SALT_OFFSET?', async () => {
+      fnCalled = true;
+      return { resultText: 'narrow', answer: 'narrow', state: { blocks: [], latest: undefined } };
+    });
+    expect(fastReuse.reused).toBe(true);
+    expect(fnCalled).toBe(false);
+    expect(fastReuse.result).toContain('AUTH_ISSUER_BONUS = 87');
+
+    // Even when a new follow-up question runs fn and returns a narrow answer, board preserves cumulative facts
+    await board2.runScopedBranch('lib_auth', 'What is the hop pipeline formula?', async () => ({
+      resultText: 'ROUNDS + SALT = 306',
+      answer: 'ROUNDS + SALT = 306',
+      state: { blocks: [{ from: 0, to: 1, summary: 'followup' }], latest: undefined },
+    }));
+    expect(board2.render()).toContain('AUTH_ISSUER_BONUS = 87');
+    expect(board2.render()).toContain('ROUNDS + SALT = 306');
+  });
+
+  it('Merges same-scope tasks in branch(tasks=[...]) and reports per-call step counts (B4)', async () => {
+    const store = new ContextStore();
+    store.add('X = 1\nY = 2\n', { id: 'lib_core', title: 'core' });
+    let branchInvocations = 0;
+    const root = new ScriptedLLM((req) => {
+      const user = req.messages[req.messages.length - 1]?.content ?? '';
+      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      if (step === 0) {
+        return '<motivation>Batch two tasks to same scope lib_core</motivation><tool_call>{"name":"branch","arguments":{"tasks":[{"scope":"lib_core","task":"Find X"},{"scope":"lib_core","task":"Find Y"}]}}</tool_call>';
+      }
+      if (step === 1) {
+        return '<folding>{"range":[0,0],"summary":"first call done"}</folding><motivation>Follow up lib_core</motivation><tool_call>{"name":"branch","arguments":{"scope":"lib_core","task":"Compute hop pipeline for X and Y"}}</tool_call>';
+      }
+      return `<folding>{"range":[1,1],"summary":"second call done"}</folding><answer>${user.includes('共 1 步') ? 'steps-accurate' : 'steps-wrong'}</answer>`;
+    });
+    const branch = new ScriptedLLM(() => {
+      branchInvocations++;
+      return '<motivation>done</motivation><answer>X = 1, Y = 2</answer>';
+    });
+    const raf = new RecursiveAgentFold({ rootLLM: root, branchLLM: branch, store, maxDepth: 1 });
+    const res = await raf.run('Test batch merge and step count');
+    // 1 call for the merged batch + 1 call for the follow-up = 2 total (not 3)
+    expect(branchInvocations).toBe(2);
+    expect(res.answer).toBe('steps-accurate');
+  });
+
+  it('Guards against CoT reasoning overflow and clamps llm_query extract chunks to 8192 (B6, B8)', async () => {
+    const store = new ContextStore();
+    store.add(haystack(4000, 100), { id: 'doc1', title: 'doc1' });
+    let sawTruncationWarning = false;
+    let callCount = 0;
+    const llm = new ScriptedLLM((req) => {
+      callCount++;
+      const user = req.messages[req.messages.length - 1]?.content ?? '';
+      if (callCount === 1) {
+        return {
+          text: '',
+          reasoning: 'thinking forever...',
+          finishReason: 'length',
+          usage: { promptTokens: 1000, completionTokens: 16000, cachedTokens: 800, reasoningTokens: 16000 },
+        };
+      }
+      if (user.includes('内部思考（reasoning）过长')) sawTruncationWarning = true;
+      return '<motivation>concise</motivation><answer>recovered</answer>';
+    });
+    const agent = new AgentFoldAgent({ llm, tools: [createGrepTool(), createReadTool()], store });
+    const res = await agent.run('Test CoT overflow');
+    expect(res.answer).toBe('recovered');
+    expect(sawTruncationWarning).toBe(true);
+
+    // B8: 128k reader model caps default locate chunks at 32768 and clamps extract chunk_tokens=16384 to 8192
+    let readerAttempts = 0;
+    let sawRetryPrompt = false;
+    const bigReader = new ScriptedLLM(
+      (req) => {
+        readerAttempts++;
+        const lastMsg = req.messages[req.messages.length - 1]?.content ?? '';
+        if (lastMsg.includes('内部推理不超过 50 字')) sawRetryPrompt = true;
+        if (readerAttempts === 1) {
+          return { text: '', finishReason: 'length' };
+        }
+        return JSON.stringify({ relevant: true, answer: 'count=5', evidence: [], counts: { a: 5 } });
+      },
+      { name: 'big-reader', contextWindow: 128_000, maxOutputTokens: 16_384 },
+    );
+    const engine = new LLMQueryEngine(bigReader, store, new UsageTracker());
+    expect(engine.defaultChunkTokens).toBe(32_768);
+    expect(engine.defaultExtractChunkTokens).toBe(8192);
+    const qRes = await engine.query({
+      query: 'Count category a',
+      mode: 'extract',
+      chunkTokens: 16_384,
+      categories: ['a'],
+    });
+    expect(qRes.chunkTokens).toBe(8192);
+    expect(sawRetryPrompt).toBe(true);
+    expect(qRes.findings.every((f) => !f.error)).toBe(true);
+  });
 });

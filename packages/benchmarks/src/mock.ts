@@ -38,6 +38,7 @@ export function createMockModels(llmQuery: LLMQueryOptions = {}): BenchModels {
   );
   return {
     root,
+    branch: root,
     query,
     llmQuery,
     describe: () => ({ mock: true, llmQuery }),

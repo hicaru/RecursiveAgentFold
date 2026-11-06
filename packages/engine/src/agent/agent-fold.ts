@@ -43,6 +43,9 @@ export interface AgentFoldConfig {
   readonly followUpQuestion?: string;
   /** Active scope call stack for cycle prevention across inter-agent queries. */
   readonly callStack?: readonly string[];
+  readonly scope?: string;
+  readonly maxDepth?: number;
+  readonly initialBoardRev?: number;
   readonly initialBoardCount?: number;
   readonly initialBoardSnapshot?: string;
 }
@@ -76,7 +79,7 @@ export class AgentFoldAgent {
   private readonly estimator: TokenEstimator;
   private readonly toolMap: Map<string, Tool>;
   private readonly systemPrompt: string;
-  private readonly initialBoardCount: number;
+  private readonly initialBoardRev: number;
   private readonly initialBoardSnapshot: string | undefined;
 
   constructor(private readonly cfg: AgentFoldConfig) {
@@ -88,11 +91,12 @@ export class AgentFoldAgent {
     this.systemPrompt =
       `${buildAgentSystemPrompt(cfg.tools.map((t) => t.name))}\n\n# 可用工具\n${renderToolSchemas(cfg.tools)}` +
       (cfg.systemPromptExtra ? `\n\n# 附加说明\n${cfg.systemPromptExtra}` : '');
-    this.initialBoardCount = cfg.initialBoardCount ?? (cfg.board ? cfg.board.entries().length : 0);
+    this.initialBoardRev =
+      cfg.initialBoardRev ?? cfg.initialBoardCount ?? (cfg.board ? cfg.board.currentRev() : 0);
     this.initialBoardSnapshot =
       cfg.initialBoardSnapshot !== undefined
         ? cfg.initialBoardSnapshot
-        : cfg.board && this.initialBoardCount > 0
+        : cfg.board && this.initialBoardRev > 0
           ? cfg.board.render()
           : undefined;
   }
@@ -113,11 +117,17 @@ export class AgentFoldAgent {
     }
     const parts: string[] = [`### 文档\n${this.cfg.store.manifest()}`];
     if (this.initialBoardSnapshot) parts.push(`### 共享研究看板\n${this.initialBoardSnapshot}`);
-    const taskBlock = this.name.startsWith('specialist#')
-      ? `### 任务\n${question.trim()}\n（注：你当前就是专家子代理 ${this.name}，请直接用 grep/read 核查本域文档，切勿对自身 scope 调用 branch。）`
+    const isScopedSpecialist =
+      this.name.startsWith('specialist#') || (this.depth > 0 && this.cfg.scope !== undefined);
+    const scopeLabel = this.cfg.scope ?? this.name;
+    const atMaxDepth = this.cfg.maxDepth !== undefined && this.depth >= this.cfg.maxDepth;
+    const taskBlock = isScopedSpecialist
+      ? atMaxDepth
+        ? `### 任务\n${question.trim()}\n（注：你当前是专家子代理 ${this.name}，专职负责域 [scope=${scopeLabel}]；当前已达最大递归深度 d=${this.depth}，严禁对自身 scope 或未在看板注册的新域调用 branch，请直接用 grep/read 核查本域文档，或仅向看板上已有的其他专家 [scope=...] 追问。）`
+        : `### 任务\n${question.trim()}\n（注：你当前是专家子代理 ${this.name}，专职负责域 [scope=${scopeLabel}]；请直接用 grep/read 核查本域文档，切勿对自身 scope 调用 branch；若需跨模块信息，优先查阅看板或用 branch 向目标模块 [scope=...] 派发/追问。）`
       : `### 任务\n${question.trim()}`;
     parts.push(taskBlock, prev.join('\n'));
-    const delta = this.cfg.board?.renderSince(this.initialBoardCount);
+    const delta = this.cfg.board?.renderSince(this.initialBoardRev, this.cfg.scope);
     if (delta) parts.push(`### 新增共享结论\n${delta}`);
     if (this.cfg.followUpQuestion) {
       parts.push(
@@ -134,6 +144,7 @@ export class AgentFoldAgent {
 
   async run(question: string): Promise<AgentRunResult> {
     const state = this.cfg.initialState ? FoldState.restore(this.cfg.initialState) : new FoldState();
+    const startStep = state.currentStep;
     const isSpecialist =
       this.depth > 0 ||
       this.cfg.initialState !== undefined ||
@@ -153,7 +164,7 @@ export class AgentFoldAgent {
       const step = state.currentStep;
       const forcing = iter === maxSteps;
       if (forcing && !(this.cfg.forceAnswerOnLimit ?? true)) {
-        return finish({ answer: null, steps: step, terminated: 'max_steps' });
+        return finish({ answer: null, steps: Math.max(0, step - startStep), terminated: 'max_steps' });
       }
       const expectFolding = state.latest !== undefined;
       let parsed: ParsedResponse | undefined;
@@ -173,12 +184,22 @@ export class AgentFoldAgent {
         }
         let text: string;
         let reasoning: string | undefined;
+        let truncatedReasoning = false;
         try {
           const res = await this.cfg.llm.complete({ messages, temperature: this.cfg.temperature, signal: this.cfg.signal, purpose: role });
           this.usage.record(role, res.usage, res.latencyMs);
           this.emit({ type: 'llm_call', agent: this.name, role, model: res.model, usage: res.usage, latencyMs: res.latencyMs, attempt });
           text = res.text;
           reasoning = res.reasoning;
+          truncatedReasoning =
+            text.trim() === '' &&
+            (res.finishReason === 'length' || (res.usage.reasoningTokens ?? 0) >= 8000);
+          if (text.trim() === '' && reasoning && /<\s*(?:answer|tool_call)\b/i.test(reasoning)) {
+            const tagMatch = /<\s*(?:folding|folded_output|fold|motivation|tool_call|answer)\b/i.exec(reasoning);
+            if (tagMatch) {
+              text = reasoning.slice(tagMatch.index);
+            }
+          }
           this.emit({ type: 'llm_response', agent: this.name, step, text: text.slice(0, 16_000), reasoning: reasoning?.slice(0, 16_000) });
         } catch (e) {
           this.usage.recordError(role);
@@ -186,7 +207,7 @@ export class AgentFoldAgent {
           this.emit({ type: 'error', agent: this.name, step, message });
           return finish({
             answer: null,
-            steps: step,
+            steps: Math.max(0, step - startStep),
             terminated: PROVIDER_REFUSAL.test(message) ? 'filtered' : 'error',
             error: message,
           });
@@ -199,12 +220,12 @@ export class AgentFoldAgent {
         }
         formatIssues++;
         this.emit({ type: 'format_error', agent: this.name, step, errors: p.errors, attempt, raw: text.slice(0, 4000) });
-        tail = [forcing ? FORCE_ANSWER : undefined, FORMAT_REPAIR(p.errors, step, state.latest?.step)].filter(Boolean).join('\n\n');
+        tail = [forcing ? FORCE_ANSWER : undefined, FORMAT_REPAIR(p.errors, step, state.latest?.step, truncatedReasoning)].filter(Boolean).join('\n\n');
         parsed = p;
       }
       if (!parsed || parsed.errors.length) {
         // Unrecoverable format failure: if there is any text-like answer, stop; else record a failed step.
-        if (forcing) return finish({ answer: null, steps: step, terminated: 'max_steps', error: parsed?.errors.join('; ') });
+        if (forcing) return finish({ answer: null, steps: Math.max(0, step - startStep), terminated: 'max_steps', error: parsed?.errors.join('; ') });
         if (state.latest) state.applyFold({ range: [state.latest.step, state.latest.step], summary: fallbackSummary(state.latest) });
         state.setLatest({
           step,
@@ -259,16 +280,16 @@ export class AgentFoldAgent {
           });
         }
         this.emit({ type: 'answer', agent: this.name, step, answer: parsed.answer });
-        return finish({ answer: parsed.answer, steps: step + 1, terminated: forcing ? 'forced_answer' : 'answer' });
+        return finish({ answer: parsed.answer, steps: step - startStep + 1, terminated: forcing ? 'forced_answer' : 'answer' });
       }
       // ACT
-      const action = parsed.toolCall!;
+      const action = parsed.toolCall ?? { name: 'none', arguments: {} };
       const motivation = parsed.motivation ?? '';
       this.emit({ type: 'tool_call', agent: this.name, step, action, motivation });
       const observation = await this.executeTool(action.name, action.arguments, step);
       state.setLatest({ step, motivation, action, observation });
     }
-    return finish({ answer: null, steps: state.currentStep, terminated: 'max_steps' });
+    return finish({ answer: null, steps: Math.max(0, state.currentStep - startStep), terminated: 'max_steps' });
   }
 
   private async executeTool(name: string, args: Record<string, unknown>, step: number): Promise<string> {

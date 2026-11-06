@@ -75,7 +75,7 @@ export class RecursiveAgentFold {
   }
 
   /** Tools for an agent at the given depth. */
-  toolsFor(depth: number): Tool[] {
+  toolsFor(depth: number, ownScope?: string): Tool[] {
     const en = this.opts.enable ?? {};
     const maxDepth = this.opts.maxDepth ?? DEFAULT_MAX_DEPTH;
     const tools: Tool[] = [];
@@ -92,6 +92,7 @@ export class RecursiveAgentFold {
         createBranchTool((task, o) => this.runAgent(task, o), {
           maxBranchSteps: this.opts.branchMaxSteps ?? 20,
           consultOnly: depth === maxDepth,
+          ...(ownScope !== undefined ? { ownScope } : {}),
         }),
       );
     }
@@ -103,6 +104,7 @@ export class RecursiveAgentFold {
     const {
       depth,
       maxSteps,
+      scope,
       initialState,
       followUpQuestion,
       initialBoardCount,
@@ -112,12 +114,15 @@ export class RecursiveAgentFold {
       signal,
     } = opts;
     const llm = depth === 0 ? this.opts.rootLLM : (this.opts.branchLLM ?? this.opts.rootLLM);
+    const maxDepth = this.opts.maxDepth ?? DEFAULT_MAX_DEPTH;
     const agent = new AgentFoldAgent({
       ...this.opts.agent,
       llm,
-      tools: this.toolsFor(depth),
+      tools: this.toolsFor(depth, scope),
       store: this.opts.store,
       depth,
+      maxDepth,
+      ...(scope !== undefined ? { scope } : {}),
       name: agentName ?? (depth === 0 ? 'root' : `branch#${++this.branchCounter}@${depth}`),
       maxSteps: maxSteps ?? (depth === 0 ? (this.opts.rootMaxSteps ?? 100) : (this.opts.branchMaxSteps ?? 20)),
       usage: this.usage,

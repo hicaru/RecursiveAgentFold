@@ -1,0 +1,74 @@
+{
+  "bench": "longbench",
+  "method": "raf",
+  "n": 6,
+  "meanScore": 0.5,
+  "correct": 3,
+  "meanOfficial": 0.5,
+  "meanLenient": 0.5,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 0.5,
+  "meanSteps": 5.5,
+  "meanWallSec": 248.80266666666665,
+  "formatIssues": 0,
+  "folds": {
+    "granular": 27,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 1,
+  "tokens": {
+    "prompt": 196125,
+    "cached": 95232,
+    "completion": 92480,
+    "cacheHitRate": 0.4855678776290631
+  },
+  "byRole": {
+    "root": {
+      "calls": 33,
+      "promptTokens": 114450,
+      "completionTokens": 91586,
+      "cachedTokens": 95232,
+      "reasoningTokens": 82623,
+      "latencyMs": 1481633,
+      "errors": 0,
+      "cacheHitRate": 0.832083879423329
+    },
+    "llm_query": {
+      "calls": 3,
+      "promptTokens": 81675,
+      "completionTokens": 894,
+      "cachedTokens": 0,
+      "reasoningTokens": 131,
+      "latencyMs": 32083,
+      "errors": 0,
+      "cacheHitRate": 0
+    }
+  },
+  "byTask": {
+    "Code Repository Understanding": {
+      "n": 2,
+      "score": 1
+    },
+    "Multi-Document QA": {
+      "n": 4,
+      "score": 0.25
+    }
+  },
+  "byAnswerType": {
+    "?": {
+      "n": 6,
+      "score": 0.5
+    }
+  },
+  "cost": {
+    "totalUsd": 0.467342,
+    "perTaskUsd": 0.07789,
+    "cacheSavedUsd": 0.108564,
+    "byRoleUsd": {
+      "root": 0.454644,
+      "llm_query": 0.012698
+    }
+  }
+}
