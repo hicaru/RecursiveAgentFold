@@ -1,0 +1,96 @@
+{
+  "bench": "longbench-pro",
+  "method": "raf",
+  "startedAt": "2026-11-06T19:06:41.117Z",
+  "tasks": 2,
+  "taskIds": [
+    "longbench-pro-35ddea1dc1d6984bf63f9a767bdbefdd770b363e92ed73c69c7f51927c4ca1fc",
+    "longbench-pro-af5bc2c9fb904c737e089fbe9326abe295be55e589b4844c02c13c25c3ada068"
+  ],
+  "argv": [
+    "longbench-pro",
+    "--offset",
+    "11",
+    "--limit",
+    "2",
+    "--root-model",
+    "glm-5.3",
+    "--branch-model",
+    "glm-5.3",
+    "--query-model",
+    "glm-5.3-flash",
+    "--max-depth",
+    "2",
+    "--jev",
+    "answer-gate=on",
+    "--out",
+    "results/j4b-answergate-lbpro-nonanswer"
+  ],
+  "tools": "all",
+  "jev": {
+    "answer-gate": "on"
+  },
+  "models": {
+    "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+    "root": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16000,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        }
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "branch": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16000,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        }
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "query": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3-flash",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16384,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        },
+        "reasoning_effort": "low"
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "llmQuery": {
+      "reserveRatio": 0.3,
+      "concurrency": 4
+    },
+    "jev": {
+      "model": "typesafe/jev-1.13",
+      "maxStateTokens": 24000
+    }
+  }
+}

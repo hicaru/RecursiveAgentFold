@@ -1,0 +1,99 @@
+{
+  "bench": "oolong",
+  "method": "raf",
+  "n": 5,
+  "meanScore": 0.8,
+  "correct": 4,
+  "meanOfficial": 0.8,
+  "meanLenient": 0.8,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 0.8,
+  "meanSteps": 1.2,
+  "meanWallSec": 70.792,
+  "formatIssues": 1,
+  "folds": {
+    "granular": 1,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 1,
+  "jevDecisions": 7,
+  "jevCalls": 7,
+  "tokens": {
+    "prompt": 142271,
+    "cached": 18816,
+    "completion": 99237,
+    "cacheHitRate": 0.13225464079116617
+  },
+  "byRole": {
+    "jev": {
+      "calls": 7,
+      "promptTokens": 7153,
+      "completionTokens": 217,
+      "cachedTokens": 0,
+      "reasoningTokens": 0,
+      "latencyMs": 4424,
+      "errors": 0,
+      "costUsd": 0.000300426,
+      "cacheHitRate": 0
+    },
+    "root": {
+      "calls": 7,
+      "promptTokens": 20490,
+      "completionTokens": 1861,
+      "cachedTokens": 15744,
+      "reasoningTokens": 1107,
+      "latencyMs": 32523,
+      "errors": 0,
+      "costUsd": 0,
+      "cacheHitRate": 0.7683748169838945
+    },
+    "llm_query": {
+      "calls": 17,
+      "promptTokens": 114628,
+      "completionTokens": 97159,
+      "cachedTokens": 3072,
+      "reasoningTokens": 95376,
+      "latencyMs": 1224373,
+      "errors": 0,
+      "costUsd": 0,
+      "cacheHitRate": 0.026799734794291097
+    }
+  },
+  "byTask": {
+    "TASK_TYPE.MOST_FREQ": {
+      "n": 1,
+      "score": 1
+    },
+    "TASK_TYPE.LEAST_FREQ": {
+      "n": 1,
+      "score": 1
+    },
+    "TASK_TYPE.RELATIVE_FREQ": {
+      "n": 3,
+      "score": 0.6666666666666666
+    }
+  },
+  "byAnswerType": {
+    "ANSWER_TYPE.LABEL": {
+      "n": 2,
+      "score": 1
+    },
+    "ANSWER_TYPE.COMPARISON": {
+      "n": 3,
+      "score": 0.6666666666666666
+    }
+  },
+  "cost": {
+    "totalUsd": 0.084632,
+    "perTaskUsd": 0.016926,
+    "cacheSavedUsd": 0.018317,
+    "providerUsd": 0.0003,
+    "byRoleUsd": {
+      "jev": 0.0003,
+      "root": 0.018926,
+      "llm_query": 0.065405
+    }
+  }
+}

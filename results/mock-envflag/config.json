@@ -1,0 +1,27 @@
+{
+  "bench": "needle",
+  "method": "raf",
+  "startedAt": "2026-11-06T19:19:18.175Z",
+  "tasks": 1,
+  "taskIds": [
+    "needle-8000-lookup-0"
+  ],
+  "argv": [
+    "needle",
+    "--tokens",
+    "8000",
+    "--tasks",
+    "1",
+    "--mock",
+    "--out",
+    "results/mock-envflag"
+  ],
+  "tools": "all",
+  "jev": {},
+  "models": {
+    "mock": true,
+    "llmQuery": {
+      "reserveRatio": 0.3
+    }
+  }
+}

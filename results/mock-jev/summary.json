@@ -1,0 +1,65 @@
+{
+  "bench": "oolong",
+  "method": "raf",
+  "n": 1,
+  "meanScore": 0,
+  "correct": 0,
+  "meanOfficial": 0,
+  "meanLenient": 0,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 0,
+  "meanSteps": 30,
+  "meanWallSec": 0.092,
+  "formatIssues": 93,
+  "folds": {
+    "granular": 0,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 0,
+  "jevDecisions": 1,
+  "jevCalls": 94,
+  "tokens": {
+    "prompt": 348058,
+    "cached": 324544,
+    "completion": 1302,
+    "cacheHitRate": 0.9324422941004086
+  },
+  "byRole": {
+    "jev": {
+      "calls": 94,
+      "promptTokens": 11280,
+      "completionTokens": 0,
+      "cachedTokens": 0,
+      "reasoningTokens": 0,
+      "latencyMs": 94,
+      "errors": 0,
+      "costUsd": 0.0004700000000000009,
+      "cacheHitRate": 0
+    },
+    "root": {
+      "calls": 93,
+      "promptTokens": 336778,
+      "completionTokens": 1302,
+      "cachedTokens": 324544,
+      "reasoningTokens": 0,
+      "latencyMs": 0,
+      "errors": 0,
+      "costUsd": 0,
+      "cacheHitRate": 0.963673399093765
+    }
+  },
+  "byTask": {
+    "TASK_TYPE.MOST_FREQ": {
+      "n": 1,
+      "score": 0
+    }
+  },
+  "byAnswerType": {
+    "ANSWER_TYPE.LABEL": {
+      "n": 1,
+      "score": 0
+    }
+  }
+}

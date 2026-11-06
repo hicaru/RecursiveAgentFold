@@ -1,0 +1,91 @@
+{
+  "bench": "longbench-pro",
+  "method": "raf",
+  "n": 2,
+  "meanScore": 0.5,
+  "correct": 1,
+  "meanOfficial": 0.5,
+  "meanLenient": 0.5,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 0.5,
+  "meanSteps": 4.5,
+  "meanWallSec": 352.741,
+  "formatIssues": 2,
+  "folds": {
+    "granular": 7,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 1,
+  "jevDecisions": 2,
+  "jevCalls": 2,
+  "tokens": {
+    "prompt": 78821,
+    "cached": 38272,
+    "completion": 51951,
+    "cacheHitRate": 0.48555587977823167
+  },
+  "byRole": {
+    "root": {
+      "calls": 10,
+      "promptTokens": 55114,
+      "completionTokens": 50789,
+      "cachedTokens": 35712,
+      "reasoningTokens": 43827,
+      "latencyMs": 696490,
+      "errors": 0,
+      "costUsd": 0,
+      "cacheHitRate": 0.6479660340385383
+    },
+    "jev": {
+      "calls": 2,
+      "promptTokens": 4284,
+      "completionTokens": 159,
+      "cachedTokens": 0,
+      "reasoningTokens": 0,
+      "latencyMs": 1398,
+      "errors": 0,
+      "costUsd": 0.000179928,
+      "cacheHitRate": 0
+    },
+    "llm_query": {
+      "calls": 10,
+      "promptTokens": 19423,
+      "completionTokens": 1003,
+      "cachedTokens": 2560,
+      "reasoningTokens": 10,
+      "latencyMs": 27910,
+      "errors": 0,
+      "costUsd": 0,
+      "cacheHitRate": 0.13180250218812747
+    }
+  },
+  "byTask": {
+    "T7. Consistency & Compliance Checking": {
+      "n": 1,
+      "score": 0
+    },
+    "T6. Aggregation & Clustering": {
+      "n": 1,
+      "score": 1
+    }
+  },
+  "byAnswerType": {
+    "?": {
+      "n": 2,
+      "score": 0.5
+    }
+  },
+  "cost": {
+    "totalUsd": 0.263207,
+    "perTaskUsd": 0.131604,
+    "cacheSavedUsd": 0.041019,
+    "providerUsd": 0.00018,
+    "byRoleUsd": {
+      "root": 0.25992,
+      "jev": 0.00018,
+      "llm_query": 0.003108
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "bench": "oolong",
+  "method": "raf",
+  "startedAt": "2026-11-06T18:53:16.460Z",
+  "tasks": 1,
+  "taskIds": [
+    "oolong-trec_coarse-131072-17000208"
+  ],
+  "argv": [
+    "oolong",
+    "--limit",
+    "1",
+    "--mock",
+    "--dataset",
+    "trec_coarse",
+    "--context-len",
+    "131072",
+    "--jev",
+    "prescreen=on",
+    "--jev",
+    "answer-gate=on",
+    "--jev",
+    "query-router=on",
+    "--jev",
+    "scope-router=on",
+    "--jev",
+    "branch-gate=on",
+    "--jev",
+    "reader-verify=on",
+    "--jev",
+    "model-router=on",
+    "--out",
+    "results/mock-jev"
+  ],
+  "tools": "all",
+  "jev": {
+    "prescreen": "on",
+    "answer-gate": "on",
+    "query-router": "on",
+    "scope-router": "on",
+    "branch-gate": "on",
+    "reader-verify": "on",
+    "model-router": "on"
+  },
+  "models": {
+    "mock": true,
+    "llmQuery": {
+      "reserveRatio": 0.3
+    }
+  }
+}

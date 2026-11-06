@@ -1,0 +1,76 @@
+{
+  "bench": "needle",
+  "method": "raf",
+  "n": 1,
+  "meanScore": 0,
+  "correct": 0,
+  "meanOfficial": 0,
+  "meanLenient": 0,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 0,
+  "meanSteps": 3,
+  "meanWallSec": 0.013,
+  "formatIssues": 0,
+  "folds": {
+    "granular": 1,
+    "deep": 1,
+    "corrected": 0
+  },
+  "llmQueryCalls": 1,
+  "jevDecisions": 1,
+  "jevCalls": 1,
+  "tokens": {
+    "prompt": 18688,
+    "cached": 5248,
+    "completion": 211,
+    "cacheHitRate": 0.2808219178082192
+  },
+  "byRole": {
+    "root": {
+      "calls": 3,
+      "promptTokens": 8068,
+      "completionTokens": 161,
+      "cachedTokens": 5056,
+      "reasoningTokens": 0,
+      "latencyMs": 0,
+      "errors": 0,
+      "costUsd": 0,
+      "cacheHitRate": 0.6266732771442737
+    },
+    "llm_query": {
+      "calls": 2,
+      "promptTokens": 10500,
+      "completionTokens": 50,
+      "cachedTokens": 192,
+      "reasoningTokens": 0,
+      "latencyMs": 0,
+      "errors": 0,
+      "costUsd": 0,
+      "cacheHitRate": 0.018285714285714287
+    },
+    "jev": {
+      "calls": 1,
+      "promptTokens": 120,
+      "completionTokens": 0,
+      "cachedTokens": 0,
+      "reasoningTokens": 0,
+      "latencyMs": 1,
+      "errors": 0,
+      "costUsd": 0.000005,
+      "cacheHitRate": 0
+    }
+  },
+  "byTask": {
+    "lookup": {
+      "n": 1,
+      "score": 0
+    }
+  },
+  "byAnswerType": {
+    "ANSWER_TYPE.NUMERIC": {
+      "n": 1,
+      "score": 0
+    }
+  }
+}

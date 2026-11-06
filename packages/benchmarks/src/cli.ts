@@ -203,11 +203,14 @@ async function main() {
     return;
   }
 
+  // `--offset` slices after the dataset fetch, so the fetch must cover offset + limit.
+  const offset = Number(values.offset ?? 0);
+  const fetchLimit = values.limit === undefined ? undefined : offset + Number(values.limit);
   const longBenchOpts = {
     domain: values.domain,
     difficulty: values.difficulty,
     length: values.length,
-    limit: opt(values.limit, Number),
+    limit: fetchLimit,
     cacheDir,
     hfToken: process.env.HF_TOKEN || undefined,
     log: (s: string) => console.log(s),
@@ -216,7 +219,7 @@ async function main() {
   const longBenchProOpts = {
     domain: values.domain,
     length: values.length,
-    limit: opt(values.limit, Number),
+    limit: fetchLimit,
     cacheDir,
     hfToken: process.env.HF_TOKEN || undefined,
     log: (s: string) => console.log(s),
@@ -278,7 +281,6 @@ async function main() {
     console.log(HELP);
     throw new Error(`unknown command ${cmd}`);
   }
-  const offset = Number(values.offset ?? 0);
   tasks = tasks.slice(offset, values.limit ? offset + Number(values.limit) : undefined);
 
   const models = values.mock
