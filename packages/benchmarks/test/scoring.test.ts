@@ -3,7 +3,7 @@ import { parseGold, parseOolongAnswer, scoreOolong, scoreOolongLenient } from '.
 import { buildNeedleTasks } from '../src/needle/needle.js';
 import { buildCodeGraphTasks } from '../src/codegraph/codegraph.js';
 import { parseChoiceLetter, splitContextIntoDocuments } from '../src/longbench/tasks.js';
-import { buildLongBenchProTasks } from '../src/longbench-pro/tasks.js';
+import { buildLongBenchProTasks, parseAnswerItems } from '../src/longbench-pro/tasks.js';
 import { buildRulerTasks, parseAnswerList } from '../src/ruler/ruler.js';
 import { buildMrcrTasks, parseBullets } from '../src/mrcr/mrcr.js';
 describe('OOLONG scoring (official port)', () => {
@@ -139,26 +139,44 @@ describe('ruler / mrcr / longbench-pro generators', () => {
     expect(parseBullets('1. alpha\n- beta\nAnswer: below').length).toBe(2);
   });
 
-  it('longbench-pro builds free-form tasks with lenient containment scoring', () => {
+  it('longbench-pro scores unicode item lists: ordered=1, unordered=0.5, wrong=0', () => {
     const rows = [
       {
-        _id: 'x1',
-        domain: 'Academic Papers',
-        difficulty: 'hard',
+        _id: 'zh1',
+        domain: 'T1. Retrieval & Ranking',
+        difficulty: 'Easy',
+        length: 'medium',
+        question: '检索条例。先输出「[答案]」标识符，再按行输出条例编号。',
+        answer: '第四十六条,第四十七条,第四十八条',
+        context: '第一章 总则\n'.padEnd(300, '条') + '第五章 运营服务',
+        token_length: 50_000,
+      },
+      {
+        _id: 'en1',
+        domain: 'T2. Sequencing',
+        difficulty: 'Hard',
         length: 'long',
-        question: 'What does the paper conclude?',
-        answer: 'the model scales linearly',
-        context: '=== paper.txt ===\n'.padEnd(300, 'x') + 'the model scales linearly',
+        question: 'Restore the order of fragments A-E.',
+        answer: 'B,D,C,F,A,E',
+        context: 'fragment text\n'.padEnd(300, 'x'),
         token_length: 200_000,
       },
     ];
     const tasks = buildLongBenchProTasks(rows);
-    const t = tasks[0];
-    if (!t) throw new Error('missing longbench-pro task');
-    expect(t.id).toBe('longbench-pro-x1');
-    expect(t.documents.length).toBeGreaterThanOrEqual(1);
-    expect(t.score('Answer: The model scales linearly.').score).toBe(1);
-    expect(t.score('Answer: something else entirely').score).toBe(0);
-    expect(t.score('The paper says the model scales linearly overall. Answer: model scales linearly').score).toBe(1);
+    const zh = tasks[0];
+    const en = tasks[1];
+    if (!zh || !en) throw new Error('missing tasks');
+    // exact ordered Chinese answer behind [答案] marker (no colon) → 1
+    expect(zh.score('[答案]\n第四十六条\n第四十七条\n第四十八条').score).toBe(1);
+    // partial answer → 0 with hit stats
+    const miss = zh.score('Answer: 第四十六条');
+    expect(miss.score).toBe(0);
+    expect(miss.extra?.hits).toBe(1);
+    // reordered latin items → 0.5
+    const shuffled = en.score('Answer: A, B, C, D, E, F');
+    expect(shuffled.score).toBe(0.5);
+    expect(shuffled.extra?.unordered).toBe(1);
+    expect(en.score('Answer: B,D,C,F,A,E').score).toBe(1);
+    expect(parseAnswerItems('[Answer]\nB\nD\nC\nF\nA\nE')).toEqual(['b', 'd', 'c', 'f', 'a', 'e']);
   });
 });
