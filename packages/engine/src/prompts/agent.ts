@@ -64,12 +64,33 @@ export const TOOL_GUIDANCE: Record<string, string> = Object.freeze({
   calculator: '- **calculator**: Exact arithmetic evaluation (+ - * / % ^, sum, min, max, avg, round, floor, ceil, abs, sqrt). Never do mental math.',
 });
 
+/** Resolve a tool name to its TOOL_GUIDANCE key; strips a leading prefix (e.g. "raf_"). */
+function resolveToolGuidanceKey(name: string): string | undefined {
+  if (name in TOOL_GUIDANCE) return name;
+  const sep = name.indexOf('_');
+  if (sep > 0) {
+    const base = name.slice(sep + 1);
+    if (base in TOOL_GUIDANCE) return base;
+  }
+  return undefined;
+}
+
 export function buildAgentSystemPrompt(toolNames: string[]): string {
-  const lines = toolNames.map((n) => TOOL_GUIDANCE[n]).filter((x): x is string => !!x);
-  if (
-    toolNames.includes('llm_query') &&
-    (toolNames.includes('grep') || toolNames.includes('tally') || toolNames.includes('search') || toolNames.includes('outline'))
-  ) {
+  const resolved = new Map<string, string>();
+  for (const name of toolNames) {
+    const base = resolveToolGuidanceKey(name);
+    if (base === undefined) continue;
+    const existing = resolved.get(base);
+    if (existing === undefined || (existing === base && name !== base)) resolved.set(base, name);
+  }
+  const lines: string[] = [];
+  for (const [base, actual] of resolved) {
+    const guidance = TOOL_GUIDANCE[base];
+    if (guidance === undefined) continue;
+    lines.push(actual === base ? guidance : guidance.replace(`- **${base}**`, `- **${actual}**`));
+  }
+  const hasBase = (key: string) => resolved.has(key);
+  if (hasBase('llm_query') && (hasBase('grep') || hasBase('tally') || hasBase('search') || hasBase('outline'))) {
     lines.push(
       '- **Tool Routing Priority (Accuracy & Speed)**:',
       '  1. **0-Token Free Tools First (`search` / `grep` / `outline` / `tally`)**: If the target has literal words, names, numbers, citations, identifiers, or natural-language topics, ALWAYS use `grep`, `search`, `outline`, or `tally` first. NEVER use `llm_query` for literal/regex or BM25-searchable targets.',

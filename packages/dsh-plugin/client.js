@@ -91,10 +91,12 @@ window.__ModuleLoader__.load({
       'view.parent': 'Parent',
       'view.motivation': 'Motivation',
       'view.inspector': 'Inspector',
-      'view.expandAll': 'Expand all',
-      'view.collapseAll': 'Collapse all',
-      'view.onlyThis': 'Focus only',
-      'view.close': 'Close',
+      'tool.branch.title': 'Branch',
+      'tool.branch.tasks': 'tasks',
+      'tool.branch.running': 'running',
+      'tool.branch.failed': 'failed',
+      'tool.branch.stopped': 'stopped',
+      'tool.branch.result': 'Result',
     });
 
     const RU = Object.freeze({
@@ -158,13 +160,38 @@ window.__ModuleLoader__.load({
       'view.parent': 'Родитель',
       'view.motivation': 'Мотивация',
       'view.inspector': 'Инспектор',
-      'view.expandAll': 'Развернуть все',
-      'view.collapseAll': 'Свернуть все',
-      'view.onlyThis': 'Только этот',
-      'view.close': 'Закрыть',
+      'tool.branch.title': 'Ветки',
+      'tool.branch.tasks': 'задачи',
+      'tool.branch.running': 'выполняется',
+      'tool.branch.failed': 'ошибка',
+      'tool.branch.stopped': 'остановлено',
+      'tool.branch.result': 'Результат',
     });
 
     const CSS = `
+.rafx-branch{display:flex;flex-direction:column;min-width:0;color:var(--dsw-alias-label-tertiary);font-size:var(--dsh-content-font-size-secondary,13px)}
+.rafx-branchHead{display:flex;align-items:center;gap:6px;min-height:calc(24px + var(--dsh-content-font-delta,0px));cursor:pointer;transition:color .1s;min-width:0}
+.rafx-branchHead:hover{color:var(--dsw-alias-label-secondary)}
+.rafx-branchHead[data-state=running]{color:var(--dsw-alias-state-business-primary)}
+.rafx-branchHead[data-state=error]{color:var(--dsw-alias-state-error-primary)}
+.rafx-branchHead[data-state=stopped]{color:var(--dsw-alias-state-warn-label)}
+.rafx-branchChevron{width:12px;flex:none;color:inherit}
+.rafx-branchIcon{width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;flex:none}
+.rafx-branchTitle{flex:none;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(24px + var(--dsh-content-font-delta,0px))}
+.rafx-branchSep{width:2px;height:2px;border-radius:1px;background:currentColor;opacity:.55;flex:none;margin:0 2px}
+.rafx-branchSummary{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:auto;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(24px + var(--dsh-content-font-delta,0px))}
+.rafx-branchBody{display:flex;flex-direction:column;gap:6px;margin:2px 0 6px 22px;padding-left:9px;border-left:.5px solid var(--dsw-alias-border-l2)}
+.rafx-branchTaskWrap{display:flex;flex-direction:column;gap:2px}
+.rafx-branchTask{display:flex;gap:6px;align-items:flex-start;font-size:12px;line-height:1.45;color:var(--dsw-alias-label-secondary)}
+.rafx-branchTaskNo{flex:none;color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:1.6}
+.rafx-branchScope{flex:none;padding:0 5px;border:.5px solid var(--dsw-alias-border-l3);border-radius:4px;color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,monospace);font-size:10px;line-height:16px}
+.rafx-branchTaskText{min-width:0;white-space:pre-wrap;word-break:break-word}
+.rafx-branchTaskResult{margin:2px 0 2px 18px;padding:4px 7px;border-radius:5px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-tertiary);font-size:11.5px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto}
+.rafx-branchResult{display:flex;flex-direction:column;gap:3px;margin-top:2px}
+.rafx-branchResultLabel{color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:500}
+.rafx-branchResultText{margin:0;padding:5px 7px;border-radius:5px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font:var(--dsw-font-markdown-code-block-small);white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}
+.rafx-branchInspect{align-self:flex-start;border:.5px solid var(--dsw-alias-border-l4);border-radius:999px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary);cursor:pointer;padding:2px 8px;font-size:11px;line-height:16px}
+.rafx-branchInspect:hover{background:var(--dsw-alias-interactive-bg-hover-solid);color:var(--dsw-alias-label-primary)}
 .rafx-page{--rafx-ink:var(--dsw-alias-label-primary);--rafx-ink-2:var(--dsw-alias-label-secondary);--rafx-ink-3:var(--dsw-alias-label-tertiary);--rafx-line:var(--dsw-alias-border-l3);--rafx-surface:var(--dsw-alias-bg-layer-1);--rafx-surface-2:var(--dsw-alias-bg-layer-2);--rafx-business:var(--dsw-alias-state-business-primary);display:flex;flex-direction:column;width:100%;height:100%;min-height:0;overflow:hidden;background:var(--dsw-alias-bg-base);color:var(--rafx-ink);font-size:14px;line-height:1.6}
 .rafx-scroll{flex:1;min-height:0;overflow:auto;scrollbar-gutter:stable;--dsh-scrollbar-width:9px;--dsh-scrollbar-thumb-border:2px}
 .rafx-content{max-width:760px;margin:0 auto;padding:0 clamp(24px,4vw,48px) 48px}
@@ -315,6 +342,8 @@ window.__ModuleLoader__.load({
 .rafx-answer{display:flex;flex-direction:column;gap:3px;padding:7px 9px;border-radius:6px;background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 8%,transparent)}
 .rafx-answer p{margin:0;font-size:12px;line-height:18px;color:var(--rafx-ink);white-space:pre-wrap;overflow-wrap:anywhere}
 .rafx-timelineEmpty,.rafx-runsEmpty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;min-height:180px;padding:24px;text-align:center;color:var(--dsw-alias-label-caption)}
+.rafx-dockBtn{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 7px;border:.5px solid var(--rafx-line);border-radius:6px;background:var(--rafx-surface);color:var(--rafx-ink-2);font:inherit;font-size:10.5px;font-weight:500;cursor:pointer;white-space:nowrap}
+.rafx-dockBtn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--rafx-ink)}
 .rafx-runsEmpty{flex:1}
 .rafx-runsEmpty h2{margin:0;font-size:14px;font-weight:500;line-height:20px;color:var(--rafx-ink-3)}
 .rafx-runsEmpty p{margin:0;font-size:12px;line-height:18px;max-width:44ch}
@@ -324,36 +353,7 @@ window.__ModuleLoader__.load({
 .rafx-panelTab{height:28px;padding:0 12px;border:.5px solid transparent;border-radius:8px;background:transparent;color:var(--rafx-ink-3);font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;transition:background .14s,color .14s}
 .rafx-panelTab:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--rafx-ink)}
 .rafx-panelTab[aria-selected=true]{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 14%,var(--rafx-surface-2));border-color:color-mix(in srgb,var(--dsw-alias-brand-primary) 32%,transparent);color:var(--rafx-ink)}
-.rafx-dock{--rafx-ink:var(--dsw-alias-label-primary);--rafx-ink-2:var(--dsw-alias-label-secondary);--rafx-ink-3:var(--dsw-alias-label-tertiary);--rafx-line:var(--dsw-alias-border-l3);--rafx-surface:var(--dsw-alias-bg-layer-1);--rafx-surface-2:var(--dsw-alias-bg-layer-2);--rafx-business:var(--dsw-alias-state-business-primary);display:flex;flex-direction:column;width:100%;max-height:420px;margin-bottom:8px;border:.5px solid var(--rafx-line);border-radius:12px;background:var(--rafx-surface);color:var(--rafx-ink);font-size:12px;line-height:1.45;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,.06)}
-.rafx-dock[data-collapsed=true]{max-height:none}
-.rafx-dockTop{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:36px;padding:6px 10px;border-bottom:.5px solid var(--rafx-line);background:var(--rafx-surface-2);flex-wrap:wrap}
-.rafx-dock[data-collapsed=true] .rafx-dockTop{border-bottom:0}
-.rafx-dockTopLeft{display:flex;align-items:center;gap:7px;min-width:0;flex:1 1 240px}
-.rafx-dockBadge{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 6px;border-radius:5px;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 14%,transparent);color:var(--dsw-alias-brand-primary);font-family:var(--ds-font-family-code,monospace);font-size:10px;font-weight:700;letter-spacing:.03em;flex:none}
-.rafx-dockStatus{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 7px;border-radius:5px;border:.5px solid var(--rafx-line);background:var(--rafx-surface);font-size:10.5px;font-weight:600;flex:none}
-.rafx-dockStatus[data-status=running]{color:var(--dsw-alias-state-business-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 30%,transparent)}
-.rafx-dockStatus[data-status=done]{color:var(--dsw-alias-state-success-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 30%,transparent)}
-.rafx-dockStatus[data-status=error],.rafx-dockStatus[data-status=aborted]{color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 30%,transparent)}
-.rafx-dockQuestion{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--rafx-ink-2);font-size:11.5px;font-weight:500}
-.rafx-dockTopRight{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.rafx-dockMetrics{font-family:var(--ds-font-family-code,monospace);font-size:10px;color:var(--dsw-alias-label-caption);font-variant-numeric:tabular-nums;white-space:nowrap}
-.rafx-dockBtn{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 7px;border:.5px solid var(--rafx-line);border-radius:6px;background:var(--rafx-surface);color:var(--rafx-ink-2);font:inherit;font-size:10.5px;font-weight:500;cursor:pointer;white-space:nowrap}
-.rafx-dockBtn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--rafx-ink)}
-.rafx-dockSelect{height:22px;max-width:190px;padding:0 5px;border:.5px solid var(--rafx-line);border-radius:6px;background:var(--rafx-surface);color:var(--rafx-ink-2);font:inherit;font-size:10.5px;cursor:pointer}
-.rafx-dockBody{display:flex;flex-direction:column;gap:6px;padding:8px 10px;overflow:auto;max-height:372px}
-.rafx-treeAgent{border:.5px solid var(--rafx-line);border-radius:9px;background:var(--dsw-alias-bg-base);overflow:hidden}
-.rafx-treeAgent[data-status=running]{border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 38%,var(--rafx-line))}
-.rafx-treeAgentHead{display:flex;align-items:center;gap:7px;width:100%;min-height:32px;padding:4px 8px;background:var(--rafx-surface);border-bottom:.5px solid transparent}
-.rafx-treeAgent[data-open=true] .rafx-treeAgentHead{border-bottom-color:var(--rafx-line)}
-.rafx-treeAgentToggle{display:flex;align-items:center;gap:7px;flex:1;min-width:0;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
-.rafx-treeAgentToggle:hover .rafx-treeAgentTitle{color:var(--dsw-alias-brand-primary)}
 .rafx-treeAgentChevron{display:inline-flex;flex:none;color:var(--dsw-alias-label-caption);font-size:10px;width:12px;justify-content:center}
-.rafx-treeAgentTitle{font-family:var(--ds-font-family-code,monospace);font-size:11.5px;font-weight:600;color:var(--rafx-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.rafx-treeBadge{display:inline-flex;align-items:center;height:17px;padding:0 5px;border:.5px solid var(--rafx-line);border-radius:4px;background:var(--rafx-surface-2);color:var(--rafx-ink-3);font-family:var(--ds-font-family-code,monospace);font-size:9.5px;line-height:15px;flex:none}
-.rafx-treeStage{display:inline-flex;align-items:center;height:17px;padding:0 5px;border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent);color:var(--dsw-alias-brand-primary);font-family:var(--ds-font-family-code,monospace);font-size:9.5px;font-weight:600;line-height:15px;flex:none}
-.rafx-treeTicker{flex:1;min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10.5px;color:var(--dsw-alias-label-caption)}
-.rafx-treeMeta{font-family:var(--ds-font-family-code,monospace);font-size:10px;color:var(--dsw-alias-label-caption);font-variant-numeric:tabular-nums;white-space:nowrap;flex:none}
-.rafx-treeAgentBody{display:flex;flex-direction:column;gap:6px;padding:8px}
 .rafx-treeTask{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:5px 8px;border-radius:6px;background:var(--rafx-surface-2);font-size:11px;color:var(--rafx-ink-2);overflow-wrap:anywhere}
 .rafx-stepToggle{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .rafx-stepPills{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap}
@@ -1232,9 +1232,15 @@ window.__ModuleLoader__.load({
       return shortValue(value, 6000);
     }
 
+    function baseToolName(name) {
+      return typeof name === 'string' && (name.startsWith('raf_') || name.startsWith('dsh_'))
+        ? name.slice(4)
+        : String(name ?? '');
+    }
+
     function toolBadge(name) {
       if (typeof name !== 'string') return '?';
-      const base = name.startsWith('dsh_') ? name.slice(4) : name;
+      const base = baseToolName(name);
       const known = TOOL_BADGES[base];
       if (known !== undefined) return known;
       return base.slice(0, 2).toUpperCase();
@@ -1419,8 +1425,8 @@ window.__ModuleLoader__.load({
           const parentStep = parent.steps[parent.steps.length - 1];
           if (parentStep !== undefined) {
             const branchTool =
-              [...parentStep.tools].reverse().find((tool) => tool.name === 'branch' && tool.result === null) ??
-              [...parentStep.tools].reverse().find((tool) => tool.name === 'branch');
+              [...parentStep.tools].reverse().find((tool) => baseToolName(tool.name) === 'branch' && tool.result === null) ??
+              [...parentStep.tools].reverse().find((tool) => baseToolName(tool.name) === 'branch');
             if (branchTool !== undefined) {
               if (branchTool.childAgentId === null) branchTool.childAgentId = agent.id;
               if (!branchTool.childAgentIds.includes(agent.id)) {
@@ -1667,7 +1673,7 @@ window.__ModuleLoader__.load({
             ? [tool.childAgentId]
             : [];
       const children = childIds.map((id) => agentById.get(id)).filter(Boolean);
-      const displayTool = tool.name.startsWith('dsh_') ? tool.name.slice(4) : tool.name;
+      const displayTool = baseToolName(tool.name);
       const motPreview = tool.motivation ? tool.motivation.replace(/\s+/g, ' ').trim() : '';
       return h(
         'div',
@@ -1959,441 +1965,6 @@ window.__ModuleLoader__.load({
                     h('span', { className: 'rafx-fieldLabel' }, t('view.answer')),
                     h('p', null, step.answer === '' ? '—' : step.answer),
                   ),
-            ),
-      );
-    }
-
-    function RafLiveDock({ t, sessionId }) {
-      const engine = useEngine(sessionId);
-      const [runs, setRuns] = React.useState([]);
-      const [selectedRunId, setSelectedRunId] = React.useState(null);
-      const [run, setRun] = React.useState(null);
-      const [dockCollapsed, setDockCollapsed] = React.useState(false);
-      const [dismissedRunId, setDismissedRunId] = React.useState(null);
-      const [openAgents, setOpenAgents] = React.useState(() => new Set(['agent:0']));
-      const [openSteps, setOpenSteps] = React.useState(() => new Set());
-      const [openTools, setOpenTools] = React.useState(() => new Set());
-      const manualRunRef = React.useRef(false);
-      const manualAgentsRef = React.useRef(new Set());
-      const manualStepsRef = React.useRef(new Set());
-      const seenAgentsRef = React.useRef(new Set());
-      const seenStepsRef = React.useRef(new Set());
-
-      React.useEffect(() => {
-        if (typeof sessionId !== 'string' || !sessionId) return undefined;
-        let active = true;
-        let timer = 0;
-        const load = async () => {
-          try {
-            const list = await getRuns(sessionId);
-            if (!active) return;
-            setRuns(list);
-            if (list[0] !== undefined) {
-              if (!manualRunRef.current || list[0].status === 'running') {
-                setSelectedRunId((prev) => {
-                  if (prev !== list[0].id && list[0].status === 'running') {
-                    manualRunRef.current = false;
-                    return list[0].id;
-                  }
-                  return prev ?? list[0].id;
-                });
-              }
-            }
-          } catch {
-            // Keep last known run list on transient poll failure.
-          } finally {
-            if (active) timer = window.setTimeout(load, 1200);
-          }
-        };
-        void load();
-        return () => {
-          active = false;
-          if (timer !== 0) window.clearTimeout(timer);
-        };
-      }, [sessionId]);
-
-      React.useEffect(() => {
-        if (typeof selectedRunId !== 'string' || !selectedRunId) return undefined;
-        let active = true;
-        let timer = 0;
-        let isRunning = true;
-        const load = async () => {
-          try {
-            const detail = await getRun(selectedRunId);
-            if (!active) return;
-            setRun(detail);
-            isRunning = detail.status === 'running';
-          } catch {
-            // Ignore transient poll errors.
-          } finally {
-            if (active) timer = window.setTimeout(load, isRunning ? 500 : 2200);
-          }
-        };
-        void load();
-        return () => {
-          active = false;
-          if (timer !== 0) window.clearTimeout(timer);
-        };
-      }, [selectedRunId]);
-
-      React.useEffect(() => {
-        manualAgentsRef.current = new Set();
-        manualStepsRef.current = new Set();
-        seenAgentsRef.current = new Set();
-        seenStepsRef.current = new Set();
-        setOpenAgents(new Set(['agent:0']));
-        setOpenSteps(new Set());
-        setOpenTools(new Set());
-      }, [selectedRunId]);
-
-      const model = React.useMemo(() => buildRunModel(run), [run]);
-      const agents = model === null ? [] : model.agents;
-      const agentById = React.useMemo(
-        () => new Map(agents.map((candidate) => [candidate.id, candidate])),
-        [agents],
-      );
-
-      // Auto-expand newly spawned running agents and their latest step unless manually toggled.
-      React.useEffect(() => {
-        if (agents.length === 0) return;
-        setOpenAgents((prev) => {
-          let changed = false;
-          const next = new Set(prev);
-          for (const agent of agents) {
-            if (!seenAgentsRef.current.has(agent.id)) {
-              seenAgentsRef.current.add(agent.id);
-              if ((agent.depth === 0 || agent.endedAt === null) && !manualAgentsRef.current.has(agent.id)) {
-                next.add(agent.id);
-                changed = true;
-              }
-            }
-          }
-          return changed ? next : prev;
-        });
-        setOpenSteps((prev) => {
-          let changed = false;
-          const next = new Set(prev);
-          for (const agent of agents) {
-            for (let i = 0; i < agent.steps.length; i++) {
-              const step = agent.steps[i];
-              const stepKey = `${agent.id}:${step.index}`;
-              const isLatest = i === agent.steps.length - 1;
-              if (!seenStepsRef.current.has(stepKey)) {
-                seenStepsRef.current.add(stepKey);
-                if (isLatest && !manualStepsRef.current.has(stepKey)) {
-                  next.add(stepKey);
-                  changed = true;
-                }
-              }
-            }
-          }
-          return changed ? next : prev;
-        });
-      }, [agents]);
-
-      if (typeof sessionId !== 'string' || !sessionId) return null;
-      if (runs.length === 0 && engine !== ENGINE_RAF) return null;
-      const activeSummary = runs.find((candidate) => candidate.id === selectedRunId) ?? runs[0];
-      if (!activeSummary) return null;
-      if (dismissedRunId === activeSummary.id && activeSummary.status !== 'running') return null;
-
-      const status = run?.status ?? activeSummary.status ?? 'running';
-      const question = run?.question ?? activeSummary.question ?? '';
-      const usage = run !== null ? usageOfRun(run) : activeSummary.usage ?? usageOfCalls([]);
-      const duration =
-        run !== null
-          ? (run.endedAt ?? Date.now()) - run.startedAt
-          : (activeSummary.endedAt ?? Date.now()) - activeSummary.startedAt;
-
-      const toggleAgent = (agentId) => {
-        manualAgentsRef.current.add(agentId);
-        setOpenAgents((current) => {
-          const next = new Set(current);
-          if (next.has(agentId)) next.delete(agentId);
-          else next.add(agentId);
-          return next;
-        });
-      };
-
-      const focusOnlyAgent = (agentId) => {
-        for (const a of agents) manualAgentsRef.current.add(a.id);
-        setOpenAgents(new Set([agentId]));
-        const target = agentById.get(agentId);
-        if (target && target.steps.length > 0) {
-          const latestStep = target.steps[target.steps.length - 1];
-          setOpenSteps((curr) => {
-            const next = new Set(curr);
-            next.add(`${target.id}:${latestStep.index}`);
-            return next;
-          });
-        }
-      };
-
-      const expandAll = () => {
-        setOpenAgents(new Set(agents.map((a) => a.id)));
-        const allStepKeys = [];
-        for (const a of agents) {
-          for (const s of a.steps) allStepKeys.push(`${a.id}:${s.index}`);
-        }
-        setOpenSteps(new Set(allStepKeys));
-      };
-
-      const collapseAll = () => {
-        for (const a of agents) manualAgentsRef.current.add(a.id);
-        setOpenAgents(new Set());
-      };
-
-      const toggleStep = (stepKey) => {
-        manualStepsRef.current.add(stepKey);
-        setOpenSteps((current) => {
-          const next = new Set(current);
-          if (next.has(stepKey)) next.delete(stepKey);
-          else next.add(stepKey);
-          return next;
-        });
-      };
-
-      const toggleTool = (toolKey) => {
-        setOpenTools((current) => {
-          const next = new Set(current);
-          if (next.has(toolKey)) next.delete(toolKey);
-          else next.add(toolKey);
-          return next;
-        });
-      };
-
-      const openSubAgent = (agentId) => {
-        setDockCollapsed(false);
-        manualAgentsRef.current.add(agentId);
-        setOpenAgents((current) => {
-          const next = new Set(current);
-          next.add(agentId);
-          return next;
-        });
-        const target = agentById.get(agentId);
-        if (target && target.steps.length > 0) {
-          const latest = target.steps[target.steps.length - 1];
-          setOpenSteps((current) => {
-            const next = new Set(current);
-            next.add(`${target.id}:${latest.index}`);
-            return next;
-          });
-        }
-      };
-
-      return h(
-        'section',
-        {
-          className: 'rafx-dock',
-          'data-collapsed': dockCollapsed ? 'true' : undefined,
-          'aria-label': 'RAF Live Execution Dock',
-        },
-        h(
-          'header',
-          { className: 'rafx-dockTop' },
-          h(
-            'div',
-            { className: 'rafx-dockTopLeft' },
-            h('span', { className: 'rafx-dockBadge' }, 'RAF'),
-            h(
-              'span',
-              { className: 'rafx-dockStatus', 'data-status': status },
-              h('span', { className: 'rafx-runsDot', 'aria-hidden': true }),
-              runStatusLabel(t, status),
-            ),
-            h('span', { className: 'rafx-dockQuestion', title: question }, question),
-          ),
-          h(
-            'div',
-            { className: 'rafx-dockTopRight' },
-            h(
-              'span',
-              { className: 'rafx-dockMetrics' },
-              [
-                formatDuration(duration),
-                `${run?.stepCount ?? activeSummary.stepCount ?? 0} steps`,
-                `${agents.length || (run?.agentCount ?? activeSummary.agentCount ?? 1)} agents`,
-                `${formatTokens(usage.input)}/${formatTokens(usage.output)} tok`,
-                `root cache ${formatPercent(usage.rootCacheHitRate ?? usage.cacheHitRate)}`,
-              ].join(' · '),
-            ),
-            runs.length > 1
-              ? h(
-                  'select',
-                  {
-                    className: 'rafx-dockSelect',
-                    value: selectedRunId ?? activeSummary.id,
-                    'aria-label': t('view.selectRun'),
-                    onChange: (event) => {
-                      manualRunRef.current = true;
-                      setDismissedRunId(null);
-                      setSelectedRunId(event.target.value);
-                    },
-                  },
-                  runs.map((candidate) =>
-                    h(
-                      'option',
-                      { key: candidate.id, value: candidate.id },
-                      `${formatClock(candidate.startedAt)} · ${runStatusLabel(t, candidate.status)} · ${candidate.question.slice(0, 36)}`,
-                    ),
-                  ),
-                )
-              : null,
-            !dockCollapsed
-              ? h(
-                  'button',
-                  { type: 'button', className: 'rafx-dockBtn', onClick: expandAll },
-                  t('view.expandAll'),
-                )
-              : null,
-            !dockCollapsed
-              ? h(
-                  'button',
-                  { type: 'button', className: 'rafx-dockBtn', onClick: collapseAll },
-                  t('view.collapseAll'),
-                )
-              : null,
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'rafx-dockBtn',
-                onClick: () => setDockCollapsed((c) => !c),
-                'aria-expanded': !dockCollapsed,
-              },
-              dockCollapsed ? '▸' : '▾',
-            ),
-            status !== 'running'
-              ? h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'rafx-dockBtn',
-                    'aria-label': t('view.close'),
-                    onClick: () => setDismissedRunId(activeSummary.id),
-                  },
-                  '×',
-                )
-              : null,
-          ),
-        ),
-        dockCollapsed
-          ? null
-          : h(
-              'div',
-              { className: 'rafx-dockBody' },
-              agents.length === 0
-                ? h('div', { className: 'rafx-hint' }, run?.error ?? t('view.noEvents'))
-                : agents.map((agent) => {
-                    const isOpen = openAgents.has(agent.id);
-                    const aStatus = agentStatus(agent);
-                    return h(
-                      'div',
-                      {
-                        key: agent.id,
-                        className: 'rafx-treeAgent',
-                        'data-open': isOpen ? 'true' : undefined,
-                        'data-status': aStatus,
-                        style: { marginLeft: `${Math.min(agent.depth * 14, 42)}px` },
-                      },
-                      h(
-                        'div',
-                        { className: 'rafx-treeAgentHead' },
-                        h(
-                          'button',
-                          {
-                            type: 'button',
-                            className: 'rafx-treeAgentToggle',
-                            'aria-expanded': isOpen,
-                            onClick: () => toggleAgent(agent.id),
-                          },
-                          h('span', { className: 'rafx-treeAgentChevron', 'aria-hidden': true }, isOpen ? '▾' : '▸'),
-                          h('span', { className: 'rafx-agentDot', 'data-status': aStatus, 'aria-hidden': true }),
-                          h(
-                            'span',
-                            { className: 'rafx-treeAgentTitle' },
-                            agent.depth === 0 ? t('view.root') : agent.name,
-                          ),
-                          h('span', { className: 'rafx-treeBadge' }, `d${agent.depth}`),
-                          agent.scope ? h('span', { className: 'rafx-treeBadge' }, `scope=${agent.scope}`) : null,
-                          agent.isFollowUp ? h('span', { className: 'rafx-treeBadge' }, 'follow-up') : null,
-                          h('span', { className: 'rafx-treeStage' }, agent.currentStage),
-                          !isOpen && agent.lastActivity
-                            ? h('span', { className: 'rafx-treeTicker', title: agent.lastActivity }, agent.lastActivity)
-                            : null,
-                        ),
-                        h(
-                          'span',
-                          { className: 'rafx-treeMeta' },
-                          `${agent.steps.length} steps · ${formatTokens(agent.usage.input)}/${formatTokens(agent.usage.output)} tok · cache ${formatPercent(agent.usage.cacheHitRate)}`,
-                        ),
-                        agents.length > 1
-                          ? h(
-                              'button',
-                              {
-                                type: 'button',
-                                className: 'rafx-dockBtn',
-                                onClick: () => focusOnlyAgent(agent.id),
-                              },
-                              t('view.onlyThis'),
-                            )
-                          : null,
-                      ),
-                      !isOpen
-                        ? null
-                        : h(
-                            'div',
-                            { className: 'rafx-treeAgentBody' },
-                            agent.question
-                              ? h(
-                                  'div',
-                                  { className: 'rafx-treeTask' },
-                                  h('span', null, agent.question),
-                                  agent.parentId !== null
-                                    ? h(
-                                        'button',
-                                        {
-                                          type: 'button',
-                                          className: 'rafx-linkButton',
-                                          onClick: () => openSubAgent(agent.parentId),
-                                        },
-                                        `← ${t('view.parent')} (${agent.parentName ?? 'root'})`,
-                                      )
-                                    : null,
-                                )
-                              : null,
-                            agent.steps.length === 0
-                              ? h('div', { className: 'rafx-hint' }, t('view.noSteps'))
-                              : agent.steps.map((step) => {
-                                  const stepKey = `${agent.id}:${step.index}`;
-                                  return h(RunStep, {
-                                    key: stepKey,
-                                    t,
-                                    step,
-                                    open: openSteps.has(stepKey),
-                                    onToggleStep: () => toggleStep(stepKey),
-                                    openTools,
-                                    onToggleTool: toggleTool,
-                                    agentById,
-                                    onOpenAgent: openSubAgent,
-                                  });
-                                }),
-                            agent.errors.length === 0
-                              ? null
-                              : h(
-                                  'div',
-                                  { className: 'rafx-agentErrors' },
-                                  agent.errors.map((item, idx) =>
-                                    h(
-                                      'div',
-                                      { className: 'rafx-error', key: `${agent.id}:err:${idx}` },
-                                      String(item.message ?? item.type),
-                                    ),
-                                  ),
-                                ),
-                          ),
-                    );
-                  }),
             ),
       );
     }
@@ -2720,6 +2291,202 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function parseBranchArgs(raw) {
+      if (typeof raw !== 'string' || raw.trim() === '') return null;
+      try {
+        const value = JSON.parse(raw);
+        return value !== null && typeof value === 'object' ? value : null;
+      } catch {
+        return null;
+      }
+    }
+
+    function branchTasksOf(args) {
+      if (args === null || typeof args !== 'object') return [];
+      const raw = Array.isArray(args.tasks)
+        ? args.tasks
+        : typeof args.task === 'string'
+          ? [{ scope: args.scope, task: args.task }]
+          : [];
+      const tasks = [];
+      for (const item of raw) {
+        if (typeof item === 'string') {
+          if (item.trim() !== '') tasks.push({ scope: '', task: item });
+          continue;
+        }
+        if (item !== null && typeof item === 'object' && typeof item.task === 'string' && item.task.trim() !== '') {
+          tasks.push({ scope: typeof item.scope === 'string' ? item.scope : '', task: item.task });
+        }
+      }
+      return tasks;
+    }
+
+    function branchResultText(block) {
+      const parts = [];
+      if (Array.isArray(block.content)) {
+        for (const item of block.content) {
+          if (item !== null && typeof item === 'object' && item.type === 'text' && typeof item.text === 'string') {
+            parts.push(item.text);
+          } else if (item !== null && item !== undefined) {
+            try {
+              parts.push(JSON.stringify(item, null, 2));
+            } catch {
+              // Skip a value that JSON cannot render.
+            }
+          }
+        }
+      }
+      if (parts.length === 0 && block.error !== undefined && block.error !== null) {
+        if (typeof block.error === 'string') parts.push(block.error);
+        else if (typeof block.error.name === 'string') {
+          parts.push(`${block.error.name}${typeof block.error.code === 'string' ? `: ${block.error.code}` : ''}`);
+        }
+      }
+      return parts.join('\n').trim();
+    }
+
+    function splitBranchResults(text) {
+      const results = new Map();
+      if (typeof text !== 'string' || text === '') return results;
+      const parts = text.split(/\n(?=\[Subtask #\d+\])/);
+      for (const part of parts) {
+        const match = /^\[Subtask #(\d+)\]\s*/.exec(part.trimStart());
+        if (match === null) continue;
+        const index = Number(match[1]) - 1;
+        results.set(index, part.trimStart().slice(match[0].length).trim());
+      }
+      return results;
+    }
+
+    function cleanBranchResult(result, task) {
+      let text = result;
+      text = text.replace(/^\[scope=[^\]]*\]\s*/i, '');
+      if (task !== '' && text.startsWith(task)) text = text.slice(task.length);
+      text = text.replace(/^\[scope=[^\]]*\]\s*/i, '');
+      return text.trim();
+    }
+
+    /** Native tool row for raf_branch: lists every branch task and its result. */
+    function RafBranchToolView(props) {
+      const t = typeof props.t === 'function' ? props.t : (key) => key;
+      const [expanded, setExpanded] = React.useState(() => {
+        const initial = props.block;
+        return !(props.phase === 'result' || (initial !== null && typeof initial === 'object' && 'kind' in initial));
+      });
+      const block = props.block;
+      const done = block !== null && typeof block === 'object' && 'kind' in block;
+      const phase = props.phase !== undefined ? props.phase : done ? 'result' : block?.phase;
+      const argsRaw = done ? block.call?.argsRaw ?? '' : block?.argsRaw ?? '';
+      const tasks = branchTasksOf(parseBranchArgs(argsRaw));
+      const result = done ? branchResultText(block) : '';
+      const perTask = done ? splitBranchResults(result) : new Map();
+      const state = done
+        ? block.error?.code === 'interrupted'
+          ? 'stopped'
+          : block.isError === true || block.meta?.stopped === true
+            ? 'error'
+            : 'ok'
+        : phase === 'preparing'
+          ? 'preparing'
+          : 'running';
+      const scopes = [];
+      for (const task of tasks) {
+        if (task.scope !== '' && !scopes.includes(task.scope)) scopes.push(task.scope);
+      }
+      const countLabel = tasks.length > 0 ? `${t('tool.branch.tasks')}: ${tasks.length}` : '';
+      const stateLabel =
+        state === 'error'
+          ? t('tool.branch.failed')
+          : state === 'stopped'
+            ? t('tool.branch.stopped')
+            : !done
+              ? t('tool.branch.running')
+              : '';
+      const summary = [countLabel, ...scopes, stateLabel].filter(Boolean).join(' · ');
+      const expandable = tasks.length > 0 || result !== '';
+      const open = expanded && expandable;
+      const toggle = () => {
+        if (expandable) setExpanded((value) => !value);
+      };
+      const onKeyDown = (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          toggle();
+        }
+      };
+      return h(
+        'div',
+        { className: 'rafx-branch', 'data-state': state },
+        h(
+          'div',
+          {
+            className: 'rafx-branchHead',
+            'data-state': state,
+            role: expandable ? 'button' : undefined,
+            tabIndex: expandable ? 0 : undefined,
+            'aria-expanded': expandable ? open : undefined,
+            onClick: toggle,
+            onKeyDown,
+          },
+          h('span', { className: 'rafx-branchChevron', 'aria-hidden': true }, expandable ? (open ? '▾' : '▸') : ''),
+          h('span', { className: 'rafx-branchIcon', 'aria-hidden': true }, h(RafMark, { size: 14 })),
+          h('span', { className: 'rafx-branchTitle' }, t('tool.branch.title')),
+          ...(summary !== ''
+            ? [
+                h('span', { className: 'rafx-branchSep', 'aria-hidden': true }),
+                h('span', { className: 'rafx-branchSummary' }, summary),
+              ]
+            : []),
+        ),
+        open
+          ? h(
+              'div',
+              { className: 'rafx-branchBody' },
+              tasks.map((task, index) => {
+                const taskResult = perTask.get(index);
+                const cleanedResult = taskResult === undefined ? undefined : cleanBranchResult(taskResult, task.task);
+                return h(
+                  'div',
+                  { className: 'rafx-branchTaskWrap', key: `branch-task:${index}` },
+                  h(
+                    'div',
+                    { className: 'rafx-branchTask' },
+                    h('span', { className: 'rafx-branchTaskNo' }, `#${index + 1}`),
+                    task.scope !== '' ? h('span', { className: 'rafx-branchScope' }, task.scope) : null,
+                    h('span', { className: 'rafx-branchTaskText' }, task.task),
+                  ),
+                  cleanedResult !== undefined && cleanedResult !== ''
+                    ? h('div', { className: 'rafx-branchTaskResult' }, cleanedResult)
+                    : null,
+                );
+              }),
+              result !== '' && perTask.size === 0
+                ? h(
+                    'div',
+                    { className: 'rafx-branchResult' },
+                    h('span', { className: 'rafx-branchResultLabel' }, t('tool.branch.result')),
+                    h('pre', { className: 'rafx-branchResultText' }, result),
+                  )
+                : null,
+              typeof props.inspect === 'function'
+                ? h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'rafx-branchInspect',
+                      onClick: (event) => {
+                        event.stopPropagation();
+                        props.inspect();
+                      },
+                    },
+                    t('view.inspector'),
+                  )
+                : null,
+            )
+          : null,
+      );
+    }
+
     function apply(ctx) {
       ctx.effect(() => {
         const style = document.createElement('style');
@@ -2731,6 +2498,21 @@ window.__ModuleLoader__.load({
 
       ctx.effect(() => ctx.locale.register(NS, { en: EN, ru: RU }), 'raf: dictionaries');
       const t = ctx.locale.bind(NS);
+
+      ctx.effect(
+        () =>
+          ctx.slots.inject('tool.call.toolview', () =>
+            ctx.slots.register(
+              {
+                name: 'tool.call.toolview',
+                key: 'raf_branch',
+                locale: NS,
+              },
+              RafBranchToolView,
+            ),
+          ),
+        'raf: branch tool view',
+      );
 
       settingsStore.hydrate();
 
@@ -2804,39 +2586,6 @@ window.__ModuleLoader__.load({
             ),
           ),
         'raf: composer switch',
-      );
-
-      ctx.effect(
-        () =>
-          ctx.slots.inject('conversation.input.dock', () =>
-            ctx.slots.register(
-              {
-                name: 'conversation.input.dock',
-                id: 'raf-live',
-                order: 5,
-                locale: NS,
-              },
-              RafLiveDock,
-            ),
-          ),
-        'raf: live dock',
-      );
-
-      ctx.effect(
-        () =>
-          ctx.slots.inject('conversation.view', () =>
-            ctx.slots.register(
-              {
-                name: 'conversation.view',
-                id: 'raf-runs',
-                order: 30,
-                locale: NS,
-                label: () => t('view.label'),
-              },
-              RafRunsView,
-            ),
-          ),
-        'raf: runs view',
       );
 
       ctx.effect(

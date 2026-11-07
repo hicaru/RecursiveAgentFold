@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -31,7 +31,7 @@ const RAF_ROOT_MAX_STEPS = 32;
 const RAF_ROOT_MAX_OUTPUT = 16000;
 const RAF_QUERY_MAX_OUTPUT = 4096;
 
-export const inject = ['llm'];
+export const inject = ['agents', 'llm', 'tools'];
 
 const rafInternal = new AsyncLocalStorage();
 
@@ -350,79 +350,6 @@ function shortText(value, limit) {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-function formatTrace(events, settings, outer, usage) {
-  const lines = [];
-  lines.push('RAF execution trace (diagnostic data, not model reasoning).');
-  lines.push(`model: ${outer.provider}/${outer.model}`);
-  lines.push(`settings: depth=${settings.depth} reserve=${settings.reserve} readers=${settings.concurrency}`);
-  if (usage !== null && typeof usage === 'object') {
-    lines.push(
-      `usage: in=${usage.input ?? 0} out=${usage.output ?? 0} cached=${usage.cached ?? 0} root_cache=${Math.round((usage.rootCacheHitRate ?? 0) * 100)}% total_cache=${Math.round((usage.cacheHitRate ?? 0) * 100)}%`,
-    );
-  }
-  for (const event of events) {
-    switch (event.type) {
-      case 'run_start':
-        lines.push(`[run] ${event.agent} depth=${event.depth} question=${shortText(event.question, 300)}`);
-        break;
-      case 'step_start':
-        lines.push(`[step ${event.step}] ${event.agent} ctx=${event.contextTokens} blocks=${event.blocks}`);
-        break;
-      case 'llm_call':
-        lines.push(
-          `  [llm ${event.role}] ${event.model} in=${event.usage.promptTokens} out=${event.usage.completionTokens} cached=${event.usage.cachedTokens} ${event.latencyMs}ms${event.finishReason !== undefined ? ` finish=${event.finishReason}` : ''}`,
-        );
-        break;
-      case 'llm_response':
-        lines.push(`  [response] ${shortText(event.text, 600)}`);
-        break;
-      case 'fold': {
-        const directive = event.outcome?.directive ?? event.requested;
-        const range = Array.isArray(directive?.range) ? `[${directive.range.join(',')}]` : '';
-        lines.push(`  [fold${event.outcome?.kind ? ` ${event.outcome.kind}` : ''}] ${range} ${shortText(directive?.summary, 500)}`);
-        if (Array.isArray(event.outcome?.corrections) && event.outcome.corrections.length > 0) {
-          lines.push(`    corrections: ${shortText(event.outcome.corrections.join('; '), 400)}`);
-        }
-        break;
-      }
-      case 'tool_call':
-        lines.push(`  [tool ${event.action.name}] ${shortText(event.action.arguments, 500)}`);
-        break;
-      case 'tool_result':
-        lines.push(
-          `  [result ${event.name}] tokens=${event.tokens}${event.error ? ` error=${event.error}` : ''} ${shortText(event.observation, 700)}`,
-        );
-        break;
-      case 'llm_query': {
-        const extra = event.usage
-          ? ` calls=${event.calls ?? 0} in=${event.usage.promptTokens} out=${event.usage.completionTokens} cached=${event.usage.cachedTokens}`
-          : '';
-        lines.push(
-          `  [llm_query] mode=${event.mode} chunks=${event.chunks} relevant=${event.relevant} errors=${event.errors} memo=${event.memoHits} chunkTokens=${event.chunkTokens}${extra} query=${shortText(event.query, 300)}`,
-        );
-        break;
-      }
-      case 'format_error':
-        lines.push(`  [format_error step ${event.step}] ${shortText(event.errors.join('; '), 500)}`);
-        break;
-      case 'error':
-        lines.push(`  [error${event.step === undefined ? '' : ` step ${event.step}`}] ${shortText(event.message, 600)}`);
-        break;
-      case 'answer':
-        lines.push(`  [answer step ${event.step}] ${shortText(event.answer, 600)}`);
-        break;
-      case 'run_end':
-        lines.push(`[end] ${event.agent} steps=${event.steps} terminated=${event.terminated}`);
-        break;
-      default:
-        lines.push(`  [${String(event.type)}]`);
-    }
-  }
-  const text = lines.join('\n');
-  return text.length > 12000 ? `${text.slice(0, 12000)}\n… trace truncated` : text;
-}
-
-
 function sanitizeRunEvent(event) {
   switch (event.type) {
     case 'llm_response':
@@ -446,13 +373,6 @@ function sanitizeRunEvent(event) {
 const RAF_DSH_TOOLS = Object.freeze(
   new Set(['read', 'glob', 'grep', 'bash', 'write', 'edit', 'apply_patch', 'lsp', 'web_search', 'web_fetch']),
 );
-const RAF_DSH_NAME = Object.freeze({
-  read: 'read_file',
-  grep: 'grep_files',
-  search: 'search_files',
-  outline: 'outline_files',
-});
-
 function contentText(blocks) {
   if (!Array.isArray(blocks)) return '';
   const parts = [];
@@ -497,6 +417,22 @@ function toDocId(prefix, rawLabel, fallbackIndex) {
   return `${prefix}_${cleaned || String(fallbackIndex)}`;
 }
 
+function indexExternalToolResult(toolName, args, text, store, sessionState) {
+  if (toolName !== 'read' && toolName !== 'web_fetch') return text;
+  if (text.startsWith('Tool error:') || text.length < 1200) return text;
+  const rawTarget =
+    args?.path ?? args?.file_path ?? args?.filePath ?? args?.url ?? `${toolName}_${(sessionState?.docs?.size ?? 0) + 1}`;
+  const docId = toDocId(toolName === 'web_fetch' ? 'web' : 'file', rawTarget, (sessionState?.docs?.size ?? 0) + 1);
+  const title = String(rawTarget);
+  try {
+    const doc = store.add(text, { id: docId, title });
+    sessionState?.docs?.set(docId, { title, text });
+    return `[Indexed in ContextStore as document "${docId}" (${doc.lines.length} lines, ~${doc.tokens} tokens) — use search, outline, grep, tally, read, branch(scope="${docId}"), or llm_query on "${docId}"]\n${text}`;
+  } catch {
+    return text;
+  }
+}
+
 function createDshTools(ctx, sessionId, signal, sessionState) {
   const agents = ctx.get('agents');
   const tools = ctx.get('tools');
@@ -517,7 +453,7 @@ function createDshTools(ctx, sessionId, signal, sessionState) {
     if (definition.deferLoading === true) continue;
     if (!RAF_DSH_TOOLS.has(definition.name)) continue;
     extra.push({
-      name: RAF_DSH_NAME[definition.name] ?? definition.name,
+      name: definition.name,
       description: definition.description,
       parameters: definition.parameters,
       execute: async (args, toolCtx) => {
@@ -536,24 +472,7 @@ function createDshTools(ctx, sessionId, signal, sessionState) {
           });
           const first = Array.isArray(batch.results) ? batch.results[0] : undefined;
           const text = toolResultText(first);
-          if (
-            !text.startsWith('Tool error:') &&
-            text.length >= 1200 &&
-            (definition.name === 'read' || definition.name === 'web_fetch')
-          ) {
-            const rawTarget =
-              args?.path ?? args?.file_path ?? args?.filePath ?? args?.url ?? `${definition.name}_${(sessionState?.docs?.size ?? 0) + 1}`;
-            const docId = toDocId(definition.name === 'web_fetch' ? 'web' : 'file', rawTarget, (sessionState?.docs?.size ?? 0) + 1);
-            const title = String(rawTarget);
-            try {
-              const doc = toolCtx.store.add(text, { id: docId, title });
-              sessionState?.docs?.set(docId, { title, text });
-              return `[Indexed in ContextStore as document "${docId}" (${doc.lines.length} lines, ~${doc.tokens} tokens) — use search, outline, grep, tally, read, branch(scope="${docId}"), or llm_query on "${docId}"]\n${text}`;
-            } catch {
-              return text;
-            }
-          }
-          return text;
+          return indexExternalToolResult(definition.name, args, text, toolCtx.store, sessionState);
         } catch (error) {
           return `Tool ${definition.name} failed: ${error instanceof Error ? error.message : String(error)}`;
         }
@@ -659,73 +578,182 @@ function sessionPosition(session) {
   return { turn, step };
 }
 
-function createInlineTrace(ctx, outer, signal) {
-  const session = getLiveSession(ctx, outer.sessionId);
-  if (session === undefined) return () => {};
-  const { turn, step } = sessionPosition(session);
-  const pending = new Map();
-  let failed = false;
-  const append = (type, data, opts) => {
-    if (failed) return undefined;
-    try {
-      return session.append(type, data, ...(opts === undefined ? [] : [opts]));
-    } catch (error) {
-      failed = true;
-      console.error('RAF: cannot append inline session event', error);
-      return undefined;
+const activeTurns = new Map();
+const MAX_ACTIVE_TURNS = 100;
+
+function latestHumanMessage(messages) {
+  if (!Array.isArray(messages)) return undefined;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message === null || typeof message !== 'object') continue;
+    if (message.role === 'user' && message.source !== null && typeof message.source === 'object' && message.source.kind === 'user') {
+      return message;
     }
+  }
+  return undefined;
+}
+
+function toolResultFor(messages, callId) {
+  if (!Array.isArray(messages) || typeof callId !== 'string') return undefined;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message === null || typeof message !== 'object' || message.role !== 'tool') continue;
+    if (message.toolCallId !== callId && message.source?.callId !== callId) continue;
+    return { text: contentText(message.content), isError: message.isError === true };
+  }
+  return undefined;
+}
+
+function addUsage(left, right) {
+  return {
+    promptTokens: left.promptTokens + right.promptTokens,
+    completionTokens: left.completionTokens + right.completionTokens,
+    cachedTokens: left.cachedTokens + right.cachedTokens,
+    ...(left.reasoningTokens !== undefined || right.reasoningTokens !== undefined
+      ? { reasoningTokens: (left.reasoningTokens ?? 0) + (right.reasoningTokens ?? 0) }
+      : {}),
   };
-  return (event) => {
-    if (signal?.aborted || event === null || typeof event !== 'object') return;
-    try {
-      if (event.type === 'tool_call') {
-        const action = event.action !== null && typeof event.action === 'object' ? event.action : {};
-        const name = typeof action.name === 'string' && action.name !== '' ? action.name : 'tool';
-        const args = JSON.stringify(action.arguments ?? {});
-        const callId = randomUUID();
-        const label = String(event.agent ?? 'root');
-        const motivation = String(event.motivation ?? '').replace(/\s+/g, ' ').trim().slice(0, 400);
-        const line = motivation === '' ? `${label} · ${name}` : `${label} · ${motivation}`;
-        const message = {
-          id: randomUUID(),
-          role: 'assistant',
-          content: [
-            { type: 'text', text: line },
-            { type: 'tool-call', id: callId, name, arguments: args },
-          ],
-          source: { kind: 'model', provider: outer.provider, model: outer.model },
-        };
-        if (append('assistant/message', { turn, step, message, stream: [] }, { surfaceOp: 'append' }) === undefined) return;
-        const call = append('tool/call', { turn, step, callId, name, arguments: args });
-        const key = `${label}\u0000${Number(event.step ?? 0)}\u0000${name}`;
-        const list = pending.get(key) ?? [];
-        list.push({ callId, callSeq: call?.seq });
-        pending.set(key, list);
-        return;
+}
+
+function stepUsageChunk(usage) {
+  return {
+    type: 'usage',
+    usage: {
+      inputTokens: usage.promptTokens,
+      outputTokens: usage.completionTokens,
+      cacheReadTokens: usage.cachedTokens,
+      totalTokens: usage.promptTokens + usage.completionTokens,
+    },
+  };
+}
+
+function runUsageOf(result) {
+  const total = result.usage.total();
+  const byRole = result.usage.byRole();
+  return {
+    input: total.promptTokens,
+    output: total.completionTokens,
+    cached: total.cachedTokens,
+    cacheHitRate: total.cacheHitRate,
+    rootCacheHitRate: byRole.root?.cacheHitRate ?? 0,
+    branchCacheHitRate: byRole.branch?.cacheHitRate ?? 0,
+    latencyMs: total.latencyMs,
+    calls: total.calls,
+    errors: total.errors,
+  };
+}
+
+function finishRun(turn, result, signal) {
+  if (turn.run === undefined) return;
+  const status = signal?.aborted ? 'aborted' : result.terminated === 'error' ? 'error' : 'done';
+  turn.finish({
+    status,
+    termination: result.terminated,
+    answer: typeof result.answer === 'string' ? result.answer : '',
+    error: result.error ?? null,
+    usage: runUsageOf(result),
+  });
+  turn.run = undefined;
+}
+
+function errorStream(message) {
+  const text = `RAF engine error: ${message}`;
+  return [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'text-delta', index: 0, text },
+    { type: 'block-end', index: 0, block: { type: 'text', text } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ];
+}
+
+/**
+ * Register RAF tool schemas as native DSH tools. The native loop executes the
+ * call; the engine receives the observation through the next step's submit().
+ */
+function registerRafTools(toolsCtx, raf, state) {
+  const templateLlm = {
+    profile: { name: 'raf-native-tools', contextWindow: 128_000, maxOutputTokens: 1024 },
+    async complete() {
+      throw new Error('RAF native tool template has no model');
+    },
+  };
+  const template = new raf.RecursiveAgentFold({
+    rootLLM: templateLlm,
+    queryLLM: templateLlm,
+    store: new raf.ContextStore(),
+    maxDepth: DEPTH_MAX,
+    toolNamePrefix: 'raf_',
+  });
+  const disposers = [];
+  try {
+    for (const tool of template.toolsFor(0)) {
+      if (!tool.name.startsWith('raf_')) continue;
+      const definition = {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters ?? { type: 'object' },
+        output: {
+          schema: { type: 'string' },
+          render: (_args, value) => [{ type: 'text', text: String(value) }],
+        },
+        async execute(args, exec) {
+          const agent = exec?.agent;
+          const sessionId = agent?.session?.id ?? agent?.id;
+          const turn = typeof sessionId === 'string' ? activeTurns.get(sessionId) : undefined;
+          if (turn === undefined) throw new Error(`RAF turn is not active for ${tool.name}`);
+          const live = turn.tools.get(tool.name);
+          if (live === undefined) throw new Error(`RAF tool ${tool.name} is not available`);
+          const before = turn.engine.usage.total();
+          const observation = await live.execute(args ?? {}, {
+            store: turn.store,
+            usage: turn.engine.usage,
+            depth: 0,
+            agentName: 'root',
+            step: turn.step,
+            emit: turn.emit,
+            signal: exec?.signal ?? turn.signal,
+            board: turn.engine.board,
+            ancestorTasks: [turn.question],
+          });
+          const after = turn.engine.usage.total();
+          turn.pendingToolUsage = {
+            promptTokens: after.promptTokens - before.promptTokens,
+            completionTokens: after.completionTokens - before.completionTokens,
+            cachedTokens: after.cachedTokens - before.cachedTokens,
+            ...(after.reasoningTokens !== undefined || before.reasoningTokens !== undefined
+              ? { reasoningTokens: (after.reasoningTokens ?? 0) - (before.reasoningTokens ?? 0) }
+              : {}),
+          };
+          turn.pendingObservation = observation;
+          return observation;
+        },
+      };
+      disposers.push(
+        toolsCtx.tools.register(definition, {
+          when: ({ agent }) => {
+            const sessionId = agent?.session?.id ?? agent?.id;
+            return typeof sessionId === 'string' && engineOf(state, sessionId) === ENGINE_RAF;
+          },
+        }),
+      );
+    }
+  } catch (error) {
+    for (const dispose of disposers) {
+      try {
+        dispose();
+      } catch {
+        // Ignore partial teardown failures.
       }
-      if (event.type === 'tool_result') {
-        const key = `${String(event.agent ?? 'root')}\u0000${Number(event.step ?? 0)}\u0000${String(event.name ?? '')}`;
-        const list = pending.get(key);
-        const item = list === undefined ? undefined : list.shift();
-        if (item === undefined) return;
-        const observation = shortText(event.observation, 6000);
-        const message = {
-          id: randomUUID(),
-          role: 'tool',
-          toolCallId: item.callId,
-          source: { kind: 'tool', callId: item.callId },
-          content: [{ type: 'text', text: observation === '' ? '—' : observation }],
-          isError: event.error !== undefined,
-        };
-        append(
-          'tool/result',
-          { turn, step, message },
-          { surfaceOp: 'append', ...(item.callSeq === undefined ? {} : { sourceEventSeqs: [item.callSeq] }) },
-        );
+    }
+    throw error;
+  }
+  return () => {
+    for (const dispose of disposers) {
+      try {
+        dispose();
+      } catch {
+        // Ignore teardown failures.
       }
-    } catch (error) {
-      failed = true;
-      console.error('RAF: cannot render inline session event', error);
     }
   };
 }
@@ -752,218 +780,242 @@ function getSessionState(sessionId, raf) {
   return state;
 }
 
-async function* rafStream(ctx, outer, settings, runs) {
-  const signal = outer.signal;
-  let run;
-  let finished = false;
-  try {
-    if (signal?.aborted) throw signal.reason ?? new Error('aborted');
-    const messages = Array.isArray(outer.messages) ? outer.messages : [];
-    const userIndex = latestUserIndex(messages);
-    const question = questionOf(messages, userIndex);
-    const effectiveQuestion = question === '' ? 'Answer the latest request.' : question;
-    const contextMessages = userIndex < 0 ? messages : messages.filter((_message, index) => index !== userIndex);
-    const transcript = renderTranscript(contextMessages);
-    run = runs.create({
-      sessionId: outer.sessionId,
-      model: `${outer.provider}/${outer.model}`,
-      settings: { ...settings },
-      question: effectiveQuestion,
-    });
-    const raf = await loadRaf();
-    const sessionState = getSessionState(outer.sessionId, raf);
-    const contextWindow = contextWindowOf(ctx, outer.sessionId);
-    const rootTarget = resolveTierTarget(outer, settings, 'ROOT');
-    const branchTarget = resolveTierTarget(outer, settings, 'BRANCH', rootTarget);
-    const queryTarget = resolveTierTarget(outer, settings, 'QUERY', rootTarget);
-    const rootProfile = {
-      name: rootTarget.model,
-      contextWindow,
-      maxOutputTokens: RAF_ROOT_MAX_OUTPUT,
-    };
-    const branchProfile = {
-      name: branchTarget.model,
-      contextWindow,
-      maxOutputTokens: RAF_ROOT_MAX_OUTPUT,
-    };
-    const queryProfile = {
-      name: queryTarget.model,
-      contextWindow,
-      maxOutputTokens: RAF_QUERY_MAX_OUTPUT,
-    };
-    const store = new raf.ContextStore();
-    if (transcript !== '') store.add(transcript, { id: 'session', title: 'DSH session transcript' });
-    for (const [docId, docEntry] of sessionState.docs.entries()) {
-      if (docId !== 'session' && typeof docEntry?.text === 'string' && docEntry.text !== '') {
-        store.add(docEntry.text, { id: docId, title: docEntry.title ?? docId });
-      }
-    }
-    const rootLLM = new DshLlmClient(ctx, outer, rootProfile, outer.reasoningEffort, rootTarget);
-    const branchLLM =
-      branchTarget.provider !== rootTarget.provider || branchTarget.model !== rootTarget.model
-        ? new DshLlmClient(ctx, outer, branchProfile, outer.reasoningEffort, branchTarget)
-        : undefined;
-    const queryLLM = new DshLlmClient(ctx, outer, queryProfile, 'low', queryTarget);
-    const extraTools = createDshTools(ctx, outer.sessionId, signal, sessionState);
-    const inline = createInlineTrace(ctx, outer, signal);
-    const events = [];
-    const emitEvent = (event) => {
-      events.push(event);
-      runs.append(run, event);
-      inline(event);
-    };
-    const persistIngested = (res) => {
-      if (!res || !Array.isArray(res.files)) return;
-      for (const f of res.files) {
-        if (f && typeof f.id === 'string' && typeof f.content === 'string') {
-          sessionState.docs.set(f.id, { title: f.title ?? f.id, text: f.content });
-        }
-      }
-    };
-    const promptPaths =
-      typeof raf.extractPromptPaths === 'function'
-        ? raf.extractPromptPaths(effectiveQuestion, process.cwd())
-        : [];
-    for (const promptPath of promptPaths) {
-      if (sessionState.sources.has(promptPath)) continue;
-      try {
-        const callEvent = {
-          type: 'tool_call',
-          agent: 'root',
-          step: 0,
-          action: { name: 'add_document', arguments: { path: promptPath } },
-          motivation: `Auto-ingest path referenced in prompt: ${promptPath}`,
-        };
-        emitEvent(callEvent);
-        const res = await store.addPath(promptPath, { cwd: process.cwd(), signal });
-        persistIngested(res);
-        sessionState.sources.add(promptPath);
-        sessionState.board.record({
-          agent: 'root',
-          kind: 'tool',
-          scope: res.sourceId,
-          key: `add_document:${res.sourceId}`,
-          summary: `Loaded ${res.files.length} document(s) (~${res.totalTokens.toLocaleString('en-US')} tokens) under prefix "${res.sourceId}" from ${res.resolvedPath}`,
-        });
-        emitEvent({
-          type: 'tool_result',
-          agent: 'root',
-          step: 0,
-          name: 'add_document',
-          observation: `Loaded ${res.files.length} document(s) (~${res.totalTokens.toLocaleString('en-US')} tokens) under prefix "${res.sourceId}" from ${res.resolvedPath}`,
-          tokens: res.totalTokens,
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        emitEvent({
-          type: 'tool_result',
-          agent: 'root',
-          step: 0,
-          name: 'add_document',
-          observation: `Failed to auto-ingest ${promptPath}: ${msg}`,
-          tokens: 0,
-          error: msg,
-        });
-      }
-    }
-    const engine = new raf.RecursiveAgentFold({
-      rootLLM,
-      ...(branchLLM !== undefined ? { branchLLM } : {}),
-      queryLLM,
-      store,
-      board: sessionState.board,
-      ingest: { cwd: process.cwd(), onIngest: persistIngested },
-      maxDepth: settings.depth,
-      agent: { temperature: 0 },
-      llmQuery: {
-        reserveRatio: settings.reserve,
-        concurrency: settings.concurrency,
-        temperature: 0,
-        cache: { memo: sessionState.memo, chunkCounts: sessionState.chunkCounts },
-      },
-      rootMaxSteps: RAF_ROOT_MAX_STEPS,
-      extraTools,
-      signal,
-      onEvent: emitEvent,
-    });
-    const result = await engine.run(effectiveQuestion);
-    if (signal?.aborted) throw signal.reason ?? new Error('aborted');
-    const answer = typeof result.answer === 'string' ? result.answer.trim() : '';
-    const text =
-      answer !== ''
-        ? answer
-        : result.error !== undefined
-          ? `RAF engine error: ${result.error}`
-          : 'RAF engine returned no answer.';
-    const total = result.usage.total();
-    const byRole = result.usage.byRole();
-    const rootCacheHitRate = byRole.root?.cacheHitRate ?? 0;
-    const branchCacheHitRate = byRole.branch?.cacheHitRate ?? 0;
-    const runUsage = {
-      input: total.promptTokens,
-      output: total.completionTokens,
-      cached: total.cachedTokens,
-      cacheHitRate: total.cacheHitRate,
-      rootCacheHitRate,
-      branchCacheHitRate,
-      latencyMs: total.latencyMs,
-      calls: total.calls,
-      errors: total.errors,
-    };
-    runs.finish(run, {
-      status: result.terminated === 'error' ? 'error' : 'done',
-      termination: result.terminated,
-      answer: text,
-      error: result.error ?? null,
-      usage: runUsage,
-    });
-    finished = true;
-    const trace = formatTrace(events, settings, outer, runUsage);
-    let index = 0;
-    if (trace !== '') {
-      const reasoning = `\n~~~text\n${trace}\n~~~\n`;
-      yield { type: 'block-start', index, blockType: 'reasoning' };
-      for (let offset = 0; offset < reasoning.length; offset += 2000) {
-        yield { type: 'reasoning-delta', index, text: reasoning.slice(offset, offset + 2000) };
-      }
-      yield { type: 'block-end', index, block: { type: 'reasoning', text: reasoning } };
-      index += 1;
-    }
-    yield { type: 'block-start', index, blockType: 'text' };
-    for (let offset = 0; offset < text.length; offset += 2000) {
-      yield { type: 'text-delta', index, text: text.slice(offset, offset + 2000) };
-    }
-    yield { type: 'block-end', index, block: { type: 'text', text } };
-    yield {
-      type: 'usage',
-      usage: {
-        inputTokens: total.promptTokens,
-        outputTokens: total.completionTokens,
-        cacheReadTokens: total.cachedTokens,
-        totalTokens: total.promptTokens + total.completionTokens,
-      },
-    };
-    yield { type: 'finish', reason: { kind: 'stop' } };
-  } catch (error) {
-    if (run !== undefined && !finished) {
-      const message = error instanceof Error ? error.message : String(error);
-      runs.finish(run, {
-        status: signal?.aborted ? 'aborted' : 'error',
-        answer: '',
-        error: message,
-        usage: null,
-      });
-    }
-    if (signal?.aborted) throw error;
-    const message = error instanceof Error ? error.message : String(error);
-    const text = `RAF engine error: ${message}`;
-    yield { type: 'block-start', index: 0, blockType: 'text' };
-    yield { type: 'text-delta', index: 0, text };
-    yield { type: 'block-end', index: 0, block: { type: 'text', text } };
-    yield { type: 'finish', reason: { kind: 'stop' } };
-  }
+function sameTurn(turn, position, human, messages) {
+  if (turn === undefined || turn.finished || turn.pendingCallId === undefined) return false;
+  if (human?.id !== undefined && turn.userMessageId !== undefined && human.id !== turn.userMessageId) return false;
+  if (position !== undefined && turn.nativeTurn !== undefined && turn.nativeTurn !== position.turn) return false;
+  return toolResultFor(messages, turn.pendingCallId) !== undefined || turn.pendingObservation !== undefined;
 }
 
+async function ensureTurn(ctx, outer, settings, runs, raf) {
+  const session = getLiveSession(ctx, outer.sessionId);
+  const position = session === undefined ? undefined : sessionPosition(session);
+  const messages = Array.isArray(outer.messages) ? outer.messages : [];
+  const human = latestHumanMessage(messages);
+  const existing = activeTurns.get(outer.sessionId);
+  if (sameTurn(existing, position, human, messages)) return existing;
+  if (existing !== undefined) {
+    existing.finish({ status: 'aborted', termination: 'error', answer: '', error: 'Turn superseded before completion', usage: null });
+    existing.run = undefined;
+    activeTurns.delete(outer.sessionId);
+  }
+
+  const userIndex = latestUserIndex(messages);
+  const question = questionOf(messages, userIndex);
+  const effectiveQuestion = question === '' ? 'Answer the latest request.' : question;
+  const contextMessages = userIndex < 0 ? messages : messages.filter((_message, index) => index !== userIndex);
+  const transcript = renderTranscript(contextMessages);
+  const sessionState = getSessionState(outer.sessionId, raf);
+  const store = new raf.ContextStore();
+  if (transcript !== '') store.add(transcript, { id: 'session', title: 'DSH session transcript' });
+  for (const [docId, docEntry] of sessionState.docs.entries()) {
+    if (docId !== 'session' && typeof docEntry?.text === 'string' && docEntry.text !== '') {
+      store.add(docEntry.text, { id: docId, title: docEntry.title ?? docId });
+    }
+  }
+  const contextWindow = contextWindowOf(ctx, outer.sessionId);
+  const rootTarget = resolveTierTarget(outer, settings, 'ROOT');
+  const branchTarget = resolveTierTarget(outer, settings, 'BRANCH', rootTarget);
+  const queryTarget = resolveTierTarget(outer, settings, 'QUERY', rootTarget);
+  const rootProfile = { name: rootTarget.model, contextWindow, maxOutputTokens: RAF_ROOT_MAX_OUTPUT };
+  const branchProfile = { name: branchTarget.model, contextWindow, maxOutputTokens: RAF_ROOT_MAX_OUTPUT };
+  const queryProfile = { name: queryTarget.model, contextWindow, maxOutputTokens: RAF_QUERY_MAX_OUTPUT };
+  const rootLLM = new DshLlmClient(ctx, outer, rootProfile, outer.reasoningEffort, rootTarget);
+  const branchLLM =
+    branchTarget.provider !== rootTarget.provider || branchTarget.model !== rootTarget.model
+      ? new DshLlmClient(ctx, outer, branchProfile, outer.reasoningEffort, branchTarget)
+      : undefined;
+  const queryLLM = new DshLlmClient(ctx, outer, queryProfile, 'low', queryTarget);
+  const persistIngested = (res) => {
+    if (!res || !Array.isArray(res.files)) return;
+    for (const file of res.files) {
+      if (file && typeof file.id === 'string' && typeof file.content === 'string') {
+        sessionState.docs.set(file.id, { title: file.title ?? file.id, text: file.content });
+      }
+    }
+  };
+  const run = runs.create({
+    sessionId: outer.sessionId,
+    model: `${outer.provider}/${outer.model}`,
+    settings: { ...settings },
+    question: effectiveQuestion,
+  });
+  const turn = {
+    sessionId: outer.sessionId,
+    run,
+    finish: (patch) => runs.finish(run, patch),
+    engine: undefined,
+    store,
+    sessionState,
+    tools: new Map(),
+    question: effectiveQuestion,
+    userMessageId: human?.id,
+    nativeTurn: position?.turn,
+    nativeStep: position?.step ?? 0,
+    step: 0,
+    pendingCallId: undefined,
+    pendingObservation: undefined,
+    pendingAction: undefined,
+    pendingToolUsage: undefined,
+    finished: false,
+    signal: outer.signal,
+    emit: (event) => runs.append(run, event),
+  };
+  const extraTools = createDshTools(ctx, outer.sessionId, outer.signal, sessionState);
+  const engine = new raf.RecursiveAgentFold({
+    rootLLM,
+    ...(branchLLM !== undefined ? { branchLLM } : {}),
+    queryLLM,
+    store,
+    board: sessionState.board,
+    ingest: { cwd: process.cwd(), onIngest: persistIngested },
+    maxDepth: settings.depth,
+    agent: { temperature: 0 },
+    llmQuery: {
+      reserveRatio: settings.reserve,
+      concurrency: settings.concurrency,
+      temperature: 0,
+      cache: { memo: sessionState.memo, chunkCounts: sessionState.chunkCounts },
+    },
+    rootMaxSteps: RAF_ROOT_MAX_STEPS,
+    extraTools,
+    signal: outer.signal,
+    onEvent: turn.emit,
+    toolNamePrefix: 'raf_',
+  });
+  turn.engine = engine;
+  turn.tools = new Map(engine.toolsFor(0).map((tool) => [tool.name, tool]));
+  const promptPaths =
+    typeof raf.extractPromptPaths === 'function' ? raf.extractPromptPaths(effectiveQuestion, process.cwd()) : [];
+  for (const promptPath of promptPaths) {
+    if (sessionState.sources.has(promptPath)) continue;
+    try {
+      const res = await store.addPath(promptPath, { cwd: process.cwd(), signal: outer.signal });
+      persistIngested(res);
+      sessionState.sources.add(promptPath);
+      sessionState.board.record({
+        agent: 'root',
+        kind: 'tool',
+        scope: res.sourceId,
+        key: `add_document:${res.sourceId}`,
+        summary: `Loaded ${res.files.length} document(s) (~${res.totalTokens.toLocaleString('en-US')} tokens) under prefix "${res.sourceId}" from ${res.resolvedPath}`,
+      });
+    } catch (error) {
+      console.error('RAF: cannot auto-ingest prompt path', promptPath, error);
+    }
+  }
+  engine.begin(effectiveQuestion);
+  activeTurns.set(outer.sessionId, turn);
+  while (activeTurns.size > MAX_ACTIVE_TURNS) {
+    const oldest = activeTurns.keys().next().value;
+    if (oldest === undefined) break;
+    const evicted = activeTurns.get(oldest);
+    if (evicted !== undefined && !evicted.finished && evicted.run !== undefined) {
+      evicted.finish({ status: 'aborted', termination: 'error', answer: '', error: 'Turn evicted before completion', usage: null });
+      evicted.run = undefined;
+    }
+    activeTurns.delete(oldest);
+  }
+  return turn;
+}
+
+function* toolStepChunks(step, callId) {
+  let index = 0;
+  const reasoning = (typeof step.reasoning === 'string' ? step.reasoning : '').trim() || step.motivation;
+  if (reasoning !== '') {
+    yield { type: 'block-start', index, blockType: 'reasoning' };
+    yield { type: 'reasoning-delta', index, text: reasoning };
+    yield { type: 'block-end', index, block: { type: 'reasoning', text: reasoning } };
+    index += 1;
+  }
+  const args = JSON.stringify(step.action.arguments ?? {});
+  yield { type: 'block-start', index, blockType: 'tool-call' };
+  yield { type: 'tool-call-delta', index, id: callId, name: step.action.name, argumentsDelta: args };
+  yield { type: 'block-end', index, block: { type: 'tool-call', id: callId, name: step.action.name, arguments: args } };
+  yield stepUsageChunk(step.usage);
+  yield { type: 'finish', reason: { kind: 'stop' } };
+}
+
+function* answerStepChunks(step) {
+  let index = 0;
+  const reasoning = typeof step.reasoning === 'string' ? step.reasoning.trim() : '';
+  if (reasoning !== '') {
+    yield { type: 'block-start', index, blockType: 'reasoning' };
+    yield { type: 'reasoning-delta', index, text: reasoning };
+    yield { type: 'block-end', index, block: { type: 'reasoning', text: reasoning } };
+    index += 1;
+  }
+  const text = typeof step.answer === 'string' ? step.answer : '';
+  if (text !== '') {
+    yield { type: 'block-start', index, blockType: 'text' };
+    yield { type: 'text-delta', index, text };
+    yield { type: 'block-end', index, block: { type: 'text', text } };
+  }
+  if (step.usage !== undefined) yield stepUsageChunk(step.usage);
+  yield { type: 'finish', reason: { kind: 'stop' } };
+}
+
+async function* rafStream(ctx, outer, settings, runs) {
+  let turn;
+  try {
+    const raf = await loadRaf();
+    turn = await ensureTurn(ctx, outer, settings, runs, raf);
+  } catch (error) {
+    for (const chunk of errorStream(error instanceof Error ? error.message : String(error))) yield chunk;
+    return;
+  }
+  try {
+    if (turn.pendingCallId !== undefined) {
+      const result = toolResultFor(outer.messages, turn.pendingCallId);
+      const observation = result?.text || turn.pendingObservation || 'Error: tool result missing';
+      const indexed =
+        result?.isError === true
+          ? observation
+          : indexExternalToolResult(turn.pendingAction?.name, turn.pendingAction?.arguments, observation, turn.store, turn.sessionState);
+      turn.engine.submit(indexed, result?.isError === true ? { error: observation } : undefined);
+      turn.pendingCallId = undefined;
+      turn.pendingObservation = undefined;
+      turn.pendingAction = undefined;
+    }
+    const step = await turn.engine.next();
+    if (turn.pendingToolUsage !== undefined && step.kind !== 'done') {
+      step.usage = addUsage(step.usage, turn.pendingToolUsage);
+      turn.pendingToolUsage = undefined;
+    }
+    if (step.kind === 'tool') {
+      const callId = randomUUID();
+      turn.pendingCallId = callId;
+      turn.pendingAction = step.action;
+      turn.step = step.step;
+      yield* toolStepChunks(step, callId);
+      return;
+    }
+    if (step.kind === 'answer') {
+      yield* answerStepChunks(step);
+      finishRun(turn, step.result, outer.signal);
+    } else {
+      const answer =
+        typeof step.result.answer === 'string' && step.result.answer !== ''
+          ? step.result.answer
+          : (step.result.error ?? 'RAF engine returned no answer.');
+      yield* answerStepChunks({ reasoning: undefined, answer });
+      finishRun(turn, step.result, outer.signal);
+    }
+    turn.finished = true;
+    activeTurns.delete(outer.sessionId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (turn !== undefined) {
+      if (turn.run !== undefined) {
+        turn.finish({ status: outer.signal?.aborted ? 'aborted' : 'error', answer: '', error: message, usage: null });
+        turn.run = undefined;
+      }
+      turn.finished = true;
+      activeTurns.delete(outer.sessionId);
+    }
+    for (const chunk of errorStream(message)) yield chunk;
+  }
+}
 
 function sendJson(res, status, value) {
   const body = JSON.stringify(value);
@@ -1008,6 +1060,29 @@ export function apply(ctx) {
   let writeQueue = Promise.resolve();
   let disposed = false;
 
+  ctx.effect(() => () => activeTurns.clear(), 'raf: active turns');
+
+  ctx.effect(() => {
+    let dispose = () => {};
+    let cancelled = false;
+    void loadRaf()
+      .then((raf) => {
+        if (cancelled) return;
+        try {
+          dispose = registerRafTools(ctx, raf, state);
+        } catch (error) {
+          console.error('RAF: cannot register native tools', error);
+        }
+      })
+      .catch((error) => {
+        console.error('RAF: cannot load engine for native tools', error);
+      });
+    return () => {
+      cancelled = true;
+      dispose();
+    };
+  }, 'raf: native tools');
+
   const persist = () => {
     if (disposed) return;
     const json = stateJson(state);
@@ -1028,8 +1103,9 @@ export function apply(ctx) {
     if (options === null || typeof options !== 'object') return next();
     // Internal DSH calls set purpose. RAF owns only the main agent call.
     if (options.purpose !== undefined) return next();
-    // RAF answers a human request. Skip calls with synthetic messages only.
-    if (!hasHumanUserMessage(Array.isArray(options.messages) ? options.messages : [])) return next();
+    // RAF answers a human request. A live RAF turn continues after tool results.
+    const messages = Array.isArray(options.messages) ? options.messages : [];
+    if (!hasHumanUserMessage(messages) && !activeTurns.has(options.sessionId)) return next();
     if (engineOf(state, options.sessionId) !== ENGINE_RAF) return next();
     return rafStream(ctx, options, state.settings, runs);
   });

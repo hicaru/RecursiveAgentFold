@@ -1,4 +1,4 @@
-import { AgentFoldAgent, type AgentFoldConfig, type AgentRunResult } from './agent/agent-fold.js';
+import { AgentFoldAgent, type AgentFoldConfig, type AgentRunResult, type AgentStep } from './agent/agent-fold.js';
 import type { EventSink } from './agent/events.js';
 import type { ContextStore } from './context/store.js';
 import { ResearchBoard } from './context/board.js';
@@ -43,6 +43,8 @@ export interface RecursiveAgentFoldOptions {
   maxDepth?: number;
   rootMaxSteps?: number;
   branchMaxSteps?: number;
+  /** Prefix applied to built-in tools of the root agent (host-native tool names). */
+  readonly toolNamePrefix?: string;
   /** Which tools to expose. Default: all available. */
   enable?: Partial<
     Record<
@@ -82,6 +84,7 @@ export class RecursiveAgentFold {
   readonly queryEngine?: LLMQueryEngine;
   readonly board: ResearchBoard;
   private branchCounter = 0;
+  private rootAgent: AgentFoldAgent | undefined;
 
   constructor(readonly opts: RecursiveAgentFoldOptions) {
     this.usage = opts.usage ?? new UsageTracker();
@@ -103,20 +106,20 @@ export class RecursiveAgentFold {
   toolsFor(depth: number, ownScope?: string): Tool[] {
     const en = this.opts.enable ?? {};
     const maxDepth = this.opts.maxDepth ?? DEFAULT_MAX_DEPTH;
-    const tools: Tool[] = [];
-    if (this.queryEngine) tools.push(createLLMQueryTool(this.queryEngine));
-    if (en.add_document !== false) tools.push(createAddDocumentTool(this.opts.ingest));
-    if (en.search !== false) tools.push(createSearchTool(this.opts.documentTools));
-    if (en.outline !== false) tools.push(createOutlineTool(this.opts.documentTools));
-    if (en.grep !== false) tools.push(createGrepTool(this.opts.documentTools));
-    if (en.tally !== false) tools.push(createTallyTool());
-    if (en.read !== false) tools.push(createReadTool(this.opts.documentTools));
+    const builtins: Tool[] = [];
+    if (this.queryEngine) builtins.push(createLLMQueryTool(this.queryEngine));
+    if (en.add_document !== false) builtins.push(createAddDocumentTool(this.opts.ingest));
+    if (en.search !== false) builtins.push(createSearchTool(this.opts.documentTools));
+    if (en.outline !== false) builtins.push(createOutlineTool(this.opts.documentTools));
+    if (en.grep !== false) builtins.push(createGrepTool(this.opts.documentTools));
+    if (en.tally !== false) builtins.push(createTallyTool());
+    if (en.read !== false) builtins.push(createReadTool(this.opts.documentTools));
     if (en.list_documents !== false) {
-      tools.push(createListDocumentsTool());
+      builtins.push(createListDocumentsTool());
     }
-    if (en.calculator !== false) tools.push(createCalculatorTool());
+    if (en.calculator !== false) builtins.push(createCalculatorTool());
     if (en.branch !== false && maxDepth > 0 && depth <= maxDepth) {
-      tools.push(
+      builtins.push(
         createBranchTool((task, o) => this.runAgent(task, o), {
           maxBranchSteps: this.opts.branchMaxSteps ?? 20,
           consultOnly: depth === maxDepth,
@@ -124,11 +127,16 @@ export class RecursiveAgentFold {
         }),
       );
     }
+    const prefix = depth === 0 ? (this.opts.toolNamePrefix ?? '') : '';
+    const tools =
+      prefix === ''
+        ? builtins
+        : builtins.map((tool) => ({ ...tool, name: `${prefix}${tool.name}`, execute: tool.execute.bind(tool) }));
     if (this.opts.extraTools) tools.push(...this.opts.extraTools);
     return tools;
   }
 
-  private runAgent(question: string, opts: BranchRunnerOptions): Promise<AgentRunResult> {
+  private createAgent(opts: BranchRunnerOptions): AgentFoldAgent {
     const {
       depth,
       maxSteps,
@@ -167,7 +175,29 @@ export class RecursiveAgentFold {
       callStack,
       ancestorTasks,
     });
-    return agent.run(question);
+    return agent;
+  }
+
+  private runAgent(question: string, opts: BranchRunnerOptions): Promise<AgentRunResult> {
+    return this.createAgent(opts).run(question);
+  }
+
+  /** Prepare the root agent for externally driven steps. */
+  begin(question: string): void {
+    this.rootAgent = this.createAgent({ depth: 0, parent: 'user' });
+    this.rootAgent.begin(question);
+  }
+
+  /** Produce one root step; a tool step waits for `submit()`. */
+  async next(): Promise<AgentStep> {
+    if (this.rootAgent === undefined) throw new Error('RecursiveAgentFold.begin() must run before next()');
+    return this.rootAgent.next();
+  }
+
+  /** Feed the root tool observation back into the fold state. */
+  submit(observation: string, meta?: { error?: string }): void {
+    if (this.rootAgent === undefined) throw new Error('RecursiveAgentFold.begin() must run before submit()');
+    this.rootAgent.submit(observation, meta);
   }
 
   run(question: string): Promise<AgentRunResult> {

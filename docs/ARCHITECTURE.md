@@ -33,6 +33,18 @@ C_t = (Q, T, S_{t-2}, I_{t-1})
 
 If the model's directive does not follow the rules, it is normalized rather than rejected. The end is forced to `n`. The start is clamped and then snapped to the beginning of the block that contains it. An empty summary is replaced by an automatic one. If the directive is missing, a granular fold with an automatic summary is applied. Each correction is recorded in the `fold` event. Unparseable responses are retried with a repair message appended at the tail of the prompt (`maxFormatRetries`). When the step limit is reached, one final forced-answer turn runs (`forceAnswerOnLimit`).
 
+### 1.1 Externally driven steps
+
+`AgentFoldAgent` also exposes the loop one step at a time:
+
+```ts
+agent.begin(question)
+const step = await agent.next()   // { kind: 'tool', action } | { kind: 'answer', answer } | { kind: 'done' }
+agent.submit(observation)         // feed the tool result back into the fold state
+```
+
+`next()` performs the model call, format repair, folding, and parsing, but it does **not** execute the tool. `run()` is the same loop with in-process tool execution, so existing CLI and benchmark behavior is unchanged. A host can use the step API to let its own agent loop execute tools and write native step/tool events.
+
 ## 2. What is new
 
 ```mermaid

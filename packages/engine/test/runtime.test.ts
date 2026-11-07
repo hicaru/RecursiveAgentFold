@@ -44,6 +44,47 @@ function scriptedReader() {
   );
 }
 
+/** Evaluate dsh-plugin client.js in a minimal window sandbox and return its buildRunModel hook. */
+async function loadClientBuildRunModel() {
+  type BuiltModel = {
+    agents: Array<{
+      id: string;
+      name: string;
+      depth: number;
+      parentId: string | null;
+      scope: string | null;
+      childAgentIds: string[];
+      steps: Array<{ index: number; tools: Array<{ name: string; childAgentIds: string[] }> }>;
+    }>;
+  };
+  const fakeWindow: {
+    __ModuleLoader__: { load: (spec: { factory: (req: (id: string) => unknown) => void }) => void };
+    localStorage: { getItem: () => null; setItem: () => void };
+    __RAF_BUILD_RUN_MODEL__?: (run: unknown) => BuiltModel;
+  } = {
+    __ModuleLoader__: {
+      load(spec) {
+        spec.factory(() => ({
+          createElement: () => null,
+          Fragment: 'Fragment',
+          useState: (init: unknown) => [typeof init === 'function' ? init() : init, () => {}],
+          useEffect: () => {},
+          useRef: (init: unknown) => ({ current: init }),
+          useMemo: (fn: () => unknown) => fn(),
+          useSyncExternalStore: () => ({}),
+        }));
+      },
+    },
+    localStorage: { getItem: () => null, setItem: () => {} },
+  };
+  const clientJsPath = new URL('../../dsh-plugin/client.js', import.meta.url);
+  const clientCode = await readFile(clientJsPath, 'utf-8');
+  new Function('window', clientCode)(fakeWindow);
+  const buildRunModel = fakeWindow.__RAF_BUILD_RUN_MODEL__;
+  if (typeof buildRunModel !== 'function') throw new Error('missing buildRunModel');
+  return buildRunModel;
+}
+
 describe('chunking', () => {
   it('chunk = window * (1 - reserve), deterministic and line aligned', () => {
     expect(computeChunkTokens({ name: 'm', contextWindow: 128_000, maxOutputTokens: 1024 }, { lineNumbers: false })).toBe(89_600);
@@ -1334,47 +1375,8 @@ describe('Multi-format directory & document ingestion (add_document) and Live Do
     expect(subRunStarts.every((e) => e.parent === 'root')).toBe(true);
     expect(subRunStarts.map((e) => e.scope).sort()).toEqual(['pkg/alpha.ts', 'pkg/beta.ts']);
 
-    // Evaluate client.js in a minimal window sandbox and verify buildRunModel
-    type BuiltModel = {
-      agents: Array<{
-        id: string;
-        name: string;
-        depth: number;
-        parentId: string | null;
-        scope: string | null;
-        childAgentIds: string[];
-        steps: Array<{ index: number; tools: Array<{ name: string; childAgentIds: string[] }> }>;
-      }>;
-    };
-    const fakeWindow: {
-      __ModuleLoader__: { load: (spec: { factory: (req: (id: string) => unknown) => void }) => void };
-      localStorage: { getItem: () => null; setItem: () => void };
-      __RAF_BUILD_RUN_MODEL__?: (run: unknown) => BuiltModel;
-    } = {
-      __ModuleLoader__: {
-        load(spec) {
-          spec.factory(() => ({
-            createElement: () => null,
-            Fragment: 'Fragment',
-            useState: (init: unknown) => [typeof init === 'function' ? init() : init, () => {}],
-            useEffect: () => {},
-            useRef: (init: unknown) => ({ current: init }),
-            useMemo: (fn: () => unknown) => fn(),
-            useSyncExternalStore: () => ({}),
-          }));
-        },
-      },
-      localStorage: { getItem: () => null, setItem: () => {} },
-    };
-    const clientJsPath = new URL('../../dsh-plugin/client.js', import.meta.url);
-    const clientCode = await readFile(clientJsPath, 'utf-8');
-    const runClient = new Function('window', clientCode);
-    runClient(fakeWindow);
-
-    const capturedBuildRunModel = fakeWindow.__RAF_BUILD_RUN_MODEL__;
-    expect(typeof capturedBuildRunModel).toBe('function');
-    if (!capturedBuildRunModel) throw new Error('missing buildRunModel');
-    const model = capturedBuildRunModel({
+    const buildRunModel = await loadClientBuildRunModel();
+    const model = buildRunModel({
       id: 'run-1',
       status: 'done',
       startedAt: Date.now() - 1000,
@@ -1396,5 +1398,143 @@ describe('Multi-format directory & document ingestion (add_document) and Live Do
     expect(sub2?.steps.length).toBe(2);
     expect(sub1?.steps[0]?.tools[0]?.name).toBe('read');
     expect(sub2?.steps[0]?.tools[0]?.name).toBe('read');
+  });
+});
+
+describe('externally driven step API', () => {
+  it('yields one tool step, accepts the native observation, then yields the answer', async () => {
+    const store = new ContextStore();
+    store.add('line 1: the passcode is 7341', { id: 'ctx', title: 'ctx' });
+    const events: AgentEvent[] = [];
+    const llm = new ScriptedLLM((_req, index) =>
+      index === 0
+        ? '<motivation>locate the passcode</motivation><tool_call>{"name":"raf_grep","arguments":{"pattern":"passcode"}}</tool_call>'
+        : '<folding>{"range":[0,0],"summary":"grep found the passcode at line 1"}</folding><answer>7341</answer>',
+    );
+    const raf = new RecursiveAgentFold({
+      rootLLM: llm,
+      store,
+      maxDepth: 0,
+      toolNamePrefix: 'raf_',
+      onEvent: (event) => events.push(event),
+    });
+
+    raf.begin('What is the passcode?');
+    const first = await raf.next();
+    expect(first.kind).toBe('tool');
+    if (first.kind !== 'tool') throw new Error('expected a tool step');
+    expect(first.action.name).toBe('raf_grep');
+    expect(first.reasoning).toBeUndefined();
+    expect(events.some((event) => event.type === 'tool_call' && event.action.name === 'raf_grep')).toBe(true);
+
+    raf.submit('L1: the passcode is 7341');
+    const second = await raf.next();
+    expect(second.kind).toBe('answer');
+    if (second.kind !== 'answer') throw new Error('expected an answer step');
+    expect(second.answer).toBe('7341');
+    expect(second.result.terminated).toBe('answer');
+    expect(second.result.steps).toBe(2);
+
+    const types = events.map((event) => event.type);
+    expect(types[0]).toBe('run_start');
+    expect(types.includes('step_start')).toBe(true);
+    expect(types.includes('tool_result')).toBe(true);
+    expect(types.includes('answer')).toBe(true);
+    expect(types[types.length - 1]).toBe('run_end');
+
+    const toolResult = events.find((event): event is Extract<AgentEvent, { type: 'tool_result' }> => event.type === 'tool_result');
+    expect(toolResult?.name).toBe('raf_grep');
+    expect(toolResult?.observation).toContain('7341');
+  });
+  it('keeps tool guidance and routing priority for raf_-prefixed tools when host read/grep extraTools exist', async () => {
+    const systemPrompts: string[] = [];
+    const llm = new ScriptedLLM((req) => {
+      systemPrompts.push(req.messages[0]?.content ?? '');
+      return '<answer>ok</answer>';
+    });
+    const hostTool = (name: string) => ({
+      name,
+      description: `Host ${name} tool`,
+      parameters: { type: 'object' },
+      execute: async () => '',
+    });
+    const raf = new RecursiveAgentFold({
+      rootLLM: llm,
+      queryLLM: llm,
+      store: new ContextStore(),
+      toolNamePrefix: 'raf_',
+      extraTools: [hostTool('read'), hostTool('grep')],
+    });
+
+    const res = await raf.run('Summarize the workspace');
+    expect(res.answer).toBe('ok');
+    const system = systemPrompts[0] ?? '';
+    expect(system).toContain('- **raf_llm_query**:');
+    expect(system).toContain('- **raf_branch**:');
+    expect(system).toContain('- **raf_search**:');
+    expect(system).toContain('Tool Routing Priority');
+    expect(system).toContain('- **raf_read**:');
+    expect(system).toContain('- **raf_grep**:');
+    expect(system).not.toContain('- **read**:');
+    expect(system).not.toContain('- **grep**:');
+  });
+
+  it('links child specialist agents to a prefixed raf_branch tool call in buildRunModel', async () => {
+    const store = new ContextStore();
+    store.add('ORION_SEED = 55', { id: 'pkg/orion.ts' });
+
+    const root = new ScriptedLLM((req) => {
+      const user = req.messages[1]?.content ?? '';
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+      if (step === 0) {
+        return `<motivation>Delegate pkg/orion.ts to a specialist</motivation><tool_call>${JSON.stringify({
+          name: 'raf_branch',
+          arguments: { scope: 'pkg/orion.ts', task: 'Read ORION_SEED in pkg/orion.ts' },
+        })}</tool_call>`;
+      }
+      return '<folding>{"range":[0,0],"summary":"ORION_SEED = 55."}</folding><motivation>Done</motivation><answer>ORION_SEED = 55</answer>';
+    });
+
+    const branch = new ScriptedLLM((req) => {
+      const user = req.messages[1]?.content ?? '';
+      if (/Step 0\./.test(user)) {
+        return `<motivation>Read the seed line</motivation><tool_call>${JSON.stringify({
+          name: 'read',
+          arguments: { document: 'pkg/orion.ts', start_line: 1, end_line: 1 },
+        })}</tool_call>`;
+      }
+      return '<folding>{"range":[0,0],"summary":"ORION_SEED = 55."}</folding><motivation>Answer</motivation><answer>ORION_SEED = 55</answer>';
+    });
+
+    const rawEvents: Array<{ seq: number; at: number; event: AgentEvent }> = [];
+    const raf = new RecursiveAgentFold({
+      rootLLM: root,
+      branchLLM: branch,
+      store,
+      toolNamePrefix: 'raf_',
+      onEvent: (event) => {
+        rawEvents.push({ seq: rawEvents.length + 1, at: Date.now(), event });
+      },
+    });
+
+    const res = await raf.run('Read ORION_SEED');
+    expect(res.answer).toBe('ORION_SEED = 55');
+
+    const buildRunModel = await loadClientBuildRunModel();
+    const model = buildRunModel({
+      id: 'run-1',
+      status: 'done',
+      startedAt: Date.now() - 1000,
+      endedAt: Date.now(),
+      events: rawEvents,
+    });
+    expect(model.agents.length).toBe(2);
+    const rootAgent = model.agents[0];
+    expect(rootAgent?.name).toBe('root');
+    const sub = model.agents[1];
+    expect(sub?.parentId).toBe(rootAgent?.id);
+    const branchTool = rootAgent?.steps[0]?.tools.find((tool) => tool.name === 'raf_branch');
+    expect(branchTool?.childAgentIds.length).toBe(1);
+    expect(branchTool?.childAgentIds[0]).toBe(sub?.id);
   });
 });

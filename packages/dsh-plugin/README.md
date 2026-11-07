@@ -4,7 +4,7 @@ DeepSeek Harness bundle for the Recursive AgentFold engine. It adds two surfaces
 
 - A **RAF** entry in the left sidebar. It opens a compact settings page for fold depth, reserve, and reader concurrency.
 - An **engine switch** in the composer tool row, after the permission control. It selects `Standard` or `RAF (Recursive AgentFold)` for the current Session.
-- The Host half intercepts the main agent `llm/stream` call. When a Session is on RAF, it runs `@raf/engine` instead of the standard model call and returns the RAF answer as one normal assistant message. Internal DSH calls such as session titles, compaction, and reviews set `purpose` and stay on the standard path.
+- The Host half intercepts the main agent `llm/stream` call. When a Session is on RAF, it returns **one RAF step per call** (reasoning + one tool call, or the final answer). The native DSH loop owns turn/step framing, tool execution, approvals, and session events, so Chat and Trajectory render RAF work as native rows. Internal DSH calls such as session titles, compaction, and reviews set `purpose` and stay on the standard path.
 
 ## Layout
 
@@ -43,44 +43,47 @@ The switch also stores the last selection as the default for new Sessions:
 
 ## RAF execution
 
-For a RAF Session, `llm/stream` builds a `ContextStore` from the Session transcript and runs `RecursiveAgentFold`:
+For a RAF Session, the plugin builds a `ContextStore` from the Session transcript and drives `@raf/engine` one step at a time:
 
 - the latest **human** message (`source.kind === 'user'`) is the question;
 - every other message — including DSH's synthetic instruction, runtime, skill, and time messages — is the document;
-- RAF's `search` (BM25 V2 window retrieval), `outline` (structural skeleton), `llm_query`, `grep`, `read`, `tally`, `branch`, and `calculator` operate on that transcript;
-- DSH coding tools are exposed to RAF as `read_file`, `glob`, `grep_files`, `search_files`, `outline_files`, `bash`, `write`, `edit`, `apply_patch`, `lsp`, `web_search`, and `web_fetch`. `read_file`, `grep_files`, `search_files`, and `outline_files` avoid colliding with RAF's own context-store tools;
-- the final `<answer>` becomes one assistant message in DSH;
-- RAF token usage is reported in the same message's usage chunk.
+- RAF's context tools are registered as native DSH tools with a `raf_` prefix: `raf_search`, `raf_outline`, `raf_grep`, `raf_read`, `raf_tally`, `raf_llm_query`, `raf_branch`, `raf_calculator`, `raf_add_document`, and `raf_list_documents`;
+- DSH coding tools keep their native names (`read`, `glob`, `grep`, `bash`, `write`, `edit`, `apply_patch`, `lsp`, `web_search`, `web_fetch`) and execute through the normal DSH pipeline, including approvals;
+- each `llm/stream` call returns one RAF step: an assistant message with reasoning and one `tool-call` block, or the final text;
+- the native loop writes `step/start`, `assistant/message`, `tool/call`, `tool/result`, and `step/end` itself;
+- RAF token usage is attached to each native assistant message.
 
-RAF runs inside one outer model request. Its internal model calls use the Session provider and model through `ctx.llm` by default, with optional 3-tier environment overrides (`RAF_ROOT_PROVIDER`/`RAF_ROOT_MODEL`, `RAF_BRANCH_PROVIDER`/`RAF_BRANCH_MODEL`, `RAF_QUERY_PROVIDER`/`RAF_QUERY_MODEL`). Root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 4,096 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. Internal calls are tagged with an `AsyncLocalStorage` guard and a `raf-*` `purpose` value, so the listener does not intercept them again.
+The engine exposes `begin(question)`, `next()`, and `submit(observation)`. `next()` returns a tool action without executing it, so the native loop executes the tool and the next `next()` receives the observation. `AgentFoldAgent.run()` is the same loop with in-process tool execution, so CLI and benchmark behavior is unchanged.
+
+Internal model calls use the Session provider and model through `ctx.llm` by default, with optional 3-tier environment overrides (`RAF_ROOT_PROVIDER`/`RAF_ROOT_MODEL`, `RAF_BRANCH_PROVIDER`/`RAF_BRANCH_MODEL`, `RAF_QUERY_PROVIDER`/`RAF_QUERY_MODEL`). Root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 4,096 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. Internal calls are tagged with an `AsyncLocalStorage` guard and a `raf-*` `purpose` value, so the listener does not intercept them again.
 
 DSH marks internal calls with `purpose` (`session-title`, `compaction`, `auto-review`, `onboarding_use_case`). The listener passes every such call through. RAF therefore never answers a title prompt or a compaction summary.
 
-### Inline RAF tool calls
+### Native RAF rows
 
-RAF writes native Session events while it runs, so Chat and Trajectory show its work inline:
+RAF does not write display-only session events. The native DSH loop writes them:
 
-- each RAF tool call appends an assistant message with the agent label (`root`, `branch#1@1`) and the model's motivation, then a `tool-call` block;
-- the matching result appends a native `tool/result` event, so the tool card expands normally;
-- internal RAF tools (`search`, `outline`, `read`, `grep`, `tally`, `llm_query`, `branch`, `calculator`) and DSH tools (`read_file`, `bash`, and so on) use the same inline rows;
-- subagent calls carry their `branch` label, so the root and every subagent show their own tools in order.
+- the plugin returns one assistant stream per step; the loop appends `assistant/message` with reasoning and one `tool-call` block;
+- the native tool pipeline appends `tool/call` and `tool/result`;
+- Chat renders the same `Think` and tool rows it renders for the standard agent, including the running `Deep diving` status;
+- Trajectory and Statistics read the same native log.
 
-The events are synthetic: RAF already executed the tool, and the Host appends only the display records. The tool is not executed again. The separate live dock was removed; the **RAF** tab remains the detailed per-agent inspector.
+The separate Live Dock and its `conversation.input.dock` panel are gone, and the conversation no longer adds a RAF tab. The sidebar RAF page keeps its **Inspector** tab for the detailed per-agent trace.
 
-### Trajectory trace
+`raf_branch` has its own native tool row: it lists every branch task (scope + instruction) and the matching subtask result. The branch child steps remain in the sidebar Inspector.
 
-The runner also writes a compact diagnostic trace into the assistant message's **reasoning** block:
+### Diagnostic trace
 
-- Open **Trajectory**, select the assistant record, and read **Thinking**.
-- The trace lists settings, steps, folds, tool calls and results, `llm_query` scans, per-call tokens/cache/latency, and the final answer.
-- **Statistics** shows the run as one outer step with aggregate usage.
+The Host feeds engine `onEvent` records into the RAF run registry. The sidebar **Inspector** reads that registry:
 
-The trace is capped at 12,000 characters and is skipped when a later RAF run rebuilds its transcript.
+- settings, steps, folds, tool calls and results, `llm_query` scans, per-call tokens/cache/latency, and the final answer;
+- Chat, Trajectory, and Statistics read the native session log instead; the inspector never writes session events;
+- a later RAF turn replaces the registry entry for the Session.
 
-Limits of this first integration:
+Limits of this integration:
 
-- RAF's own `read`/`grep` tools scan the transcript. The bridged DSH tools run the real DSH tools, with the normal approval policy.
-- DSH tool calls from RAF are shown in the RAF view. They are not native session `tool/call` events, so Chat and Trajectory do not render them as tool rows; a custom Agent driver is required for that.
+- RAF's context tools operate on the `ContextStore`; DSH tools operate on the workspace. Both appear as native tool rows.
+- Internal `branch` child steps and `llm_query` reader calls stay inside their parent native tool row. They are visible in the RAF inspector, not as separate Chat rows.
 - DSH's synthetic user messages are context, not the question. The latest human message is the question.
 - An answer cut by the output limit or an unclosed `<answer>` is rejected and retried with a shorter complete answer.
 - The reader calls use the same model as the root with its default reasoning effort. The benchmark harness uses a separate non-thinking reader model; set that route before judging benchmark accuracy.
@@ -103,6 +106,7 @@ The settings page writes `{ depth, reserve, concurrency }` to `localStorage` and
 | `sidebar.panellist` | `raf` | Sidebar entry and icon. |
 | `conversation.input.left` | `raf-engine` | Composer engine switch. |
 | `shell.overlay` | `raf-engine-menu` | Fixed engine menu above the composer. |
+| `tool.call.toolview` | `raf_branch` | Native `raf_branch` tool row. |
 
 ## Install
 
