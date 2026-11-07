@@ -27,7 +27,7 @@ const TAGS = ['think', 'folding', 'folded_output', 'fold', '折叠', 'motivation
 type Tag = (typeof TAGS)[number];
 const FOLD_TAGS = ['folding', 'folded_output', 'fold', '折叠'] as const;
 const MOTIVATION_TAGS = ['motivation', 'explanation', '动机'] as const;
-const TOOL_TAG_ALIASES = ['search', 'outline', 'grep', 'read', 'tally', 'calculator', 'branch', 'llm_query', 'list_documents'] as const;
+const TOOL_TAG_ALIASES = ['add_document', 'search', 'outline', 'grep', 'read', 'tally', 'calculator', 'branch', 'llm_query', 'list_documents'] as const;
 function tagRegex(tag: string): RegExp {
   // tolerant of `</ folding >`, attributes and casing
   return new RegExp(`<\\s*${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\s*\\/\\s*${tag}\\s*>`, 'i');
@@ -106,6 +106,7 @@ function parseFolding(raw: string, warnings: string[], errors: string[]): FoldDi
 
 function inferBareToolName(obj: Record<string, unknown>, contextText: string): string | undefined {
   if (typeof obj.expression === 'string') return 'calculator';
+  if (typeof obj.path === 'string' || Array.isArray(obj.paths)) return 'add_document';
   if (typeof obj.pattern === 'string') {
     if ('top' in obj || 'group' in obj || /\btally\b/i.test(contextText)) return 'tally';
     return 'grep';

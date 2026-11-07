@@ -1,6 +1,11 @@
+import type { IngestResult } from '../context/ingest.js';
 import { defaultEstimator, truncateToTokens } from '../tokens.js';
 import { argNumber, argString, argStringList, ToolArgumentError, type Tool } from './types.js';
 
+export interface AddDocumentToolOptions {
+  readonly cwd?: string;
+  readonly onIngest?: (res: IngestResult) => void;
+}
 export interface DocumentToolOptions {
   /** Max lines returned by one read. Default 80. */
   readonly maxReadLines?: number;
@@ -19,10 +24,135 @@ export const DEFAULT_DOCUMENT_TOOL_OPTIONS: Readonly<Required<DocumentToolOption
 export function createListDocumentsTool(): Tool {
   return {
     name: 'list_documents',
-    description: 'List stored documents (id, title, token count, line count).',
-    parameters: { type: 'object', properties: {} },
-    async execute(_args, ctx) {
-      return ctx.store.manifest();
+    description: 'List stored documents (id, title, token count, line count), optionally filtered by id prefix.',
+    parameters: {
+      type: 'object',
+      properties: {
+        prefix: { type: 'string', description: 'Optional document ID prefix filter (e.g. "rlm.pi/src").' },
+        limit: { type: 'integer', description: 'Maximum number of documents to list (default 200).' },
+      },
+    },
+    async execute(args, ctx) {
+      const prefixRaw = argString(args, 'prefix', false)?.trim();
+      const limitRaw = argNumber(args, 'limit');
+      if (!prefixRaw && limitRaw === undefined) {
+        return ctx.store.manifest();
+      }
+      const all = ctx.store.list();
+      const prefixLower = prefixRaw ? prefixRaw.toLowerCase() : undefined;
+      const matchedIds: string[] = [];
+      for (let i = 0; i < all.length; i++) {
+        const d = all[i];
+        if (!d) continue;
+        if (prefixLower && !d.id.toLowerCase().startsWith(prefixLower) && !d.id.toLowerCase().includes(prefixLower)) {
+          continue;
+        }
+        matchedIds.push(d.id);
+      }
+      if (matchedIds.length === 0) {
+        return prefixRaw
+          ? `(no documents matching prefix "${prefixRaw}")`
+          : '(no documents loaded)';
+      }
+      const cap = limitRaw !== undefined && limitRaw > 0 ? Math.min(matchedIds.length, Math.floor(limitRaw)) : matchedIds.length;
+      const sliced = matchedIds.slice(0, cap);
+      const rendered = ctx.store.manifestFor(sliced);
+      if (matchedIds.length > cap) {
+        return `${rendered}\n... and ${matchedIds.length - cap} more matching documents`;
+      }
+      return rendered;
+    },
+  };
+}
+
+export function createAddDocumentTool(opts: AddDocumentToolOptions = {}): Tool {
+  return {
+    name: 'add_document',
+    description:
+      'Load a file or directory (code, markdown, articles, PDF, DOCX, PPTX, XLSX, CSV, EPUB, etc.) from disk into ContextStore so all agents can search, outline, grep, read, branch, and run llm_query on it.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File or directory path to load into ContextStore.' },
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional list of file or directory paths to load.',
+        },
+        id_prefix: { type: 'string', description: 'Optional document ID prefix override.' },
+      },
+      required: [],
+    },
+    async execute(args, ctx) {
+      const single =
+        argString(args, 'path', false) ??
+        argString(args, 'source', false) ??
+        argString(args, 'file_path', false) ??
+        argString(args, 'dir', false);
+      const multi = argStringList(args, 'paths') ?? [];
+      const idPrefix = argString(args, 'id_prefix', false) ?? argString(args, 'prefix', false);
+      const targets: string[] = [];
+      if (single && single.trim() !== '') targets.push(single.trim());
+      for (let i = 0; i < multi.length; i++) {
+        const p = multi[i]?.trim();
+        if (p && !targets.includes(p)) targets.push(p);
+      }
+      if (targets.length === 0) {
+        throw new ToolArgumentError('must provide "path" or "paths"');
+      }
+
+      const blocks: string[] = [];
+      for (let t = 0; t < targets.length; t++) {
+        const target = targets[t];
+        if (!target) continue;
+        const res = await ctx.store.addPath(target, {
+          ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+          ...(idPrefix !== undefined ? { idPrefix } : {}),
+          ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
+        });
+        opts.onIngest?.(res);
+        ctx.board?.record({
+          agent: ctx.agentName,
+          kind: 'tool',
+          scope: res.sourceId,
+          key: `add_document:${res.sourceId}`,
+          summary: `Loaded ${res.files.length} document(s) (~${res.totalTokens.toLocaleString('en-US')} tokens) under prefix "${res.sourceId}" from ${res.resolvedPath}`,
+        });
+
+        const lines: string[] = [
+          `Added source "${res.source}" (${res.resolvedPath}) as prefix "${res.sourceId}":`,
+          `  Files loaded: ${res.files.length} (~${res.totalTokens.toLocaleString('en-US')} tokens, ${res.totalChars.toLocaleString('en-US')} chars)`,
+        ];
+        if (res.documents > 0) {
+          lines.push(`  Rich documents: ${res.documents} (${res.converted} converted via anydoc)`);
+        }
+        if (res.skipped.length > 0) {
+          const byReason: Record<string, number> = {};
+          for (let i = 0; i < res.skipped.length; i++) {
+            const sk = res.skipped[i];
+            if (!sk) continue;
+            byReason[sk.reason] = (byReason[sk.reason] ?? 0) + 1;
+          }
+          const reasonSummary = Object.entries(byReason)
+            .map(([r, c]) => `${r}=${c}`)
+            .join(', ');
+          lines.push(`  Skipped files: ${res.skipped.length} (${reasonSummary})`);
+        }
+        const showLimit = Math.min(30, res.files.length);
+        lines.push('  Ingested document IDs:');
+        for (let i = 0; i < showLimit; i++) {
+          const f = res.files[i];
+          if (!f) continue;
+          lines.push(`    - ${f.id} (~${f.tokens.toLocaleString('en-US')} tokens)`);
+        }
+        if (res.files.length > showLimit) {
+          lines.push(
+            `    ... and ${res.files.length - showLimit} more (use list_documents with {"prefix": "${res.sourceId}"}, search, outline, or grep to explore)`,
+          );
+        }
+        blocks.push(lines.join('\n'));
+      }
+      return blocks.join('\n\n');
     },
   };
 }

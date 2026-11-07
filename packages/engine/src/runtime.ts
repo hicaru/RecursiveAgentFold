@@ -5,7 +5,17 @@ import { ResearchBoard } from './context/board.js';
 import { UsageTracker } from './llm/usage.js';
 import { createBranchTool, type BranchRunnerOptions } from './tools/branch.js';
 import { createCalculatorTool } from './tools/calculator.js';
-import { createGrepTool, createListDocumentsTool, createOutlineTool, createReadTool, createSearchTool, createTallyTool, type DocumentToolOptions } from './tools/document-tools.js';
+import {
+  createAddDocumentTool,
+  createGrepTool,
+  createListDocumentsTool,
+  createOutlineTool,
+  createReadTool,
+  createSearchTool,
+  createTallyTool,
+  type AddDocumentToolOptions,
+  type DocumentToolOptions,
+} from './tools/document-tools.js';
 import { createLLMQueryTool, LLMQueryEngine, type LLMQueryOptions } from './tools/llm-query.js';
 import type { Tool } from './tools/types.js';
 import type { LLMClient } from './types.js';
@@ -27,13 +37,28 @@ export interface RecursiveAgentFoldOptions {
   store: ContextStore;
   llmQuery?: LLMQueryOptions;
   documentTools?: DocumentToolOptions;
+  /** Options for `add_document` file/directory ingestion. */
+  ingest?: AddDocumentToolOptions;
   /** Max branch recursion depth (0 disables branching). Default 2. */
   maxDepth?: number;
   rootMaxSteps?: number;
   branchMaxSteps?: number;
   /** Which tools to expose. Default: all available. */
-  enable?: Partial<Record<'llm_query' | 'branch' | 'search' | 'outline' | 'grep' | 'tally' | 'read' | 'list_documents' | 'calculator', boolean>>;
-  /** Extra tools (plugins) appended after the built-ins. */
+  enable?: Partial<
+    Record<
+      | 'add_document'
+      | 'llm_query'
+      | 'branch'
+      | 'search'
+      | 'outline'
+      | 'grep'
+      | 'tally'
+      | 'read'
+      | 'list_documents'
+      | 'calculator',
+      boolean
+    >
+  >;
   extraTools?: Tool[];
   agent?: Partial<Omit<AgentFoldConfig, 'llm' | 'tools' | 'store' | 'depth' | 'name' | 'usage' | 'onEvent'>>;
   onEvent?: EventSink;
@@ -80,12 +105,13 @@ export class RecursiveAgentFold {
     const maxDepth = this.opts.maxDepth ?? DEFAULT_MAX_DEPTH;
     const tools: Tool[] = [];
     if (this.queryEngine) tools.push(createLLMQueryTool(this.queryEngine));
+    if (en.add_document !== false) tools.push(createAddDocumentTool(this.opts.ingest));
     if (en.search !== false) tools.push(createSearchTool(this.opts.documentTools));
     if (en.outline !== false) tools.push(createOutlineTool(this.opts.documentTools));
     if (en.grep !== false) tools.push(createGrepTool(this.opts.documentTools));
     if (en.tally !== false) tools.push(createTallyTool());
     if (en.read !== false) tools.push(createReadTool(this.opts.documentTools));
-    if (en.list_documents === true || (en.list_documents !== false && this.opts.store.list().length > 1)) {
+    if (en.list_documents !== false) {
       tools.push(createListDocumentsTool());
     }
     if (en.calculator !== false) tools.push(createCalculatorTool());
@@ -106,6 +132,7 @@ export class RecursiveAgentFold {
     const {
       depth,
       maxSteps,
+      parent,
       scope,
       initialState,
       followUpQuestion,
@@ -125,6 +152,7 @@ export class RecursiveAgentFold {
       store: this.opts.store,
       depth,
       maxDepth,
+      parent,
       ...(scope !== undefined ? { scope } : {}),
       name: agentName ?? (depth === 0 ? 'root' : `branch#${++this.branchCounter}@${depth}`),
       maxSteps: maxSteps ?? (depth === 0 ? (this.opts.rootMaxSteps ?? 100) : (this.opts.branchMaxSteps ?? 20)),

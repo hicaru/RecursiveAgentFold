@@ -1,6 +1,9 @@
 import { CharRatioEstimator, defaultEstimator, type TokenEstimator } from '../tokens.js';
 import { Bm25DocumentIndex, type SearchOptions, type SearchWindowHit } from './bm25.js';
+import { resolveIngestSource, type IngestOptions, type IngestResult } from './ingest.js';
 
+export const VALID_DOC_ID_RE = /^[A-Za-z0-9_.\-]+(?:\/[A-Za-z0-9_.\-]+)*$/;
+const MAX_MANIFEST_DOCS = 200;
 export interface StoredDocument {
   id: string;
   title: string;
@@ -95,7 +98,7 @@ export class ContextStore {
 
   add(text: string, opts: AddDocumentOptions = {}): StoredDocument {
     const id = opts.id ?? `doc${this.docs.size + 1}`;
-    if (!/^[A-Za-z0-9_.\-]+$/.test(id)) throw new Error(`invalid document id "${id}"`);
+    if (!VALID_DOC_ID_RE.test(id)) throw new Error(`invalid document id "${id}"`);
     const lines: string[] = [];
     for (const raw of text.split(/\r?\n/)) {
       if (raw.length <= this.maxLineChars) lines.push(raw);
@@ -122,6 +125,22 @@ export class ContextStore {
     return doc;
   }
 
+  async addPath(sourcePath: string, opts: IngestOptions = {}): Promise<IngestResult> {
+    const res = await resolveIngestSource(sourcePath, opts);
+    if (!res.ok) {
+      throw new Error(res.error);
+    }
+    if (res.value.files.length === 0) {
+      throw new Error(`add_document produced no readable files from "${sourcePath}"`);
+    }
+    for (let i = 0; i < res.value.files.length; i++) {
+      const f = res.value.files[i];
+      if (!f) continue;
+      this.add(f.content, { id: f.id, title: f.title, tokens: f.tokens });
+    }
+    return res.value;
+  }
+
   has(id: string): boolean {
     return this.docs.has(id);
   }
@@ -144,20 +163,50 @@ export class ContextStore {
 
   /** Stable manifest rendered into the agent prompt (part of the cached prefix). */
   manifest(): string {
-    if (this.docs.size === 0) return '(no documents loaded)';
+    return this.manifestFor();
+  }
+
+  /** Render a manifest for a specific subset of document IDs (or all documents when omitted). */
+  manifestFor(docIds?: readonly string[]): string {
+    const docs: StoredDocument[] = [];
+    if (docIds !== undefined) {
+      for (let i = 0; i < docIds.length; i++) {
+        const id = docIds[i];
+        if (!id) continue;
+        const d = this.docs.get(id);
+        if (d) docs.push(d);
+      }
+    } else {
+      for (const d of this.docs.values()) docs.push(d);
+    }
+    if (docs.length === 0) return '(no documents loaded)';
     const out: string[] = [];
-    for (const d of this.docs.values()) {
-      out.push(`- id: \`${d.id}\` — ${d.title} — ~${d.tokens.toLocaleString('en-US')} tokens, ${d.lines.length.toLocaleString('en-US')} lines`);
-      if (this.previewLines > 0 && d.lines.length >= this.previewMinLines) {
+    const includeSamples = docs.length <= 20 && this.previewLines > 0;
+    const limit = Math.min(docs.length, MAX_MANIFEST_DOCS);
+    for (let idx = 0; idx < limit; idx++) {
+      const d = docs[idx];
+      if (!d) continue;
+      out.push(
+        `- id: \`${d.id}\` — ${d.title} — ~${d.tokens.toLocaleString('en-US')} tokens, ${d.lines.length.toLocaleString('en-US')} lines`,
+      );
+      if (includeSamples && d.lines.length >= this.previewMinLines) {
         out.push('  Sample lines:');
         let shown = 0;
         for (let i = 0; i < d.lines.length && shown < this.previewLines; i++) {
           const line = d.lines[i] ?? '';
           if (!line.trim()) continue;
-          out.push(`  ${i + 1}| ${line.length > this.previewLineChars ? `${line.slice(0, this.previewLineChars)}…` : line}`);
+          out.push(
+            `  ${i + 1}| ${line.length > this.previewLineChars ? `${line.slice(0, this.previewLineChars)}…` : line}`,
+          );
           shown++;
         }
       }
+    }
+    if (docs.length > MAX_MANIFEST_DOCS) {
+      const remaining = docs.length - MAX_MANIFEST_DOCS;
+      out.push(
+        `... and ${remaining} more documents (use list_documents, search, outline, or grep to explore)`,
+      );
     }
     return out.join('\n');
   }

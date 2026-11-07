@@ -55,7 +55,7 @@ export function inferScope(explicitScope: string | undefined, taskText: string, 
   const docs = store.list();
   if (docs.length > 1) {
     const matchedDocs = docs.filter((d) => {
-      const pat = new RegExp(`(?:^|[^a-z0-9_-])${escapeRegExp(d.id)}(?:$|[^a-z0-9_-])`, 'i');
+      const pat = new RegExp(`(?:^|[^a-z0-9_./-])${escapeRegExp(d.id)}(?:$|[^a-z0-9_./-])`, 'i');
       return pat.test(taskText);
     });
     if (matchedDocs.length === 1 && matchedDocs[0]) {

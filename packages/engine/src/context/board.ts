@@ -5,7 +5,7 @@ export interface BoardEntry {
   readonly id: number;
   readonly rev: number;
   readonly agent: string;
-  readonly kind: 'llm_query' | 'tally' | 'grep' | 'branch';
+  readonly kind: 'llm_query' | 'tally' | 'grep' | 'branch' | 'tool';
   readonly scope: string;
   readonly key: string;
   readonly summary: string;
@@ -65,8 +65,9 @@ const TASK_NOISE_WORDS: Readonly<Record<string, true>> = Object.freeze({
   file: true, scope: true, task: true, question: true,
 });
 
-const TASK_TOK_RE = /[a-z0-9_.\-]{2,}|\p{Script=Han}{2,}/gu;
-const TARGET_ID_RE = /\b(?:(?:lib|mod|dep|service|pkg|doc|app|spec)[_-][a-z0-9_-]+|[A-Z][A-Z0-9_]{2,}|doc[_-]?\d+)\b/g;
+const TASK_TOK_RE = /[a-z0-9_.\-/]{2,}|\p{Script=Han}{2,}/gu;
+const TARGET_ID_RE =
+  /\b(?:(?:lib|mod|dep|service|pkg|doc|app|spec)[_-][a-z0-9_-]+|[A-Z][A-Z0-9_]{2,}|doc[_-]?\d+|[A-Za-z0-9_.\-]+(?:\/[A-Za-z0-9_.\-]+)+)\b/g;
 
 /** Extract normalized content tokens from a task string for echo detection. */
 export function taskTokenSet(text: string): ReadonlySet<string> {

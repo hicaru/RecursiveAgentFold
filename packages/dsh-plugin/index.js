@@ -26,7 +26,7 @@ const CONCURRENCY_MAX = 8;
 const MAX_BODY_BYTES = 8192;
 const MAX_ENGINE_ENTRIES = 2000;
 const MAX_RUNS = 30;
-const MAX_RUN_EVENTS = 2000;
+const MAX_RUN_EVENTS = 5000;
 const RAF_ROOT_MAX_STEPS = 32;
 const RAF_ROOT_MAX_OUTPUT = 16000;
 const RAF_QUERY_MAX_OUTPUT = 4096;
@@ -745,6 +745,7 @@ function getSessionState(sessionId, raf) {
       chunkCounts: new Map(),
       board: new raf.ResearchBoard(),
       docs: new Map(),
+      sources: new Set(),
     };
     sessionStates.set(key, state);
   }
@@ -806,12 +807,72 @@ async function* rafStream(ctx, outer, settings, runs) {
     const extraTools = createDshTools(ctx, outer.sessionId, signal, sessionState);
     const inline = createInlineTrace(ctx, outer, signal);
     const events = [];
+    const emitEvent = (event) => {
+      events.push(event);
+      runs.append(run, event);
+      inline(event);
+    };
+    const persistIngested = (res) => {
+      if (!res || !Array.isArray(res.files)) return;
+      for (const f of res.files) {
+        if (f && typeof f.id === 'string' && typeof f.content === 'string') {
+          sessionState.docs.set(f.id, { title: f.title ?? f.id, text: f.content });
+        }
+      }
+    };
+    const promptPaths =
+      typeof raf.extractPromptPaths === 'function'
+        ? raf.extractPromptPaths(effectiveQuestion, process.cwd())
+        : [];
+    for (const promptPath of promptPaths) {
+      if (sessionState.sources.has(promptPath)) continue;
+      try {
+        const callEvent = {
+          type: 'tool_call',
+          agent: 'root',
+          step: 0,
+          action: { name: 'add_document', arguments: { path: promptPath } },
+          motivation: `Auto-ingest path referenced in prompt: ${promptPath}`,
+        };
+        emitEvent(callEvent);
+        const res = await store.addPath(promptPath, { cwd: process.cwd(), signal });
+        persistIngested(res);
+        sessionState.sources.add(promptPath);
+        sessionState.board.record({
+          agent: 'root',
+          kind: 'tool',
+          scope: res.sourceId,
+          key: `add_document:${res.sourceId}`,
+          summary: `Loaded ${res.files.length} document(s) (~${res.totalTokens.toLocaleString('en-US')} tokens) under prefix "${res.sourceId}" from ${res.resolvedPath}`,
+        });
+        emitEvent({
+          type: 'tool_result',
+          agent: 'root',
+          step: 0,
+          name: 'add_document',
+          observation: `Loaded ${res.files.length} document(s) (~${res.totalTokens.toLocaleString('en-US')} tokens) under prefix "${res.sourceId}" from ${res.resolvedPath}`,
+          tokens: res.totalTokens,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        emitEvent({
+          type: 'tool_result',
+          agent: 'root',
+          step: 0,
+          name: 'add_document',
+          observation: `Failed to auto-ingest ${promptPath}: ${msg}`,
+          tokens: 0,
+          error: msg,
+        });
+      }
+    }
     const engine = new raf.RecursiveAgentFold({
       rootLLM,
       ...(branchLLM !== undefined ? { branchLLM } : {}),
       queryLLM,
       store,
       board: sessionState.board,
+      ingest: { cwd: process.cwd(), onIngest: persistIngested },
       maxDepth: settings.depth,
       agent: { temperature: 0 },
       llmQuery: {
@@ -823,11 +884,7 @@ async function* rafStream(ctx, outer, settings, runs) {
       rootMaxSteps: RAF_ROOT_MAX_STEPS,
       extraTools,
       signal,
-      onEvent: (event) => {
-        events.push(event);
-        runs.append(run, event);
-        inline(event);
-      },
+      onEvent: emitEvent,
     });
     const result = await engine.run(effectiveQuestion);
     if (signal?.aborted) throw signal.reason ?? new Error('aborted');
@@ -1054,7 +1111,11 @@ export function apply(ctx) {
               const url = new URL(req.url ?? '/', 'http://localhost');
               const rest = url.pathname.slice(RUNS_ROUTE.length).replace(/^\/+/, '');
               if (rest === '') {
-                const sessionId = url.searchParams.get('sessionId') ?? undefined;
+                const rawSessionId = url.searchParams.get('sessionId');
+                const sessionId =
+                  typeof rawSessionId === 'string' && rawSessionId.trim() !== ''
+                    ? rawSessionId.trim()
+                    : undefined;
                 sendJson(res, 200, { runs: runs.list(sessionId) });
                 return;
               }

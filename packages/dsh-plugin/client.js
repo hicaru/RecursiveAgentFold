@@ -84,11 +84,17 @@ window.__ModuleLoader__.load({
       'view.noSteps': 'No steps',
       'view.noEvents': 'The run has no events yet.',
       'view.live': 'Live',
-      'view.root': 'Root',
+      'view.root': 'Root (orchestrator)',
       'view.errorLabel': 'Error',
       'view.llmCalls': 'LLM calls',
       'view.openAgent': 'Open subagent',
-      'view.parent': 'Back',
+      'view.parent': 'Parent',
+      'view.motivation': 'Motivation',
+      'view.inspector': 'Inspector',
+      'view.expandAll': 'Expand all',
+      'view.collapseAll': 'Collapse all',
+      'view.onlyThis': 'Focus only',
+      'view.close': 'Close',
     });
 
     const RU = Object.freeze({
@@ -145,11 +151,17 @@ window.__ModuleLoader__.load({
       'view.noSteps': 'Шагов нет',
       'view.noEvents': 'У запуска пока нет событий.',
       'view.live': 'Live',
-      'view.root': 'Корень',
+      'view.root': 'Корень (оркестратор)',
       'view.errorLabel': 'Ошибка',
       'view.llmCalls': 'Вызовы LLM',
       'view.openAgent': 'Открыть суб-агента',
-      'view.parent': 'Назад',
+      'view.parent': 'Родитель',
+      'view.motivation': 'Мотивация',
+      'view.inspector': 'Инспектор',
+      'view.expandAll': 'Развернуть все',
+      'view.collapseAll': 'Свернуть все',
+      'view.onlyThis': 'Только этот',
+      'view.close': 'Закрыть',
     });
 
     const CSS = `
@@ -279,6 +291,7 @@ window.__ModuleLoader__.load({
 .rafx-toolGlyph{display:grid;place-items:center;width:22px;height:22px;flex:none;border-radius:5px;background:var(--rafx-surface-2);color:var(--dsw-alias-label-caption);font-family:var(--ds-font-family-code,monospace);font-size:8.5px;font-weight:700;letter-spacing:-.03em}
 .rafx-tool[data-tool=llm_query] .rafx-toolGlyph{color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 11%,transparent)}
 .rafx-tool[data-tool=branch] .rafx-toolGlyph{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 10%,transparent)}
+.rafx-tool[data-tool=add_document] .rafx-toolGlyph,.rafx-tool[data-tool=list_documents] .rafx-toolGlyph{color:var(--dsw-alias-state-business-primary);background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 12%,transparent)}
 .rafx-tool[data-tool=grep] .rafx-toolGlyph,.rafx-tool[data-tool=read] .rafx-toolGlyph,.rafx-tool[data-tool=search] .rafx-toolGlyph,.rafx-tool[data-tool=outline] .rafx-toolGlyph,.rafx-tool[data-tool=tally] .rafx-toolGlyph{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 10%,transparent)}
 .rafx-toolName{font-family:var(--ds-font-family-code,monospace);font-size:11px;font-weight:600;line-height:16px;color:var(--rafx-ink)}
 .rafx-toolMeta{margin-left:auto;font-family:var(--ds-font-family-code,monospace);font-size:9.5px;line-height:14px;color:var(--dsw-alias-label-caption);font-variant-numeric:tabular-nums}
@@ -306,11 +319,50 @@ window.__ModuleLoader__.load({
 .rafx-runsEmpty h2{margin:0;font-size:14px;font-weight:500;line-height:20px;color:var(--rafx-ink-3)}
 .rafx-runsEmpty p{margin:0;font-size:12px;line-height:18px;max-width:44ch}
 .rafx-agentErrors{display:flex;flex-direction:column;gap:4px;margin-top:8px}
+.rafx-panelTabs{display:flex;align-items:center;gap:6px;padding:10px 20px;border-bottom:.5px solid var(--rafx-line);background:var(--rafx-surface)}
+[data-platform=darwin] .rafx-panelTabs{padding-top:calc(10px + var(--dsh-frame-top-clearance,0px))}
+.rafx-panelTab{height:28px;padding:0 12px;border:.5px solid transparent;border-radius:8px;background:transparent;color:var(--rafx-ink-3);font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;transition:background .14s,color .14s}
+.rafx-panelTab:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--rafx-ink)}
+.rafx-panelTab[aria-selected=true]{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 14%,var(--rafx-surface-2));border-color:color-mix(in srgb,var(--dsw-alias-brand-primary) 32%,transparent);color:var(--rafx-ink)}
+.rafx-dock{--rafx-ink:var(--dsw-alias-label-primary);--rafx-ink-2:var(--dsw-alias-label-secondary);--rafx-ink-3:var(--dsw-alias-label-tertiary);--rafx-line:var(--dsw-alias-border-l3);--rafx-surface:var(--dsw-alias-bg-layer-1);--rafx-surface-2:var(--dsw-alias-bg-layer-2);--rafx-business:var(--dsw-alias-state-business-primary);display:flex;flex-direction:column;width:100%;max-height:420px;margin-bottom:8px;border:.5px solid var(--rafx-line);border-radius:12px;background:var(--rafx-surface);color:var(--rafx-ink);font-size:12px;line-height:1.45;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,.06)}
+.rafx-dock[data-collapsed=true]{max-height:none}
+.rafx-dockTop{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:36px;padding:6px 10px;border-bottom:.5px solid var(--rafx-line);background:var(--rafx-surface-2);flex-wrap:wrap}
+.rafx-dock[data-collapsed=true] .rafx-dockTop{border-bottom:0}
+.rafx-dockTopLeft{display:flex;align-items:center;gap:7px;min-width:0;flex:1 1 240px}
+.rafx-dockBadge{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 6px;border-radius:5px;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 14%,transparent);color:var(--dsw-alias-brand-primary);font-family:var(--ds-font-family-code,monospace);font-size:10px;font-weight:700;letter-spacing:.03em;flex:none}
+.rafx-dockStatus{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 7px;border-radius:5px;border:.5px solid var(--rafx-line);background:var(--rafx-surface);font-size:10.5px;font-weight:600;flex:none}
+.rafx-dockStatus[data-status=running]{color:var(--dsw-alias-state-business-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 30%,transparent)}
+.rafx-dockStatus[data-status=done]{color:var(--dsw-alias-state-success-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 30%,transparent)}
+.rafx-dockStatus[data-status=error],.rafx-dockStatus[data-status=aborted]{color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 30%,transparent)}
+.rafx-dockQuestion{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--rafx-ink-2);font-size:11.5px;font-weight:500}
+.rafx-dockTopRight{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.rafx-dockMetrics{font-family:var(--ds-font-family-code,monospace);font-size:10px;color:var(--dsw-alias-label-caption);font-variant-numeric:tabular-nums;white-space:nowrap}
+.rafx-dockBtn{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 7px;border:.5px solid var(--rafx-line);border-radius:6px;background:var(--rafx-surface);color:var(--rafx-ink-2);font:inherit;font-size:10.5px;font-weight:500;cursor:pointer;white-space:nowrap}
+.rafx-dockBtn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--rafx-ink)}
+.rafx-dockSelect{height:22px;max-width:190px;padding:0 5px;border:.5px solid var(--rafx-line);border-radius:6px;background:var(--rafx-surface);color:var(--rafx-ink-2);font:inherit;font-size:10.5px;cursor:pointer}
+.rafx-dockBody{display:flex;flex-direction:column;gap:6px;padding:8px 10px;overflow:auto;max-height:372px}
+.rafx-treeAgent{border:.5px solid var(--rafx-line);border-radius:9px;background:var(--dsw-alias-bg-base);overflow:hidden}
+.rafx-treeAgent[data-status=running]{border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 38%,var(--rafx-line))}
+.rafx-treeAgentHead{display:flex;align-items:center;gap:7px;width:100%;min-height:32px;padding:4px 8px;background:var(--rafx-surface);border-bottom:.5px solid transparent}
+.rafx-treeAgent[data-open=true] .rafx-treeAgentHead{border-bottom-color:var(--rafx-line)}
+.rafx-treeAgentToggle{display:flex;align-items:center;gap:7px;flex:1;min-width:0;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.rafx-treeAgentToggle:hover .rafx-treeAgentTitle{color:var(--dsw-alias-brand-primary)}
+.rafx-treeAgentChevron{display:inline-flex;flex:none;color:var(--dsw-alias-label-caption);font-size:10px;width:12px;justify-content:center}
+.rafx-treeAgentTitle{font-family:var(--ds-font-family-code,monospace);font-size:11.5px;font-weight:600;color:var(--rafx-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rafx-treeBadge{display:inline-flex;align-items:center;height:17px;padding:0 5px;border:.5px solid var(--rafx-line);border-radius:4px;background:var(--rafx-surface-2);color:var(--rafx-ink-3);font-family:var(--ds-font-family-code,monospace);font-size:9.5px;line-height:15px;flex:none}
+.rafx-treeStage{display:inline-flex;align-items:center;height:17px;padding:0 5px;border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent);color:var(--dsw-alias-brand-primary);font-family:var(--ds-font-family-code,monospace);font-size:9.5px;font-weight:600;line-height:15px;flex:none}
+.rafx-treeTicker{flex:1;min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10.5px;color:var(--dsw-alias-label-caption)}
+.rafx-treeMeta{font-family:var(--ds-font-family-code,monospace);font-size:10px;color:var(--dsw-alias-label-caption);font-variant-numeric:tabular-nums;white-space:nowrap;flex:none}
+.rafx-treeAgentBody{display:flex;flex-direction:column;gap:6px;padding:8px}
+.rafx-treeTask{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:5px 8px;border-radius:6px;background:var(--rafx-surface-2);font-size:11px;color:var(--rafx-ink-2);overflow-wrap:anywhere}
+.rafx-stepToggle{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.rafx-stepPills{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap}
+.rafx-stepPill{padding:0 5px;border-radius:4px;background:var(--rafx-surface-2);color:var(--dsw-alias-label-caption);font-family:var(--ds-font-family-code,monospace);font-size:9px;font-weight:600;line-height:16px}
+.rafx-toolMot{flex:1;min-width:40px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10.5px;color:var(--rafx-ink-3)}
+.rafx-childLinks{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 @keyframes rafx-pulse{0%{opacity:.35}50%{opacity:1}100%{opacity:.35}}
 @media (max-width:820px){.rafx-runsBody{grid-template-columns:1fr}.rafx-agents{max-height:150px;border-right:0;border-bottom:.5px solid var(--rafx-line)}.rafx-agentList{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}.rafx-timeline{padding:12px 14px 40px}.rafx-runsTop{padding:12px 14px 10px}}
 @media (prefers-reduced-motion:reduce){.rafx-runsChip[data-status=running] .rafx-runsDot,.rafx-agentDot[data-status=running]{animation:none}}
-
-
 `;
 
     function toInteger(value, fallback, min, max) {
@@ -502,7 +554,11 @@ window.__ModuleLoader__.load({
     }
 
     function getRuns(sessionId) {
-      return requestHost('GET', undefined, 'sessionId=' + encodeURIComponent(sessionId), RUNS_API).then((data) =>
+      const query =
+        typeof sessionId === 'string' && sessionId.trim() !== ''
+          ? 'sessionId=' + encodeURIComponent(sessionId.trim())
+          : undefined;
+      return requestHost('GET', undefined, query, RUNS_API).then((data) =>
         Array.isArray(data.runs) ? data.runs : [],
       );
     }
@@ -959,7 +1015,7 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function RafPanel({ t }) {
+    function RafSettingsContent({ t }) {
       const settings = useStore(settingsStore);
       const [flash, setFlash] = React.useState(false);
       const first = React.useRef(true);
@@ -975,129 +1031,163 @@ window.__ModuleLoader__.load({
 
       const percent = Math.round(settings.reserve * 100);
       return h(
-        'section',
-        { className: 'rafx-page', 'aria-label': t('panel.title') },
+        'div',
+        { className: 'rafx-scroll' },
         h(
           'div',
-          { className: 'rafx-scroll' },
+          { className: 'rafx-content' },
           h(
-            'div',
-            { className: 'rafx-content' },
+            'header',
+            { className: 'rafx-header' },
             h(
-              'header',
-              { className: 'rafx-header' },
-              h(
-                'div',
-                { className: 'rafx-heading' },
-                h('h1', { className: 'rafx-title' }, t('panel.label')),
-                h('p', { className: 'rafx-subtitle' }, t('panel.subtitle')),
-              ),
-              h(
-                'div',
-                { className: 'rafx-headerActions' },
-                h(
-                  'span',
-                  { className: 'rafx-saved', 'data-flash': flash ? 'true' : undefined },
-                  h(CheckGlyph, { size: 12 }),
-                  t('tuning.saved'),
-                ),
-                h(
-                  'button',
-                  { type: 'button', className: 'rafx-mini', onClick: () => settingsStore.resetTuning() },
-                  h(ResetGlyph, { size: 13 }),
-                  t('tuning.reset'),
-                ),
-              ),
+              'div',
+              { className: 'rafx-heading' },
+              h('h1', { className: 'rafx-title' }, t('panel.label')),
+              h('p', { className: 'rafx-subtitle' }, t('panel.subtitle')),
             ),
             h(
               'div',
-              { className: 'rafx-list' },
-              h(SettingRow, {
-                label: t('tuning.depth.title'),
-                hint: t('tuning.depth.desc'),
-                control: h(Segmented, {
-                  label: t('tuning.depth.title'),
-                  value: settings.depth,
-                  options: [DEPTH_MIN, DEPTH_MIN + 1, DEPTH_MAX],
-                  onChange: (value) => settingsStore.update({ depth: value }),
-                }),
-              }),
-              h(SettingRow, {
-                label: t('tuning.reserve.title'),
-                hint: t('tuning.reserve.desc'),
-                control: h(
-                  'div',
-                  { className: 'rafx-range' },
-                  h('span', { className: 'rafx-value' }, percent + '%'),
-                  h('input', {
-                    type: 'range',
-                    className: 'rafx-slider',
-                    min: RESERVE_MIN,
-                    max: RESERVE_MAX,
-                    step: RESERVE_STEP,
-                    value: settings.reserve,
-                    'aria-label': t('tuning.reserve.title'),
-                    'aria-valuetext': percent + '%',
-                    onChange: (event) => settingsStore.update({ reserve: Number(event.target.value) }),
-                  }),
-                ),
-              }),
-              h(SettingRow, {
-                label: t('tuning.concurrency.title'),
-                hint: t('tuning.concurrency.desc'),
-                control: h(Stepper, {
-                  t,
-                  label: t('tuning.concurrency.title'),
-                  value: settings.concurrency,
-                  min: CONCURRENCY_MIN,
-                  max: CONCURRENCY_MAX,
-                  onChange: (value) => settingsStore.update({ concurrency: value }),
-                }),
-              }),
-              h(SettingRow, {
-                label: t('tuning.rootModel.title'),
-                hint: t('tuning.rootModel.desc'),
-                control: h('input', {
-                  type: 'text',
-                  className: 'rafx-input',
-                  value: settings.rootModel ?? '',
-                  placeholder: t('tuning.modelPlaceholder'),
-                  'aria-label': t('tuning.rootModel.title'),
-                  onChange: (event) => settingsStore.update({ rootModel: event.target.value }),
-                }),
-              }),
-              h(SettingRow, {
-                label: t('tuning.branchModel.title'),
-                hint: t('tuning.branchModel.desc'),
-                control: h('input', {
-                  type: 'text',
-                  className: 'rafx-input',
-                  value: settings.branchModel ?? '',
-                  placeholder: t('tuning.modelPlaceholder'),
-                  'aria-label': t('tuning.branchModel.title'),
-                  onChange: (event) => settingsStore.update({ branchModel: event.target.value }),
-                }),
-              }),
-              h(SettingRow, {
-                label: t('tuning.queryModel.title'),
-                hint: t('tuning.queryModel.desc'),
-                control: h('input', {
-                  type: 'text',
-                  className: 'rafx-input',
-                  value: settings.queryModel ?? '',
-                  placeholder: t('tuning.modelPlaceholder'),
-                  'aria-label': t('tuning.queryModel.title'),
-                  onChange: (event) => settingsStore.update({ queryModel: event.target.value }),
-                }),
-              }),
+              { className: 'rafx-headerActions' },
+              h(
+                'span',
+                { className: 'rafx-saved', 'data-flash': flash ? 'true' : undefined },
+                h(CheckGlyph, { size: 12 }),
+                t('tuning.saved'),
+              ),
+              h(
+                'button',
+                { type: 'button', className: 'rafx-mini', onClick: () => settingsStore.resetTuning() },
+                h(ResetGlyph, { size: 13 }),
+                t('tuning.reset'),
+              ),
             ),
+          ),
+          h(
+            'div',
+            { className: 'rafx-list' },
+            h(SettingRow, {
+              label: t('tuning.depth.title'),
+              hint: t('tuning.depth.desc'),
+              control: h(Segmented, {
+                label: t('tuning.depth.title'),
+                value: settings.depth,
+                options: [DEPTH_MIN, DEPTH_MIN + 1, DEPTH_MAX],
+                onChange: (value) => settingsStore.update({ depth: value }),
+              }),
+            }),
+            h(SettingRow, {
+              label: t('tuning.reserve.title'),
+              hint: t('tuning.reserve.desc'),
+              control: h(
+                'div',
+                { className: 'rafx-range' },
+                h('span', { className: 'rafx-value' }, percent + '%'),
+                h('input', {
+                  type: 'range',
+                  className: 'rafx-slider',
+                  min: RESERVE_MIN,
+                  max: RESERVE_MAX,
+                  step: RESERVE_STEP,
+                  value: settings.reserve,
+                  'aria-label': t('tuning.reserve.title'),
+                  'aria-valuetext': percent + '%',
+                  onChange: (event) => settingsStore.update({ reserve: Number(event.target.value) }),
+                }),
+              ),
+            }),
+            h(SettingRow, {
+              label: t('tuning.concurrency.title'),
+              hint: t('tuning.concurrency.desc'),
+              control: h(Stepper, {
+                t,
+                label: t('tuning.concurrency.title'),
+                value: settings.concurrency,
+                min: CONCURRENCY_MIN,
+                max: CONCURRENCY_MAX,
+                onChange: (value) => settingsStore.update({ concurrency: value }),
+              }),
+            }),
+            h(SettingRow, {
+              label: t('tuning.rootModel.title'),
+              hint: t('tuning.rootModel.desc'),
+              control: h('input', {
+                type: 'text',
+                className: 'rafx-input',
+                value: settings.rootModel ?? '',
+                placeholder: t('tuning.modelPlaceholder'),
+                'aria-label': t('tuning.rootModel.title'),
+                onChange: (event) => settingsStore.update({ rootModel: event.target.value }),
+              }),
+            }),
+            h(SettingRow, {
+              label: t('tuning.branchModel.title'),
+              hint: t('tuning.branchModel.desc'),
+              control: h('input', {
+                type: 'text',
+                className: 'rafx-input',
+                value: settings.branchModel ?? '',
+                placeholder: t('tuning.modelPlaceholder'),
+                'aria-label': t('tuning.branchModel.title'),
+                onChange: (event) => settingsStore.update({ branchModel: event.target.value }),
+              }),
+            }),
+            h(SettingRow, {
+              label: t('tuning.queryModel.title'),
+              hint: t('tuning.queryModel.desc'),
+              control: h('input', {
+                type: 'text',
+                className: 'rafx-input',
+                value: settings.queryModel ?? '',
+                placeholder: t('tuning.modelPlaceholder'),
+                'aria-label': t('tuning.queryModel.title'),
+                onChange: (event) => settingsStore.update({ queryModel: event.target.value }),
+              }),
+            }),
           ),
         ),
       );
     }
 
+    function RafPanel({ t, sessionId }) {
+      const [tab, setTab] = React.useState('inspector');
+      return h(
+        'section',
+        { className: 'rafx-page', 'aria-label': t('panel.title') },
+        h(
+          'div',
+          { className: 'rafx-panelTabs', role: 'tablist', 'aria-label': t('panel.title') },
+          h(
+            'button',
+            {
+              type: 'button',
+              role: 'tab',
+              className: 'rafx-panelTab',
+              'aria-selected': tab === 'inspector',
+              onClick: () => setTab('inspector'),
+            },
+            t('view.inspector'),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              role: 'tab',
+              className: 'rafx-panelTab',
+              'aria-selected': tab === 'settings',
+              onClick: () => setTab('settings'),
+            },
+            t('view.settings'),
+          ),
+        ),
+        tab === 'inspector'
+          ? h(RafRunsView, { t, sessionId, allowAllSessions: true })
+          : h(RafSettingsContent, { t }),
+      );
+    }
 
     const TOOL_BADGES = Object.freeze({
+      add_document: 'AD',
+      list_documents: 'LD',
       llm_query: 'LQ',
       search: 'SR',
       outline: 'OL',
@@ -1257,71 +1347,102 @@ window.__ModuleLoader__.load({
       return String(agent.terminated ?? '');
     }
 
+    function summarizeEventActivity(event) {
+      if (event === null || typeof event !== 'object') return '';
+      switch (event.type) {
+        case 'run_start':
+          return String(event.question ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
+        case 'step_start':
+          return `Step ${event.step ?? 0} · ctx ${formatTokens(event.contextTokens ?? 0)} tok · ${event.blocks ?? 0} blocks`;
+        case 'llm_call':
+          return `LLM ${event.model ?? event.role ?? ''} · ${formatTokens(event.usage?.promptTokens ?? 0)} in / ${formatTokens(event.usage?.completionTokens ?? 0)} out`;
+        case 'llm_response':
+          return String(event.reasoning || event.text || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+        case 'fold': {
+          const directive = event.outcome?.directive ?? event.requested;
+          return `Fold ${event.outcome?.kind ?? ''}: ${String(directive?.summary ?? '').slice(0, 100)}`.trim();
+        }
+        case 'tool_call': {
+          const action = event.action !== null && typeof event.action === 'object' ? event.action : {};
+          const mot = String(event.motivation ?? '').replace(/\s+/g, ' ').trim();
+          return `${action.name ?? 'tool'}${mot ? ': ' + mot.slice(0, 100) : ''}`;
+        }
+        case 'tool_result':
+          return `${event.name ?? 'tool'} → ${formatTokens(event.tokens ?? 0)} tok`;
+        case 'llm_query':
+          return `llm_query (${event.mode ?? 'locate'}, ${event.relevant ?? 0}/${event.chunks ?? 0} hits): ${String(event.query ?? '').slice(0, 90)}`;
+        case 'answer':
+          return `Answer: ${String(event.answer ?? '').replace(/\s+/g, ' ').trim().slice(0, 110)}`;
+        case 'error':
+        case 'format_error':
+          return `Error: ${String(event.message ?? (Array.isArray(event.errors) ? event.errors.join('; ') : 'error')).slice(0, 110)}`;
+        default:
+          return '';
+      }
+    }
+
     function buildRunModel(run) {
       if (run === null || typeof run !== 'object' || !Array.isArray(run.events)) return null;
       const agents = [];
+      const agentsByName = new Map();
       const activeByDepth = [];
-      let currentAgent = null;
       const now = Date.now();
-      for (const entry of run.events) {
-        const event = entry === null || typeof entry !== 'object' ? null : entry.event;
-        if (event === null || typeof event !== 'object') continue;
-        if (event.type === 'run_start') {
-          const depth = Number(event.depth ?? 0);
-          const parent = depth > 0 ? activeByDepth[depth - 1] ?? null : null;
-          const agent = {
-            id: 'agent:' + String(agents.length),
-            name: String(event.agent ?? 'agent'),
-            depth,
-            parentId: parent === null ? null : parent.id,
-            startedAt: entry.at,
-            endedAt: null,
-            terminated: null,
-            steps: [],
-            events: [],
-            errors: [],
-            usage: usageOfCalls([]),
-          };
-          if (parent !== null) {
-            const parentStep = parent.steps[parent.steps.length - 1];
-            if (parentStep !== undefined) {
-              const branchTool = [...parentStep.tools].reverse().find((tool) => tool.name === 'branch' && tool.childAgentId === null);
-              if (branchTool !== undefined) branchTool.childAgentId = agent.id;
+
+      const createAgentNode = (name, depth, parent, at, question, scope, isFollowUp) => {
+        const agent = {
+          id: 'agent:' + String(agents.length),
+          name,
+          depth,
+          parentId: parent === null ? null : parent.id,
+          parentName: parent === null ? (depth > 0 ? 'root' : null) : parent.name,
+          scope: scope ?? null,
+          isFollowUp: Boolean(isFollowUp),
+          question: String(question ?? ''),
+          startedAt: at,
+          endedAt: null,
+          terminated: null,
+          steps: [],
+          events: [],
+          errors: [],
+          childAgentIds: [],
+          usage: usageOfCalls([]),
+          currentStage: 'starting',
+          lastActivity: String(question ?? '').replace(/\s+/g, ' ').trim().slice(0, 120),
+        };
+        agents.push(agent);
+        agentsByName.set(name, agent);
+        activeByDepth[depth] = agent;
+        if (parent !== null) {
+          if (!parent.childAgentIds.includes(agent.id)) {
+            parent.childAgentIds.push(agent.id);
+          }
+          const parentStep = parent.steps[parent.steps.length - 1];
+          if (parentStep !== undefined) {
+            const branchTool =
+              [...parentStep.tools].reverse().find((tool) => tool.name === 'branch' && tool.result === null) ??
+              [...parentStep.tools].reverse().find((tool) => tool.name === 'branch');
+            if (branchTool !== undefined) {
+              if (branchTool.childAgentId === null) branchTool.childAgentId = agent.id;
+              if (!branchTool.childAgentIds.includes(agent.id)) {
+                branchTool.childAgentIds.push(agent.id);
+              }
             }
           }
-          activeByDepth[depth] = agent;
-          activeByDepth.length = depth + 1;
-          agents.push(agent);
-          currentAgent = agent;
-          continue;
         }
-        if (event.type === 'run_end') {
-          const depth = Number(event.depth ?? 0);
-          const agent = activeByDepth[depth] ?? currentAgent;
-          if (agent !== null) {
-            agent.endedAt = entry.at;
-            agent.terminated = String(event.terminated ?? 'answer');
-            if (agent.parentId !== null) {
-              currentAgent = agents.find((candidate) => candidate.id === agent.parentId) ?? null;
-              activeByDepth.length = currentAgent === null ? 0 : currentAgent.depth + 1;
-            } else {
-              currentAgent = null;
-              activeByDepth.length = 0;
-            }
-          }
-          continue;
-        }
-        const agent = currentAgent ?? agents[0] ?? null;
-        if (agent === null) continue;
-        if (event.type === 'step_start') {
+        return agent;
+      };
+
+      const ensureStep = (agent, stepIndex, at) => {
+        let step = agent.steps.find((candidate) => candidate.index === stepIndex);
+        if (step === undefined) {
           const previous = agent.steps[agent.steps.length - 1];
-          if (previous !== undefined && previous.endedAt === null) previous.endedAt = entry.at;
-          const step = {
-            index: Number(event.step ?? agent.steps.length),
-            at: entry.at,
+          if (previous !== undefined && previous.endedAt === null) previous.endedAt = at;
+          step = {
+            index: stepIndex,
+            at,
             endedAt: null,
-            contextTokens: Number(event.contextTokens ?? 0),
-            blocks: Number(event.blocks ?? 0),
+            contextTokens: 0,
+            blocks: 0,
             events: [],
             responses: [],
             folds: [],
@@ -1333,76 +1454,170 @@ window.__ModuleLoader__.load({
             usage: usageOfCalls([]),
           };
           agent.steps.push(step);
-          agent.events.push(entry);
+        }
+        return step;
+      };
+
+      for (const entry of run.events) {
+        const event = entry === null || typeof entry !== 'object' ? null : entry.event;
+        if (event === null || typeof event !== 'object') continue;
+        if (event.type === 'run_start') {
+          const name = String(event.agent ?? 'root');
+          const depth = Number(event.depth ?? (name === 'root' ? 0 : 1));
+          if (
+            name === 'root' &&
+            agents.length === 1 &&
+            agents[0].name === 'root' &&
+            agents[0].question === ''
+          ) {
+            const existingRoot = agents[0];
+            existingRoot.question = String(event.question ?? '');
+            existingRoot.currentStage = 'starting';
+            if (!existingRoot.lastActivity) {
+              existingRoot.lastActivity = summarizeEventActivity(event);
+            }
+            continue;
+          }
+          const parentName = typeof event.parent === 'string' && event.parent !== '' && event.parent !== 'user' ? event.parent : null;
+          const parent =
+            parentName !== null
+              ? agentsByName.get(parentName) ?? (depth > 0 ? activeByDepth[depth - 1] ?? agents[0] ?? null : null)
+              : depth > 0
+                ? activeByDepth[depth - 1] ?? agents[0] ?? null
+                : null;
+          createAgentNode(
+            name,
+            depth,
+            parent,
+            entry.at,
+            event.question ?? '',
+            event.scope ?? null,
+            event.isFollowUp,
+          );
           continue;
         }
-        const step =
-          event.step === undefined
-            ? agent.steps[agent.steps.length - 1]
-            : agent.steps.find((candidate) => candidate.index === event.step) ?? agent.steps[agent.steps.length - 1];
+        if (event.type === 'run_end') {
+          const name = String(event.agent ?? 'root');
+          const depth = Number(event.depth ?? 0);
+          const agent = agentsByName.get(name) ?? activeByDepth[depth] ?? agents[0] ?? null;
+          if (agent !== null) {
+            agent.endedAt = entry.at;
+            agent.terminated = String(event.terminated ?? 'answer');
+            agent.currentStage =
+              agent.terminated === 'error' || agent.terminated === 'filtered' ? 'error' : 'done';
+          }
+          continue;
+        }
+        const agentName = String(event.agent ?? 'root');
+        let agent = agentsByName.get(agentName);
+        if (agent === undefined) {
+          const fallbackDepth = Number(event.depth ?? (agentName === 'root' ? 0 : 1));
+          const fallbackParent = fallbackDepth > 0 ? agents[0] ?? null : null;
+          agent = createAgentNode(
+            agentName,
+            fallbackDepth,
+            fallbackParent,
+            entry.at,
+            agentName === 'root' ? (run.question ?? '') : '',
+            null,
+            false,
+          );
+        }
+        const activity = summarizeEventActivity(event);
+        if (activity !== '') agent.lastActivity = activity;
+
+        if (event.type === 'step_start') {
+          const stepIndex = Number(event.step ?? agent.steps.length);
+          const step = ensureStep(agent, stepIndex, entry.at);
+          step.contextTokens = Number(event.contextTokens ?? step.contextTokens);
+          step.blocks = Number(event.blocks ?? step.blocks);
+          step.events.push(entry);
+          agent.events.push(entry);
+          agent.currentStage = 'perceive';
+          continue;
+        }
+
+        const targetStepIndex =
+          event.step !== undefined
+            ? Number(event.step)
+            : agent.steps.length > 0
+              ? agent.steps[agent.steps.length - 1].index
+              : 0;
+        const step = ensureStep(agent, targetStepIndex, entry.at);
         agent.events.push(entry);
-        if (step !== undefined) step.events.push(entry);
+        step.events.push(entry);
+
         switch (event.type) {
           case 'llm_call':
-            if (step !== undefined) step.llmCalls.push(event);
+            step.llmCalls.push(event);
+            agent.currentStage = 'llm';
             break;
           case 'llm_response':
-            if (step !== undefined) step.responses.push(event);
+            step.responses.push(event);
+            agent.currentStage = 'reason';
             break;
           case 'fold':
-            if (step !== undefined) step.folds.push(event);
+            step.folds.push(event);
+            agent.currentStage = 'fold';
             break;
           case 'tool_call': {
-            if (step !== undefined) {
-              const action = event.action !== null && typeof event.action === 'object' ? event.action : {};
-              step.tools.push({
-                key: `${agent.id}:${step.index}:${step.tools.length}`,
-                name: String(action.name ?? 'tool'),
-                args: action.arguments ?? {},
-                motivation: String(event.motivation ?? ''),
-                at: entry.at,
-                endedAt: null,
-                result: null,
-                tokens: null,
-                error: null,
-                childAgentId: null,
-              });
-            }
+            const action = event.action !== null && typeof event.action === 'object' ? event.action : {};
+            const toolName = String(action.name ?? 'tool');
+            agent.currentStage = `tool:${toolName}`;
+            step.tools.push({
+              key: `${agent.id}:${step.index}:${step.tools.length}`,
+              name: toolName,
+              args: action.arguments ?? {},
+              motivation: String(event.motivation ?? ''),
+              at: entry.at,
+              endedAt: null,
+              result: null,
+              tokens: null,
+              error: null,
+              childAgentId: null,
+              childAgentIds: [],
+            });
             break;
           }
           case 'tool_result': {
-            if (step !== undefined) {
-              const tool =
-                [...step.tools].reverse().find((candidate) => candidate.result === null && candidate.name === event.name) ??
-                [...step.tools].reverse().find((candidate) => candidate.result === null);
-              if (tool !== undefined) {
-                tool.result = String(event.observation ?? '');
-                tool.tokens = Number(event.tokens ?? 0);
-                tool.error = event.error === undefined ? null : String(event.error);
-                tool.endedAt = entry.at;
-              }
+            const tool =
+              [...step.tools].reverse().find((candidate) => candidate.result === null && candidate.name === event.name) ??
+              [...step.tools].reverse().find((candidate) => candidate.result === null);
+            if (tool !== undefined) {
+              tool.result = String(event.observation ?? '');
+              tool.tokens = Number(event.tokens ?? 0);
+              tool.error = event.error === undefined ? null : String(event.error);
+              tool.endedAt = entry.at;
             }
             break;
           }
           case 'llm_query':
-            if (step !== undefined) step.queries.push(event);
+            step.queries.push(event);
+            agent.currentStage = 'query';
             break;
           case 'format_error':
-            if (step !== undefined) step.errors.push(event);
+            step.errors.push(event);
+            agent.currentStage = 'error';
             break;
           case 'error':
             agent.errors.push(event);
-            if (step !== undefined) step.errors.push(event);
+            step.errors.push(event);
+            agent.currentStage = 'error';
             break;
           case 'answer':
-            if (step !== undefined) step.answer = String(event.answer ?? '');
+            step.answer = String(event.answer ?? '');
+            agent.currentStage = 'answer';
             break;
           default:
             break;
         }
       }
+
       for (const agent of agents) {
-        if (agent.endedAt === null && run.status !== 'running') agent.endedAt = run.endedAt ?? now;
+        if (agent.endedAt === null && run.status !== 'running') {
+          agent.endedAt = run.endedAt ?? now;
+          agent.currentStage = run.status === 'error' ? 'error' : 'done';
+        }
         for (let index = 0; index < agent.steps.length; index += 1) {
           const step = agent.steps[index];
           const next = agent.steps[index + 1];
@@ -1416,13 +1631,44 @@ window.__ModuleLoader__.load({
           { input: 0, output: 0, cached: 0, calls: 0, cacheHitRate: 0 },
         );
       }
-      return { agents };
+
+      // Order agents in tree hierarchy (DFS from roots) so sub-agents group under their parent.
+      const ordered = [];
+      const visited = new Set();
+      const byId = new Map(agents.map((a) => [a.id, a]));
+      const visit = (agent) => {
+        if (!agent || visited.has(agent.id)) return;
+        visited.add(agent.id);
+        ordered.push(agent);
+        for (const childId of agent.childAgentIds) {
+          const child = byId.get(childId);
+          if (child) visit(child);
+        }
+      };
+      for (const agent of agents) {
+        if (agent.parentId === null) visit(agent);
+      }
+      for (const agent of agents) {
+        if (!visited.has(agent.id)) visit(agent);
+      }
+      return { agents: ordered };
+    }
+
+    if (typeof window !== 'undefined') {
+      window.__RAF_BUILD_RUN_MODEL__ = buildRunModel;
     }
 
     function RunTool({ t, tool, open, onToggle, agentById, onOpenAgent }) {
       const status = tool.error !== null ? 'error' : tool.result !== null ? 'done' : 'running';
-      const child = tool.childAgentId === null ? undefined : agentById.get(tool.childAgentId);
+      const childIds =
+        Array.isArray(tool.childAgentIds) && tool.childAgentIds.length > 0
+          ? tool.childAgentIds
+          : tool.childAgentId !== null
+            ? [tool.childAgentId]
+            : [];
+      const children = childIds.map((id) => agentById.get(id)).filter(Boolean);
       const displayTool = tool.name.startsWith('dsh_') ? tool.name.slice(4) : tool.name;
+      const motPreview = tool.motivation ? tool.motivation.replace(/\s+/g, ' ').trim() : '';
       return h(
         'div',
         { className: 'rafx-toolWrap' },
@@ -1438,10 +1684,12 @@ window.__ModuleLoader__.load({
           },
           h('span', { className: 'rafx-toolGlyph', 'aria-hidden': true }, toolBadge(tool.name)),
           h('span', { className: 'rafx-toolName' }, tool.name),
+          motPreview !== '' ? h('span', { className: 'rafx-toolMot', title: motPreview }, motPreview) : null,
           h(
             'span',
             { className: 'rafx-toolMeta' },
             [
+              children.length > 0 ? `${children.length} sub` : null,
               tool.tokens === null ? null : `${formatTokens(tool.tokens)} tok`,
               formatDuration((tool.endedAt ?? Date.now()) - tool.at),
             ]
@@ -1454,22 +1702,37 @@ window.__ModuleLoader__.load({
           ? h(
               'div',
               { className: 'rafx-toolBody' },
+              tool.motivation
+                ? h(
+                    'div',
+                    { className: 'rafx-field' },
+                    h('span', { className: 'rafx-fieldLabel' }, t('view.motivation')),
+                    h('pre', { className: 'rafx-pre' }, tool.motivation),
+                  )
+                : null,
               h(
                 'div',
                 { className: 'rafx-field' },
                 h('span', { className: 'rafx-fieldLabel' }, t('view.arguments')),
                 h('pre', { className: 'rafx-pre' }, prettyJson(tool.args)),
               ),
-              child === undefined
+              children.length === 0
                 ? null
                 : h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'rafx-linkButton',
-                      onClick: () => onOpenAgent(child.id),
-                    },
-                    `${t('view.openAgent')} → ${child.name}`,
+                    'div',
+                    { className: 'rafx-childLinks' },
+                    children.map((child) =>
+                      h(
+                        'button',
+                        {
+                          key: child.id,
+                          type: 'button',
+                          className: 'rafx-dockBtn',
+                          onClick: () => onOpenAgent(child.id),
+                        },
+                        `${t('view.openAgent')} → ${child.name}`,
+                      ),
+                    ),
                   ),
               tool.result === null
                 ? h('div', { className: 'rafx-hint' }, runStatusLabel(t, 'running'))
@@ -1485,159 +1748,236 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function RunStep({ t, step, openTools, onToggleTool, agentById, onOpenAgent }) {
+    function RunStep({ t, step, open = true, onToggleStep, openTools, onToggleTool, agentById, onOpenAgent }) {
       const duration = (step.endedAt ?? Date.now()) - step.at;
+      const stagePills = [];
+      if (step.llmCalls.length > 0) stagePills.push(`LLM×${step.llmCalls.length}`);
+      if (step.responses.length > 0) stagePills.push('REASON');
+      if (step.folds.length > 0) stagePills.push(`FOLD:${step.folds[step.folds.length - 1]?.outcome?.kind ?? 'ok'}`);
+      if (step.tools.length > 0) stagePills.push(`TOOL×${step.tools.length}`);
+      if (step.queries.length > 0) stagePills.push(`QUERY×${step.queries.length}`);
+      if (step.answer !== null) stagePills.push('ANSWER');
+      if (step.errors.length > 0) stagePills.push('ERROR');
+
+      const headerContent = h(
+        React.Fragment,
+        null,
+        h(
+          'div',
+          { className: 'rafx-stepPills' },
+          onToggleStep !== undefined
+            ? h('span', { className: 'rafx-treeAgentChevron', 'aria-hidden': true }, open ? '▾' : '▸')
+            : null,
+          h('span', { className: 'rafx-stepTag' }, `step ${step.index}`),
+          stagePills.map((pill) => h('span', { key: pill, className: 'rafx-stepPill' }, pill)),
+        ),
+        h(
+          'span',
+          { className: 'rafx-stepMeta' },
+          [
+            `ctx ${formatTokens(step.contextTokens)}`,
+            `blocks ${step.blocks}`,
+            step.usage.input > 0
+              ? `${formatTokens(step.usage.input)} in / ${formatTokens(step.usage.output)} out · cache ${formatPercent(step.usage.cacheHitRate)}`
+              : null,
+            formatDuration(duration),
+          ]
+            .filter((v) => v !== null)
+            .join(' · '),
+        ),
+      );
+
       return h(
         'section',
         { className: 'rafx-step' },
         h(
           'header',
           { className: 'rafx-stepHead' },
-          h('span', { className: 'rafx-stepTag' }, `step ${step.index}`),
-          h(
-            'span',
-            { className: 'rafx-stepMeta' },
-            [`ctx ${formatTokens(step.contextTokens)}`, `blocks ${step.blocks}`, formatDuration(duration)].join(' · '),
-          ),
+          onToggleStep !== undefined
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'rafx-stepToggle',
+                  'aria-expanded': open,
+                  onClick: onToggleStep,
+                },
+                headerContent,
+              )
+            : headerContent,
         ),
-        step.responses.map((response, responseIndex) =>
-          h(
-            'details',
-            { className: 'rafx-response', key: `${step.index}:response:${responseIndex}` },
-            h('summary', null, h('span', null, t('view.thinking'))),
-            h('pre', { className: 'rafx-pre' }, response.text === '' ? '—' : response.text),
-            response.reasoning === undefined
-              ? null
-              : h(
-                  'div',
-                  { className: 'rafx-field' },
-                  h('span', { className: 'rafx-fieldLabel' }, t('view.reasoning')),
-                  h('pre', { className: 'rafx-pre' }, response.reasoning),
-                ),
-          ),
-        ),
-        step.folds.map((fold, foldIndex) => {
-          const directive = fold.outcome?.directive ?? fold.requested;
-          const range = Array.isArray(directive?.range) ? `[${directive.range.join(',')}]` : '';
-          return h(
-            'div',
-            { className: 'rafx-fold', key: `${step.index}:fold:${foldIndex}` },
-            h('span', { className: 'rafx-foldTag' }, `${t('view.fold')} ${fold.outcome?.kind ?? ''}`.trim()),
-            h('span', { className: 'rafx-foldRange' }, range),
-            h('p', { className: 'rafx-foldSummary' }, directive?.summary ?? '—'),
-            Array.isArray(fold.outcome?.corrections) && fold.outcome.corrections.length > 0
-              ? h('p', { className: 'rafx-foldCorrection' }, fold.outcome.corrections.join('; '))
-              : null,
-          );
-        }),
-        step.tools.length === 0
+        !open
           ? null
           : h(
-              'div',
-              { className: 'rafx-tools' },
-              step.tools.map((tool) =>
-                h(RunTool, {
-                  key: tool.key,
-                  t,
-                  tool,
-                  open: openTools.has(tool.key),
-                  onToggle: () => onToggleTool(tool.key),
-                  agentById,
-                  onOpenAgent,
-                }),
-              ),
-            ),
-        step.queries.length === 0
-          ? null
-          : h(
-              'div',
-              { className: 'rafx-queries' },
-              step.queries.map((query, queryIndex) =>
-                h(
-                  'div',
-                  { className: 'rafx-query', key: `${step.index}:query:${queryIndex}` },
-                  h('span', { className: 'rafx-queryName' }, 'llm_query'),
-                  h(
-                    'span',
-                    { className: 'rafx-queryMeta' },
-                    [
-                      `mode=${query.mode}`,
-                      `chunks=${query.chunks}`,
-                      `relevant=${query.relevant}`,
-                      `memo=${query.memoHits}`,
-                      `${formatTokens(query.chunkTokens)} tok/chunk`,
-                      query.usage === undefined
-                        ? null
-                        : `${formatTokens(query.usage.promptTokens)} in / ${formatTokens(query.usage.completionTokens)} out · cache ${formatPercent(query.usage.promptTokens > 0 ? query.usage.cachedTokens / query.usage.promptTokens : 0)}`,
-                    ]
-                      .filter((value) => value !== null)
-                      .join(' · '),
+              React.Fragment,
+              null,
+              step.llmCalls.length === 0
+                ? null
+                : h(
+                    'details',
+                    { className: 'rafx-llm' },
+                    h(
+                      'summary',
+                      null,
+                      h('span', null, `${t('view.llmCalls')} (${step.llmCalls.length})`),
+                      h(
+                        'span',
+                        { className: 'rafx-llmMeta' },
+                        `${formatTokens(step.usage.input)} in · ${formatTokens(step.usage.output)} out · cache ${formatPercent(step.usage.cacheHitRate)}`,
+                      ),
+                    ),
+                    h(
+                      'div',
+                      { className: 'rafx-llmRows' },
+                      step.llmCalls.map((call, callIndex) =>
+                        h(
+                          'div',
+                          { className: 'rafx-llmRow', key: `${step.index}:llm:${callIndex}` },
+                          h('span', { className: 'rafx-llmRole' }, call.role),
+                          h('span', { className: 'rafx-llmModel' }, call.model),
+                          h('span', null, `${formatTokens(call.usage?.promptTokens ?? 0)} in`),
+                          h('span', null, `${formatTokens(call.usage?.completionTokens ?? 0)} out`),
+                          h(
+                            'span',
+                            null,
+                            `cache ${formatPercent(call.usage?.promptTokens ? (call.usage.cachedTokens ?? 0) / call.usage.promptTokens : 0)}`,
+                          ),
+                          call.finishReason ? h('span', null, `finish=${call.finishReason}`) : null,
+                          call.attempt ? h('span', null, `retry=${call.attempt}`) : null,
+                          h('span', null, formatDuration(call.latencyMs ?? 0)),
+                        ),
+                      ),
+                    ),
                   ),
-                  h('p', { className: 'rafx-queryText' }, query.query),
-                ),
-              ),
-            ),
-        step.llmCalls.length === 0
-          ? null
-          : h(
-              'details',
-              { className: 'rafx-llm' },
-              h(
-                'summary',
-                null,
-                h('span', null, `${t('view.llmCalls')} (${step.llmCalls.length})`),
+              step.responses.map((response, responseIndex) =>
                 h(
-                  'span',
-                  { className: 'rafx-llmMeta' },
-                  `${formatTokens(step.usage.input)} in · ${formatTokens(step.usage.output)} out · cache ${formatPercent(step.usage.cacheHitRate)}`,
-                ),
-              ),
-              h(
-                'div',
-                { className: 'rafx-llmRows' },
-                step.llmCalls.map((call, callIndex) =>
+                  'details',
+                  { className: 'rafx-response', key: `${step.index}:response:${responseIndex}` },
+                  h(
+                    'summary',
+                    null,
+                    h('span', null, t('view.thinking')),
+                    response.reasoning
+                      ? h(
+                          'span',
+                          { className: 'rafx-llmMeta' },
+                          `${t('view.reasoning')} (${formatTokens(response.reasoning.length / 3.6)} tok)`,
+                        )
+                      : null,
+                  ),
+                  response.reasoning === undefined || response.reasoning === ''
+                    ? null
+                    : h(
+                        'div',
+                        { className: 'rafx-field' },
+                        h('span', { className: 'rafx-fieldLabel' }, t('view.reasoning')),
+                        h('pre', { className: 'rafx-pre' }, response.reasoning),
+                      ),
                   h(
                     'div',
-                    { className: 'rafx-llmRow', key: `${step.index}:llm:${callIndex}` },
-                    h('span', { className: 'rafx-llmRole' }, call.role),
-                    h('span', { className: 'rafx-llmModel' }, call.model),
-                    h('span', null, `${formatTokens(call.usage?.promptTokens ?? 0)} in`),
-                    h('span', null, `${formatTokens(call.usage?.completionTokens ?? 0)} out`),
-                    h('span', null, `cache ${formatPercent(call.usage?.promptTokens ? (call.usage.cachedTokens ?? 0) / call.usage.promptTokens : 0)}`),
-                    h('span', null, formatDuration(call.latencyMs ?? 0)),
+                    { className: 'rafx-field' },
+                    h('span', { className: 'rafx-fieldLabel' }, t('view.thinking')),
+                    h('pre', { className: 'rafx-pre' }, response.text === '' ? '—' : response.text),
                   ),
                 ),
               ),
-            ),
-        step.errors.map((error, errorIndex) =>
-          h(
-            'div',
-            { className: 'rafx-error', key: `${step.index}:error:${errorIndex}` },
-            error.type === 'format_error'
-              ? `format: ${Array.isArray(error.errors) ? error.errors.join('; ') : ''}`
-              : String(error.message ?? error.type),
-          ),
-        ),
-        step.answer === null
-          ? null
-          : h(
-              'div',
-              { className: 'rafx-answer' },
-              h('span', { className: 'rafx-fieldLabel' }, t('view.answer')),
-              h('p', null, step.answer === '' ? '—' : step.answer),
+              step.folds.map((fold, foldIndex) => {
+                const directive = fold.outcome?.directive ?? fold.requested;
+                const range = Array.isArray(directive?.range) ? `[${directive.range.join(',')}]` : '';
+                return h(
+                  'div',
+                  { className: 'rafx-fold', key: `${step.index}:fold:${foldIndex}` },
+                  h('span', { className: 'rafx-foldTag' }, `${t('view.fold')} ${fold.outcome?.kind ?? ''}`.trim()),
+                  h('span', { className: 'rafx-foldRange' }, range),
+                  h('p', { className: 'rafx-foldSummary' }, directive?.summary ?? '—'),
+                  Array.isArray(fold.outcome?.corrections) && fold.outcome.corrections.length > 0
+                    ? h('p', { className: 'rafx-foldCorrection' }, fold.outcome.corrections.join('; '))
+                    : null,
+                );
+              }),
+              step.tools.length === 0
+                ? null
+                : h(
+                    'div',
+                    { className: 'rafx-tools' },
+                    step.tools.map((tool) =>
+                      h(RunTool, {
+                        key: tool.key,
+                        t,
+                        tool,
+                        open: openTools.has(tool.key),
+                        onToggle: () => onToggleTool(tool.key),
+                        agentById,
+                        onOpenAgent,
+                      }),
+                    ),
+                  ),
+              step.queries.length === 0
+                ? null
+                : h(
+                    'div',
+                    { className: 'rafx-queries' },
+                    step.queries.map((query, queryIndex) =>
+                      h(
+                        'div',
+                        { className: 'rafx-query', key: `${step.index}:query:${queryIndex}` },
+                        h('span', { className: 'rafx-queryName' }, 'llm_query'),
+                        h(
+                          'span',
+                          { className: 'rafx-queryMeta' },
+                          [
+                            `mode=${query.mode}`,
+                            `chunks=${query.chunks}`,
+                            `relevant=${query.relevant}`,
+                            `memo=${query.memoHits}`,
+                            `${formatTokens(query.chunkTokens)} tok/chunk`,
+                            query.usage === undefined
+                              ? null
+                              : `${formatTokens(query.usage.promptTokens)} in / ${formatTokens(query.usage.completionTokens)} out · cache ${formatPercent(query.usage.promptTokens > 0 ? query.usage.cachedTokens / query.usage.promptTokens : 0)}`,
+                          ]
+                            .filter((value) => value !== null)
+                            .join(' · '),
+                        ),
+                        h('p', { className: 'rafx-queryText' }, query.query),
+                      ),
+                    ),
+                  ),
+              step.errors.map((error, errorIndex) =>
+                h(
+                  'div',
+                  { className: 'rafx-error', key: `${step.index}:error:${errorIndex}` },
+                  error.type === 'format_error'
+                    ? `format: ${Array.isArray(error.errors) ? error.errors.join('; ') : ''}`
+                    : String(error.message ?? error.type),
+                ),
+              ),
+              step.answer === null
+                ? null
+                : h(
+                    'div',
+                    { className: 'rafx-answer' },
+                    h('span', { className: 'rafx-fieldLabel' }, t('view.answer')),
+                    h('p', null, step.answer === '' ? '—' : step.answer),
+                  ),
             ),
       );
     }
 
-    function RafRunsView({ t, sessionId }) {
+    function RafLiveDock({ t, sessionId }) {
+      const engine = useEngine(sessionId);
       const [runs, setRuns] = React.useState([]);
       const [selectedRunId, setSelectedRunId] = React.useState(null);
       const [run, setRun] = React.useState(null);
-      const [selectedAgentId, setSelectedAgentId] = React.useState(null);
+      const [dockCollapsed, setDockCollapsed] = React.useState(false);
+      const [dismissedRunId, setDismissedRunId] = React.useState(null);
+      const [openAgents, setOpenAgents] = React.useState(() => new Set(['agent:0']));
+      const [openSteps, setOpenSteps] = React.useState(() => new Set());
       const [openTools, setOpenTools] = React.useState(() => new Set());
-      const [error, setError] = React.useState(null);
-      const manual = React.useRef(false);
-      const runningRef = React.useRef(false);
+      const manualRunRef = React.useRef(false);
+      const manualAgentsRef = React.useRef(new Set());
+      const manualStepsRef = React.useRef(new Set());
+      const seenAgentsRef = React.useRef(new Set());
+      const seenStepsRef = React.useRef(new Set());
 
       React.useEffect(() => {
         if (typeof sessionId !== 'string' || !sessionId) return undefined;
@@ -1645,15 +1985,24 @@ window.__ModuleLoader__.load({
         let timer = 0;
         const load = async () => {
           try {
-            const next = await getRuns(sessionId);
+            const list = await getRuns(sessionId);
             if (!active) return;
-            setRuns(next);
-            if (!manual.current && next[0] !== undefined) setSelectedRunId(next[0].id);
-            setError(null);
-          } catch (reason) {
-            if (active) setError(reason instanceof Error ? reason.message : String(reason));
+            setRuns(list);
+            if (list[0] !== undefined) {
+              if (!manualRunRef.current || list[0].status === 'running') {
+                setSelectedRunId((prev) => {
+                  if (prev !== list[0].id && list[0].status === 'running') {
+                    manualRunRef.current = false;
+                    return list[0].id;
+                  }
+                  return prev ?? list[0].id;
+                });
+              }
+            }
+          } catch {
+            // Keep last known run list on transient poll failure.
           } finally {
-            if (active) timer = window.setTimeout(load, 2000);
+            if (active) timer = window.setTimeout(load, 1200);
           }
         };
         void load();
@@ -1664,7 +2013,430 @@ window.__ModuleLoader__.load({
       }, [sessionId]);
 
       React.useEffect(() => {
+        if (typeof selectedRunId !== 'string' || !selectedRunId) return undefined;
+        let active = true;
+        let timer = 0;
+        let isRunning = true;
+        const load = async () => {
+          try {
+            const detail = await getRun(selectedRunId);
+            if (!active) return;
+            setRun(detail);
+            isRunning = detail.status === 'running';
+          } catch {
+            // Ignore transient poll errors.
+          } finally {
+            if (active) timer = window.setTimeout(load, isRunning ? 500 : 2200);
+          }
+        };
+        void load();
+        return () => {
+          active = false;
+          if (timer !== 0) window.clearTimeout(timer);
+        };
+      }, [selectedRunId]);
+
+      React.useEffect(() => {
+        manualAgentsRef.current = new Set();
+        manualStepsRef.current = new Set();
+        seenAgentsRef.current = new Set();
+        seenStepsRef.current = new Set();
+        setOpenAgents(new Set(['agent:0']));
+        setOpenSteps(new Set());
+        setOpenTools(new Set());
+      }, [selectedRunId]);
+
+      const model = React.useMemo(() => buildRunModel(run), [run]);
+      const agents = model === null ? [] : model.agents;
+      const agentById = React.useMemo(
+        () => new Map(agents.map((candidate) => [candidate.id, candidate])),
+        [agents],
+      );
+
+      // Auto-expand newly spawned running agents and their latest step unless manually toggled.
+      React.useEffect(() => {
+        if (agents.length === 0) return;
+        setOpenAgents((prev) => {
+          let changed = false;
+          const next = new Set(prev);
+          for (const agent of agents) {
+            if (!seenAgentsRef.current.has(agent.id)) {
+              seenAgentsRef.current.add(agent.id);
+              if ((agent.depth === 0 || agent.endedAt === null) && !manualAgentsRef.current.has(agent.id)) {
+                next.add(agent.id);
+                changed = true;
+              }
+            }
+          }
+          return changed ? next : prev;
+        });
+        setOpenSteps((prev) => {
+          let changed = false;
+          const next = new Set(prev);
+          for (const agent of agents) {
+            for (let i = 0; i < agent.steps.length; i++) {
+              const step = agent.steps[i];
+              const stepKey = `${agent.id}:${step.index}`;
+              const isLatest = i === agent.steps.length - 1;
+              if (!seenStepsRef.current.has(stepKey)) {
+                seenStepsRef.current.add(stepKey);
+                if (isLatest && !manualStepsRef.current.has(stepKey)) {
+                  next.add(stepKey);
+                  changed = true;
+                }
+              }
+            }
+          }
+          return changed ? next : prev;
+        });
+      }, [agents]);
+
+      if (typeof sessionId !== 'string' || !sessionId) return null;
+      if (runs.length === 0 && engine !== ENGINE_RAF) return null;
+      const activeSummary = runs.find((candidate) => candidate.id === selectedRunId) ?? runs[0];
+      if (!activeSummary) return null;
+      if (dismissedRunId === activeSummary.id && activeSummary.status !== 'running') return null;
+
+      const status = run?.status ?? activeSummary.status ?? 'running';
+      const question = run?.question ?? activeSummary.question ?? '';
+      const usage = run !== null ? usageOfRun(run) : activeSummary.usage ?? usageOfCalls([]);
+      const duration =
+        run !== null
+          ? (run.endedAt ?? Date.now()) - run.startedAt
+          : (activeSummary.endedAt ?? Date.now()) - activeSummary.startedAt;
+
+      const toggleAgent = (agentId) => {
+        manualAgentsRef.current.add(agentId);
+        setOpenAgents((current) => {
+          const next = new Set(current);
+          if (next.has(agentId)) next.delete(agentId);
+          else next.add(agentId);
+          return next;
+        });
+      };
+
+      const focusOnlyAgent = (agentId) => {
+        for (const a of agents) manualAgentsRef.current.add(a.id);
+        setOpenAgents(new Set([agentId]));
+        const target = agentById.get(agentId);
+        if (target && target.steps.length > 0) {
+          const latestStep = target.steps[target.steps.length - 1];
+          setOpenSteps((curr) => {
+            const next = new Set(curr);
+            next.add(`${target.id}:${latestStep.index}`);
+            return next;
+          });
+        }
+      };
+
+      const expandAll = () => {
+        setOpenAgents(new Set(agents.map((a) => a.id)));
+        const allStepKeys = [];
+        for (const a of agents) {
+          for (const s of a.steps) allStepKeys.push(`${a.id}:${s.index}`);
+        }
+        setOpenSteps(new Set(allStepKeys));
+      };
+
+      const collapseAll = () => {
+        for (const a of agents) manualAgentsRef.current.add(a.id);
+        setOpenAgents(new Set());
+      };
+
+      const toggleStep = (stepKey) => {
+        manualStepsRef.current.add(stepKey);
+        setOpenSteps((current) => {
+          const next = new Set(current);
+          if (next.has(stepKey)) next.delete(stepKey);
+          else next.add(stepKey);
+          return next;
+        });
+      };
+
+      const toggleTool = (toolKey) => {
+        setOpenTools((current) => {
+          const next = new Set(current);
+          if (next.has(toolKey)) next.delete(toolKey);
+          else next.add(toolKey);
+          return next;
+        });
+      };
+
+      const openSubAgent = (agentId) => {
+        setDockCollapsed(false);
+        manualAgentsRef.current.add(agentId);
+        setOpenAgents((current) => {
+          const next = new Set(current);
+          next.add(agentId);
+          return next;
+        });
+        const target = agentById.get(agentId);
+        if (target && target.steps.length > 0) {
+          const latest = target.steps[target.steps.length - 1];
+          setOpenSteps((current) => {
+            const next = new Set(current);
+            next.add(`${target.id}:${latest.index}`);
+            return next;
+          });
+        }
+      };
+
+      return h(
+        'section',
+        {
+          className: 'rafx-dock',
+          'data-collapsed': dockCollapsed ? 'true' : undefined,
+          'aria-label': 'RAF Live Execution Dock',
+        },
+        h(
+          'header',
+          { className: 'rafx-dockTop' },
+          h(
+            'div',
+            { className: 'rafx-dockTopLeft' },
+            h('span', { className: 'rafx-dockBadge' }, 'RAF'),
+            h(
+              'span',
+              { className: 'rafx-dockStatus', 'data-status': status },
+              h('span', { className: 'rafx-runsDot', 'aria-hidden': true }),
+              runStatusLabel(t, status),
+            ),
+            h('span', { className: 'rafx-dockQuestion', title: question }, question),
+          ),
+          h(
+            'div',
+            { className: 'rafx-dockTopRight' },
+            h(
+              'span',
+              { className: 'rafx-dockMetrics' },
+              [
+                formatDuration(duration),
+                `${run?.stepCount ?? activeSummary.stepCount ?? 0} steps`,
+                `${agents.length || (run?.agentCount ?? activeSummary.agentCount ?? 1)} agents`,
+                `${formatTokens(usage.input)}/${formatTokens(usage.output)} tok`,
+                `root cache ${formatPercent(usage.rootCacheHitRate ?? usage.cacheHitRate)}`,
+              ].join(' · '),
+            ),
+            runs.length > 1
+              ? h(
+                  'select',
+                  {
+                    className: 'rafx-dockSelect',
+                    value: selectedRunId ?? activeSummary.id,
+                    'aria-label': t('view.selectRun'),
+                    onChange: (event) => {
+                      manualRunRef.current = true;
+                      setDismissedRunId(null);
+                      setSelectedRunId(event.target.value);
+                    },
+                  },
+                  runs.map((candidate) =>
+                    h(
+                      'option',
+                      { key: candidate.id, value: candidate.id },
+                      `${formatClock(candidate.startedAt)} · ${runStatusLabel(t, candidate.status)} · ${candidate.question.slice(0, 36)}`,
+                    ),
+                  ),
+                )
+              : null,
+            !dockCollapsed
+              ? h(
+                  'button',
+                  { type: 'button', className: 'rafx-dockBtn', onClick: expandAll },
+                  t('view.expandAll'),
+                )
+              : null,
+            !dockCollapsed
+              ? h(
+                  'button',
+                  { type: 'button', className: 'rafx-dockBtn', onClick: collapseAll },
+                  t('view.collapseAll'),
+                )
+              : null,
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'rafx-dockBtn',
+                onClick: () => setDockCollapsed((c) => !c),
+                'aria-expanded': !dockCollapsed,
+              },
+              dockCollapsed ? '▸' : '▾',
+            ),
+            status !== 'running'
+              ? h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'rafx-dockBtn',
+                    'aria-label': t('view.close'),
+                    onClick: () => setDismissedRunId(activeSummary.id),
+                  },
+                  '×',
+                )
+              : null,
+          ),
+        ),
+        dockCollapsed
+          ? null
+          : h(
+              'div',
+              { className: 'rafx-dockBody' },
+              agents.length === 0
+                ? h('div', { className: 'rafx-hint' }, run?.error ?? t('view.noEvents'))
+                : agents.map((agent) => {
+                    const isOpen = openAgents.has(agent.id);
+                    const aStatus = agentStatus(agent);
+                    return h(
+                      'div',
+                      {
+                        key: agent.id,
+                        className: 'rafx-treeAgent',
+                        'data-open': isOpen ? 'true' : undefined,
+                        'data-status': aStatus,
+                        style: { marginLeft: `${Math.min(agent.depth * 14, 42)}px` },
+                      },
+                      h(
+                        'div',
+                        { className: 'rafx-treeAgentHead' },
+                        h(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'rafx-treeAgentToggle',
+                            'aria-expanded': isOpen,
+                            onClick: () => toggleAgent(agent.id),
+                          },
+                          h('span', { className: 'rafx-treeAgentChevron', 'aria-hidden': true }, isOpen ? '▾' : '▸'),
+                          h('span', { className: 'rafx-agentDot', 'data-status': aStatus, 'aria-hidden': true }),
+                          h(
+                            'span',
+                            { className: 'rafx-treeAgentTitle' },
+                            agent.depth === 0 ? t('view.root') : agent.name,
+                          ),
+                          h('span', { className: 'rafx-treeBadge' }, `d${agent.depth}`),
+                          agent.scope ? h('span', { className: 'rafx-treeBadge' }, `scope=${agent.scope}`) : null,
+                          agent.isFollowUp ? h('span', { className: 'rafx-treeBadge' }, 'follow-up') : null,
+                          h('span', { className: 'rafx-treeStage' }, agent.currentStage),
+                          !isOpen && agent.lastActivity
+                            ? h('span', { className: 'rafx-treeTicker', title: agent.lastActivity }, agent.lastActivity)
+                            : null,
+                        ),
+                        h(
+                          'span',
+                          { className: 'rafx-treeMeta' },
+                          `${agent.steps.length} steps · ${formatTokens(agent.usage.input)}/${formatTokens(agent.usage.output)} tok · cache ${formatPercent(agent.usage.cacheHitRate)}`,
+                        ),
+                        agents.length > 1
+                          ? h(
+                              'button',
+                              {
+                                type: 'button',
+                                className: 'rafx-dockBtn',
+                                onClick: () => focusOnlyAgent(agent.id),
+                              },
+                              t('view.onlyThis'),
+                            )
+                          : null,
+                      ),
+                      !isOpen
+                        ? null
+                        : h(
+                            'div',
+                            { className: 'rafx-treeAgentBody' },
+                            agent.question
+                              ? h(
+                                  'div',
+                                  { className: 'rafx-treeTask' },
+                                  h('span', null, agent.question),
+                                  agent.parentId !== null
+                                    ? h(
+                                        'button',
+                                        {
+                                          type: 'button',
+                                          className: 'rafx-linkButton',
+                                          onClick: () => openSubAgent(agent.parentId),
+                                        },
+                                        `← ${t('view.parent')} (${agent.parentName ?? 'root'})`,
+                                      )
+                                    : null,
+                                )
+                              : null,
+                            agent.steps.length === 0
+                              ? h('div', { className: 'rafx-hint' }, t('view.noSteps'))
+                              : agent.steps.map((step) => {
+                                  const stepKey = `${agent.id}:${step.index}`;
+                                  return h(RunStep, {
+                                    key: stepKey,
+                                    t,
+                                    step,
+                                    open: openSteps.has(stepKey),
+                                    onToggleStep: () => toggleStep(stepKey),
+                                    openTools,
+                                    onToggleTool: toggleTool,
+                                    agentById,
+                                    onOpenAgent: openSubAgent,
+                                  });
+                                }),
+                            agent.errors.length === 0
+                              ? null
+                              : h(
+                                  'div',
+                                  { className: 'rafx-agentErrors' },
+                                  agent.errors.map((item, idx) =>
+                                    h(
+                                      'div',
+                                      { className: 'rafx-error', key: `${agent.id}:err:${idx}` },
+                                      String(item.message ?? item.type),
+                                    ),
+                                  ),
+                                ),
+                          ),
+                    );
+                  }),
+            ),
+      );
+    }
+
+    function RafRunsView({ t, sessionId, allowAllSessions = false }) {
+      const [runs, setRuns] = React.useState([]);
+      const [selectedRunId, setSelectedRunId] = React.useState(null);
+      const [run, setRun] = React.useState(null);
+      const [selectedAgentId, setSelectedAgentId] = React.useState(null);
+      const [openSteps, setOpenSteps] = React.useState(() => new Set());
+      const [openTools, setOpenTools] = React.useState(() => new Set());
+      const [error, setError] = React.useState(null);
+      const manual = React.useRef(false);
+      const runningRef = React.useRef(false);
+
+      React.useEffect(() => {
+        const hasSession = typeof sessionId === 'string' && sessionId.trim() !== '';
+        if (!hasSession && !allowAllSessions) return undefined;
+        let active = true;
+        let timer = 0;
+        const load = async () => {
+          try {
+            const next = await getRuns(hasSession ? sessionId : undefined);
+            if (!active) return;
+            setRuns(next);
+            if (!manual.current && next[0] !== undefined) setSelectedRunId(next[0].id);
+            setError(null);
+          } catch (reason) {
+            if (active) setError(reason instanceof Error ? reason.message : String(reason));
+          } finally {
+            if (active) timer = window.setTimeout(load, 1800);
+          }
+        };
+        void load();
+        return () => {
+          active = false;
+          if (timer !== 0) window.clearTimeout(timer);
+        };
+      }, [sessionId, allowAllSessions]);
+
+      React.useEffect(() => {
         setSelectedAgentId(null);
+        setOpenSteps(new Set());
         setOpenTools(new Set());
         setRun(null);
       }, [selectedRunId]);
@@ -1683,7 +2455,7 @@ window.__ModuleLoader__.load({
           } catch (reason) {
             if (active) setError(reason instanceof Error ? reason.message : String(reason));
           } finally {
-            if (active) timer = window.setTimeout(load, runningRef.current ? 700 : 2500);
+            if (active) timer = window.setTimeout(load, runningRef.current ? 600 : 2500);
           }
         };
         void load();
@@ -1700,6 +2472,15 @@ window.__ModuleLoader__.load({
       const selectedSummary = runs.find((candidate) => candidate.id === selectedRunId);
       const usage = run !== null ? usageOfRun(run) : selectedSummary?.usage ?? usageOfCalls([]);
 
+      const toggleStep = (stepKey) => {
+        setOpenSteps((current) => {
+          const next = new Set(current);
+          if (next.has(stepKey)) next.delete(stepKey);
+          else next.add(stepKey);
+          return next;
+        });
+      };
+
       const toggleTool = (key) => {
         setOpenTools((current) => {
           const next = new Set(current);
@@ -1709,7 +2490,8 @@ window.__ModuleLoader__.load({
         });
       };
 
-      if (typeof sessionId !== 'string' || !sessionId) {
+      const hasSession = typeof sessionId === 'string' && sessionId.trim() !== '';
+      if (!hasSession && !allowAllSessions) {
         return h('section', { className: 'rafx-page rafx-runs' }, h(RafRunsEmpty, { t }));
       }
       if (runs.length === 0) {
@@ -1749,14 +2531,20 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { className: 'rafx-runsMeta' },
-                h('span', { className: 'rafx-runsChip', 'data-status': status },
+                h(
+                  'span',
+                  { className: 'rafx-runsChip', 'data-status': status },
                   h('span', { className: 'rafx-runsDot', 'aria-hidden': true }),
                   runStatusLabel(t, status),
                 ),
                 modelName === '' ? null : h('span', { className: 'rafx-runsChip' }, modelName),
                 settings === null || settings === undefined
                   ? null
-                  : h('span', { className: 'rafx-runsChip' }, `depth ${settings.depth} · reserve ${Math.round(settings.reserve * 100)}% · readers ${settings.concurrency}`),
+                  : h(
+                      'span',
+                      { className: 'rafx-runsChip' },
+                      `depth ${settings.depth} · reserve ${Math.round(settings.reserve * 100)}% · readers ${settings.concurrency}`,
+                    ),
               ),
             ),
             h(
@@ -1791,7 +2579,7 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'rafx-runsStats' },
             h(RafStat, { label: t('view.steps'), value: String(run?.stepCount ?? selectedSummary?.stepCount ?? 0) }),
-            h(RafStat, { label: t('view.agents'), value: String(run?.agentCount ?? selectedSummary?.agentCount ?? 0) }),
+            h(RafStat, { label: t('view.agents'), value: String(agents.length || (run?.agentCount ?? selectedSummary?.agentCount ?? 0)) }),
             h(RafStat, { label: t('view.tokens'), value: `${formatTokens(usage.input)} / ${formatTokens(usage.output)}` }),
             h(RafStat, { label: t('view.rootCache'), value: formatPercent(usage.rootCacheHitRate ?? usage.cacheHitRate) }),
             h(RafStat, { label: t('view.cache'), value: formatPercent(usage.cacheHitRate) }),
@@ -1836,7 +2624,7 @@ window.__ModuleLoader__.load({
                     h(
                       'span',
                       { className: 'rafx-agentMeta' },
-                      `${candidate.steps.length} ${t('view.steps').toLowerCase()} · ${formatTokens(candidate.usage.input)} in`,
+                      `${candidate.steps.length} ${t('view.steps').toLowerCase()} · ${formatTokens(candidate.usage.input)} in · ${candidate.currentStage}`,
                     ),
                   ),
                 ),
@@ -1866,12 +2654,16 @@ window.__ModuleLoader__.load({
                         : h(
                             'button',
                             { type: 'button', className: 'rafx-linkButton', onClick: () => setSelectedAgentId(agent.parentId) },
-                            `← ${t('view.parent')}`,
+                            `← ${t('view.parent')} (${agent.parentName ?? 'root'})`,
                           ),
                       h('h2', null, agent.depth === 0 ? t('view.root') : agent.name),
                       h('span', { className: 'rafx-agentDepth' }, `d${agent.depth}`),
+                      agent.scope ? h('span', { className: 'rafx-agentDepth' }, `scope=${agent.scope}`) : null,
                       h('span', { className: 'rafx-agentState', 'data-status': agentStatus(agent) }, agentStateLabel(t, agent)),
                     ),
+                    agent.question
+                      ? h('div', { className: 'rafx-treeTask' }, agent.question)
+                      : null,
                     h(
                       'div',
                       { className: 'rafx-agentHeadMeta' },
@@ -1880,17 +2672,21 @@ window.__ModuleLoader__.load({
                   ),
                   agent.steps.length === 0
                     ? h('div', { className: 'rafx-timelineEmpty' }, h('p', null, t('view.noSteps')))
-                    : agent.steps.map((step) =>
-                        h(RunStep, {
-                          key: `${agent.id}:${step.index}`,
+                    : agent.steps.map((step) => {
+                        const stepKey = `${agent.id}:${step.index}`;
+                        const isStepOpen = !openSteps.has(`closed:${stepKey}`);
+                        return h(RunStep, {
+                          key: stepKey,
                           t,
                           step,
+                          open: isStepOpen,
+                          onToggleStep: () => toggleStep(`closed:${stepKey}`),
                           openTools,
                           onToggleTool: toggleTool,
                           agentById,
                           onOpenAgent: (id) => setSelectedAgentId(id),
-                        }),
-                      ),
+                        });
+                      }),
                   agent.errors.length === 0
                     ? null
                     : h(
@@ -1923,7 +2719,6 @@ window.__ModuleLoader__.load({
         h('span', { className: 'rafx-runsStatLabel' }, label),
       );
     }
-
 
     function apply(ctx) {
       ctx.effect(() => {
@@ -2009,6 +2804,39 @@ window.__ModuleLoader__.load({
             ),
           ),
         'raf: composer switch',
+      );
+
+      ctx.effect(
+        () =>
+          ctx.slots.inject('conversation.input.dock', () =>
+            ctx.slots.register(
+              {
+                name: 'conversation.input.dock',
+                id: 'raf-live',
+                order: 5,
+                locale: NS,
+              },
+              RafLiveDock,
+            ),
+          ),
+        'raf: live dock',
+      );
+
+      ctx.effect(
+        () =>
+          ctx.slots.inject('conversation.view', () =>
+            ctx.slots.register(
+              {
+                name: 'conversation.view',
+                id: 'raf-runs',
+                order: 30,
+                locale: NS,
+                label: () => t('view.label'),
+              },
+              RafRunsView,
+            ),
+          ),
+        'raf: runs view',
       );
 
       ctx.effect(

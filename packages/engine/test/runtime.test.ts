@@ -1,4 +1,9 @@
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { setAnydocForTest } from '../src/context/anydoc.js';
+import { extractPromptPaths } from '../src/context/ingest.js';
 import { ContextStore } from '../src/context/store.js';
 import { isAncestorEcho, ResearchBoard } from '../src/context/board.js';
 import { ScriptedLLM } from '../src/llm/mock.js';
@@ -8,8 +13,15 @@ import { UsageTracker } from '../src/llm/usage.js';
 import type { AgentEvent } from '../src/agent/events.js';
 import { AgentFoldAgent, extractFallbackAnswer } from '../src/agent/agent-fold.js';
 import { FoldState } from '../src/fold/state.js';
-import { createGrepTool, createOutlineTool, createReadTool, createSearchTool, createTallyTool } from '../src/tools/document-tools.js';
-
+import {
+  createAddDocumentTool,
+  createGrepTool,
+  createListDocumentsTool,
+  createOutlineTool,
+  createReadTool,
+  createSearchTool,
+  createTallyTool,
+} from '../src/tools/document-tools.js';
 function haystack(lines: number, needleAt: number): string {
   const out: string[] = [];
   for (let i = 1; i <= lines; i++) {
@@ -1148,5 +1160,241 @@ describe('rlm.pi best practices port & root cache optimization (H1-H6)', () => {
     expect(obs).toContain('4\tThis');
     expect(obs).toContain('Case-folded summary (when task is case-insensitive vs exact-case):');
     expect(obs).toContain('this: 40 total (exact-case: this=36, This=4)');
+  });
+});
+
+describe('Multi-format directory & document ingestion (add_document) and Live Dock hierarchy', () => {
+  it('ingests mixed directories (code, markdown, rich documents via anydoc), skips binary/sensitive files, preserves Root KV prefix cache, and supports scoped branch specialists', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'raf-ingest-'));
+    const repoDir = join(tempRoot, 'sample-repo');
+    try {
+      await mkdir(join(repoDir, 'src'), { recursive: true });
+      await mkdir(join(repoDir, 'docs'), { recursive: true });
+      await mkdir(join(repoDir, 'assets'), { recursive: true });
+
+      await writeFile(
+        join(repoDir, 'src', 'mod.ts'),
+        'export const ORION_MULTIPLIER = 19;\nexport function computeBoost(x: number): number {\n  return x * ORION_MULTIPLIER;\n}\n',
+        'utf-8',
+      );
+      await writeFile(
+        join(repoDir, 'docs', 'guide.md'),
+        '# Architecture Guide\n\nThe base calibration constant is BASE_SEED = 7.\n',
+        'utf-8',
+      );
+      await writeFile(join(repoDir, '.env'), 'SECRET_TOKEN=super-secret\n', 'utf-8');
+      await writeFile(join(repoDir, 'assets', 'logo.bin'), Buffer.from([0x89, 0x50, 0x00, 0x47, 0x00]));
+      await writeFile(join(repoDir, 'docs', 'spec.pdf'), 'fake-pdf-binary-container', 'utf-8');
+
+      setAnydocForTest({
+        formatFromPath: (p: string) => (p.endsWith('.pdf') ? 'pdf' : null),
+        toMarkdown: async () => '# Converted PDF Specification\n\nPDF_OFFSET = 12.\n',
+      });
+
+      const detected = extractPromptPaths(`Please analyze ${repoDir} and summarize the constants.`);
+      expect(detected).toContain(repoDir);
+
+      const store = new ContextStore();
+      let step0DocHeader = '';
+      let step1DocHeader = '';
+      let step1UserPrompt = '';
+
+      const root = new ScriptedLLM((req) => {
+        const user = req.messages[1]?.content ?? '';
+        const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+        const docSection = user.split('\n\n### ')[0] ?? '';
+        if (step === 0) {
+          step0DocHeader = docSection;
+          return `<motivation>Load the target repository directory into ContextStore.</motivation><tool_call>${JSON.stringify({
+            name: 'add_document',
+            arguments: { path: repoDir },
+          })}</tool_call>`;
+        }
+        if (step === 1) {
+          step1DocHeader = docSection;
+          step1UserPrompt = user;
+          return `<folding>{"range":[0,0],"summary":"Loaded sample-repo (src/mod.ts, docs/guide.md, docs/spec.pdf)."}</folding><motivation>Delegate src/mod.ts inspection to a scoped specialist.</motivation><tool_call>${JSON.stringify({
+            name: 'branch',
+            arguments: {
+              scope: 'sample-repo/src/mod.ts',
+              task: 'Find ORION_MULTIPLIER in sample-repo/src/mod.ts',
+            },
+          })}</tool_call>`;
+        }
+        return '<folding>{"range":[1,1],"summary":"ORION_MULTIPLIER = 19, BASE_SEED = 7, PDF_OFFSET = 12."}</folding><motivation>All constants verified.</motivation><answer>ORION_MULTIPLIER=19, PDF_OFFSET=12</answer>';
+      });
+
+      const branch = new ScriptedLLM((req) => {
+        const user = req.messages[1]?.content ?? '';
+        if (/Step 0\./.test(user)) {
+          return '<motivation>Grep for ORION_MULTIPLIER in sample-repo/src/mod.ts</motivation><tool_call>{"name":"grep","arguments":{"pattern":"ORION_MULTIPLIER","document":"sample-repo/src/mod.ts"}}</tool_call>';
+        }
+        return '<folding>{"range":[0,0],"summary":"sample-repo/src/mod.ts defines ORION_MULTIPLIER = 19."}</folding><motivation>Return finding</motivation><answer>ORION_MULTIPLIER = 19</answer>';
+      });
+
+      const ingestedSnapshots: string[] = [];
+      const raf = new RecursiveAgentFold({
+        rootLLM: root,
+        branchLLM: branch,
+        store,
+        ingest: {
+          onIngest: (res) => {
+            for (const f of res.files) ingestedSnapshots.push(f.id);
+          },
+        },
+      });
+
+      const res = await raf.run(`Analyze ${repoDir}`);
+      expect(res.answer).toBe('ORION_MULTIPLIER=19, PDF_OFFSET=12');
+      expect(ingestedSnapshots.sort()).toEqual([
+        'sample-repo/docs/guide.md',
+        'sample-repo/docs/spec.pdf',
+        'sample-repo/src/mod.ts',
+      ]);
+      // Sensitive .env and binary logo.bin were skipped
+      expect(store.has('sample-repo/.env')).toBe(false);
+      expect(store.has('sample-repo/assets/logo.bin')).toBe(false);
+      // Rich document PDF was converted to Markdown via anydoc
+      expect(store.get('sample-repo/docs/spec.pdf').lines.join('\n')).toContain('PDF_OFFSET = 12');
+      // Root KV prefix cache: Step 0 and Step 1 ### Documents section is byte-identical!
+      expect(step0DocHeader).toBe('### Documents\n(no documents loaded)');
+      expect(step1DocHeader).toBe(step0DocHeader);
+      // Newly added documents are surfaced in the dynamic tail under ### Newly Added Documents
+      expect(step1UserPrompt).toContain('### Newly Added Documents');
+      expect(step1UserPrompt).toContain('sample-repo/src/mod.ts');
+      expect(step1UserPrompt).toContain('sample-repo/docs/spec.pdf');
+
+      // Verify list_documents prefix filtering
+      const listTool = createListDocumentsTool();
+      const docsOut = await listTool.execute(
+        { prefix: 'sample-repo/docs' },
+        { store, usage: new UsageTracker(), depth: 0, agentName: 'root', step: 0, emit: () => {} },
+      );
+      expect(docsOut).toContain('sample-repo/docs/guide.md');
+      expect(docsOut).toContain('sample-repo/docs/spec.pdf');
+      expect(docsOut).not.toContain('sample-repo/src/mod.ts');
+    } finally {
+      setAnydocForTest(undefined);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('attributes parallel sub-agent events with parent, scope, and step, and isolates parallel specialists in buildRunModel', async () => {
+    const store = new ContextStore();
+    store.add('ALPHA_VAL = 101', { id: 'pkg/alpha.ts' });
+    store.add('BETA_VAL = 202', { id: 'pkg/beta.ts' });
+
+    const root = new ScriptedLLM((req) => {
+      const user = req.messages[1]?.content ?? '';
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+      if (step === 0) {
+        return `<motivation>Spawn parallel specialists for pkg/alpha.ts and pkg/beta.ts</motivation><tool_call>${JSON.stringify({
+          name: 'branch',
+          arguments: {
+            tasks: [
+              { scope: 'pkg/alpha.ts', task: 'Read ALPHA_VAL in pkg/alpha.ts' },
+              { scope: 'pkg/beta.ts', task: 'Read BETA_VAL in pkg/beta.ts' },
+            ],
+          },
+        })}</tool_call>`;
+      }
+      return '<folding>{"range":[0,0],"summary":"ALPHA_VAL=101, BETA_VAL=202"}</folding><motivation>Done</motivation><answer>303</answer>';
+    });
+
+    const branch = new ScriptedLLM(async (req) => {
+      const user = req.messages[1]?.content ?? '';
+      const isAlpha = user.includes('pkg/alpha.ts');
+      const docId = isAlpha ? 'pkg/alpha.ts' : 'pkg/beta.ts';
+      if (/Step 0\./.test(user)) {
+        return `<motivation>Read ${docId}</motivation><tool_call>${JSON.stringify({
+          name: 'read',
+          arguments: { document: docId, start_line: 1, end_line: 1 },
+        })}</tool_call>`;
+      }
+      return `<folding>{"range":[0,0],"summary":"Read ${docId}"}</folding><motivation>Answer</motivation><answer>${isAlpha ? 'ALPHA_VAL = 101' : 'BETA_VAL = 202'}</answer>`;
+    });
+
+    const rawEvents: Array<{ seq: number; at: number; event: AgentEvent }> = [];
+    const raf = new RecursiveAgentFold({
+      rootLLM: root,
+      branchLLM: branch,
+      store,
+      onEvent: (event) => {
+        rawEvents.push({ seq: rawEvents.length + 1, at: Date.now(), event });
+      },
+    });
+
+    const res = await raf.run('Sum ALPHA_VAL and BETA_VAL');
+    expect(res.answer).toBe('303');
+
+    const subRunStarts = rawEvents
+      .map((e) => e.event)
+      .filter((e): e is Extract<AgentEvent, { type: 'run_start' }> => e.type === 'run_start' && e.depth === 1);
+    expect(subRunStarts.length).toBe(2);
+    expect(subRunStarts.every((e) => e.parent === 'root')).toBe(true);
+    expect(subRunStarts.map((e) => e.scope).sort()).toEqual(['pkg/alpha.ts', 'pkg/beta.ts']);
+
+    // Evaluate client.js in a minimal window sandbox and verify buildRunModel
+    type BuiltModel = {
+      agents: Array<{
+        id: string;
+        name: string;
+        depth: number;
+        parentId: string | null;
+        scope: string | null;
+        childAgentIds: string[];
+        steps: Array<{ index: number; tools: Array<{ name: string; childAgentIds: string[] }> }>;
+      }>;
+    };
+    const fakeWindow: {
+      __ModuleLoader__: { load: (spec: { factory: (req: (id: string) => unknown) => void }) => void };
+      localStorage: { getItem: () => null; setItem: () => void };
+      __RAF_BUILD_RUN_MODEL__?: (run: unknown) => BuiltModel;
+    } = {
+      __ModuleLoader__: {
+        load(spec) {
+          spec.factory(() => ({
+            createElement: () => null,
+            Fragment: 'Fragment',
+            useState: (init: unknown) => [typeof init === 'function' ? init() : init, () => {}],
+            useEffect: () => {},
+            useRef: (init: unknown) => ({ current: init }),
+            useMemo: (fn: () => unknown) => fn(),
+            useSyncExternalStore: () => ({}),
+          }));
+        },
+      },
+      localStorage: { getItem: () => null, setItem: () => {} },
+    };
+    const clientJsPath = new URL('../../dsh-plugin/client.js', import.meta.url);
+    const clientCode = await readFile(clientJsPath, 'utf-8');
+    const runClient = new Function('window', clientCode);
+    runClient(fakeWindow);
+
+    const capturedBuildRunModel = fakeWindow.__RAF_BUILD_RUN_MODEL__;
+    expect(typeof capturedBuildRunModel).toBe('function');
+    if (!capturedBuildRunModel) throw new Error('missing buildRunModel');
+    const model = capturedBuildRunModel({
+      id: 'run-1',
+      status: 'done',
+      startedAt: Date.now() - 1000,
+      endedAt: Date.now(),
+      events: rawEvents,
+    });
+    expect(model.agents.length).toBe(3);
+    const rootAgent = model.agents[0];
+    expect(rootAgent?.name).toBe('root');
+    expect(rootAgent?.childAgentIds.length).toBe(2);
+    const branchTool = rootAgent?.steps[0]?.tools.find((t) => t.name === 'branch');
+    expect(branchTool?.childAgentIds.length).toBe(2);
+
+    const sub1 = model.agents[1];
+    const sub2 = model.agents[2];
+    expect(sub1?.parentId).toBe(rootAgent?.id);
+    expect(sub2?.parentId).toBe(rootAgent?.id);
+    expect(sub1?.steps.length).toBe(2);
+    expect(sub2?.steps.length).toBe(2);
+    expect(sub1?.steps[0]?.tools[0]?.name).toBe('read');
+    expect(sub2?.steps[0]?.tools[0]?.name).toBe('read');
   });
 });

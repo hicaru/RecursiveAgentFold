@@ -483,6 +483,7 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
       ctx.emit({
         type: 'llm_query',
         agent: ctx.agentName,
+        step: ctx.step,
         query,
         mode: modeRaw,
         chunks: res.findings.length,

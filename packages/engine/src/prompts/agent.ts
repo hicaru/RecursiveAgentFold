@@ -47,6 +47,8 @@ When ready to answer, replace <tool_call> with <answer>final answer</answer> (AL
 
 /** Per-tool guidance; only guidance for tools that are actually available is rendered. */
 export const TOOL_GUIDANCE: Record<string, string> = Object.freeze({
+  add_document:
+    '- **add_document**: When the task references a filesystem path, folder, repository, or external document not yet listed in Documents, call `add_document` with `{"path": "..."}` first to load and index it into ContextStore.',
   llm_query:
     '- **llm_query**: Semantic full-document chunk scan. Use ONLY when classification, counting, or locating requires semantic understanding without fixed literal keywords. For counting/classification, MUST set mode="extract", pass the exact `categories` list, and keep `query` concise using the task\'s exact category names without redefining them (engine sums counts across chunks and records to board).',
   search:

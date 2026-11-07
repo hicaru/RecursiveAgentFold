@@ -44,6 +44,7 @@ export interface AgentFoldConfig {
   /** Active scope call stack for cycle prevention across inter-agent queries. */
   readonly callStack?: readonly string[];
   readonly ancestorTasks?: readonly string[];
+  readonly parent?: string;
   readonly scope?: string;
   readonly maxDepth?: number;
   readonly initialBoardRev?: number;
@@ -136,8 +137,8 @@ export class AgentFoldAgent {
   private readonly initialBoardRev: number;
   private readonly initialBoardSnapshot: string | undefined;
   private readonly initialManifest: string;
+  private readonly initialDocIds: ReadonlySet<string>;
   private currentTaskQuestion = '';
-
   constructor(private readonly cfg: AgentFoldConfig) {
     this.depth = cfg.depth ?? 0;
     this.name = cfg.name ?? (this.depth === 0 ? 'root' : `branch@${this.depth}`);
@@ -156,6 +157,7 @@ export class AgentFoldAgent {
           ? cfg.board.renderSettled()
           : undefined;
     this.initialManifest = cfg.store.manifest();
+    this.initialDocIds = new Set(cfg.store.list().map((d) => d.id));
   }
   private emit(e: AgentEvent) {
     this.cfg.onEvent?.(e);
@@ -186,6 +188,19 @@ export class AgentFoldAgent {
     parts.push(taskBlock, prev.join('\n'));
     const delta = this.cfg.board?.renderSince(this.initialBoardRev, this.cfg.scope);
     if (delta) parts.push(`### New Board Findings\n${delta}`);
+    const allDocs = this.cfg.store.list();
+    if (allDocs.length > this.initialDocIds.size) {
+      const newDocIds: string[] = [];
+      for (let i = 0; i < allDocs.length; i++) {
+        const doc = allDocs[i];
+        if (doc && !this.initialDocIds.has(doc.id)) {
+          newDocIds.push(doc.id);
+        }
+      }
+      if (newDocIds.length > 0) {
+        parts.push(`### Newly Added Documents\n${this.cfg.store.manifestFor(newDocIds)}`);
+      }
+    }
     if (this.cfg.followUpQuestion) {
       parts.push(
         `### Follow-up Question\n${this.cfg.followUpQuestion.trim()}\n(Reuse exact key=value facts and formulas already recorded in Previous Steps above if sufficient; if the follow-up asks about a new identifier/index not yet recorded as an explicit key=value in your summaries, verify it with search/outline/grep/read first.)`,
@@ -212,7 +227,15 @@ export class AgentFoldAgent {
     const maxSteps = this.cfg.maxSteps ?? 100;
     const role = this.cfg.usageRole ?? (this.depth === 0 ? 'root' : 'branch');
     let formatIssues = 0;
-    this.emit({ type: 'run_start', agent: this.name, depth: this.depth, question });
+    this.emit({
+      type: 'run_start',
+      agent: this.name,
+      depth: this.depth,
+      question,
+      ...(this.cfg.parent !== undefined ? { parent: this.cfg.parent } : {}),
+      ...(this.cfg.scope !== undefined ? { scope: this.cfg.scope } : {}),
+      isFollowUp: this.cfg.followUpQuestion !== undefined,
+    });
 
     const finish = (r: Omit<AgentRunResult, 'state' | 'usage' | 'formatIssues'>): AgentRunResult => {
       this.emit({ type: 'run_end', agent: this.name, depth: this.depth, steps: r.steps, terminated: r.terminated });
@@ -252,6 +275,7 @@ export class AgentFoldAgent {
           this.emit({
             type: 'llm_call',
             agent: this.name,
+            step,
             role,
             model: res.model,
             usage: res.usage,

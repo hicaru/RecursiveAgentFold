@@ -2,11 +2,20 @@ import type { FoldDirective, FoldOutcome, ToolAction } from '../fold/state.js';
 import type { LLMUsage } from '../types.js';
 
 export type AgentEvent =
-  | { type: 'run_start'; agent: string; depth: number; question: string }
+  | {
+      type: 'run_start';
+      agent: string;
+      depth: number;
+      question: string;
+      parent?: string;
+      scope?: string;
+      isFollowUp?: boolean;
+    }
   | { type: 'step_start'; agent: string; depth: number; step: number; contextTokens: number; blocks: number }
   | {
       type: 'llm_call';
       agent: string;
+      step?: number;
       role: string;
       model: string;
       usage: LLMUsage;
@@ -24,6 +33,7 @@ export type AgentEvent =
   | {
       type: 'llm_query';
       agent: string;
+      step?: number;
       query: string;
       mode: string;
       chunks: number;
