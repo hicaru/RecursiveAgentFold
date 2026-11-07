@@ -27,7 +27,7 @@ const TAGS = ['think', 'folding', 'folded_output', 'fold', '折叠', 'motivation
 type Tag = (typeof TAGS)[number];
 const FOLD_TAGS = ['folding', 'folded_output', 'fold', '折叠'] as const;
 const MOTIVATION_TAGS = ['motivation', 'explanation', '动机'] as const;
-const TOOL_TAG_ALIASES = ['grep', 'read', 'tally', 'calculator', 'branch', 'llm_query', 'list_documents'] as const;
+const TOOL_TAG_ALIASES = ['search', 'outline', 'grep', 'read', 'tally', 'calculator', 'branch', 'llm_query', 'list_documents'] as const;
 function tagRegex(tag: string): RegExp {
   // tolerant of `</ folding >`, attributes and casing
   return new RegExp(`<\\s*${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\s*\\/\\s*${tag}\\s*>`, 'i');

@@ -39,8 +39,8 @@ When ready to answer, replace <tool_call> with <answer>final answer</answer> (AL
 {{TOOL_GUIDANCE}}
 
 # Operating Principles (Accuracy First, Minimal Steps)
-1. **Inspect before reading**: Check sample lines in Documents first. Never blindly read from line 1.
-2. **One minimal tool call per step**: Request the smallest line range or max_matches needed to test your hypothesis. Never repeat a failed or already-summarized call.
+1. **Probe & locate first**: Check sample lines in Documents first. Use free tools (search, grep, outline, tally) to locate evidence or count patterns before calling read or llm_query. Never blindly read from line 1.
+2. **Orchestrate; do not brute-force**: When multiple documents or distinct modules need multi-step inspection (and the needed KEY = value facts are not already on the Shared Research Board) and branch is available, dispatch parallel scoped specialists via branch(tasks=[{"scope":"doc_1","task":"..."}, ...]) instead of reading multiple documents serially in root. Request the smallest line range or max_matches needed to test your hypothesis, and use read in root only for small targeted verification windows (15-40 lines).
 3. **Verify before answering**: Before emitting <answer>, verify key evidence or numbers with a small read window or calculator. Never fabricate facts outside the documents.
 4. **Match question language & literals**: Write <answer> in the language of the question; keep category labels, names, and numbers verbatim.
 5. **Reuse Shared Research Board & specialists**: Check Shared Research Board and New Board Findings first; reuse existing counts and KEY = value facts directly. If a [branch][scope=...] specialist already exists for a document/module, call branch with the same scope for follow-up questions instead of re-scanning.`;
@@ -49,9 +49,14 @@ When ready to answer, replace <tool_call> with <answer>final answer</answer> (AL
 export const TOOL_GUIDANCE: Record<string, string> = Object.freeze({
   llm_query:
     '- **llm_query**: Semantic full-document chunk scan. Use ONLY when classification, counting, or locating requires semantic understanding without fixed literal keywords. For counting/classification, MUST set mode="extract", pass the exact `categories` list, and keep `query` concise using the task\'s exact category names without redefining them (engine sums counts across chunks and records to board).',
+  search:
+    '- **search**: Free BM25 V2 ranked window retrieval (stemming, phrase bonus, query expansion, CJK n-grams). Use `search` first when locating natural-language topics, paraphrases, or multi-term concepts where exact regex is uncertain.',
+  outline:
+    '- **outline**: Free structural skeleton (headings, sections, definitions with line numbers). Use to map document boundaries before reading.',
   grep: '- **grep**: Exact string/regex search across documents; returns total matching lines per doc and top matches. Set `max_matches` to 5-10 when probing or counting.',
   read: '- **read**: Read a small, exact line window (15-40 lines) to verify a located region. Never use `read` to browse large documents.',
-  tally: '- **tally**: Deterministic exact regex/capture-group frequency counter. Never count regex matches by hand.',
+  tally:
+    '- **tally**: Deterministic exact regex/capture-group frequency counter. Never count regex matches by hand. When a task asks for frequencies of exact given terms (e.g. lowercase words), use the exact-case counts (or set `case_sensitive: true`) rather than adding capitalized sentence-start variants.',
   branch:
     '- **branch**: Delegate deep document/module research to a persistent scoped specialist sub-agent, or ask a follow-up to an existing specialist. Always pass `scope` (target doc id or module name): (1) each specialist inspects ONLY its own `scope` document; (2) pass the same `scope` to ask follow-up questions (reusing its folded state and KV cache); (3) never spawn duplicate scans for the same scope or use `branch` for a single grep/read.',
   calculator: '- **calculator**: Exact arithmetic evaluation (+ - * / % ^, sum, min, max, avg, round, floor, ceil, abs, sqrt). Never do mental math.',
@@ -59,11 +64,14 @@ export const TOOL_GUIDANCE: Record<string, string> = Object.freeze({
 
 export function buildAgentSystemPrompt(toolNames: string[]): string {
   const lines = toolNames.map((n) => TOOL_GUIDANCE[n]).filter((x): x is string => !!x);
-  if (toolNames.includes('llm_query') && (toolNames.includes('grep') || toolNames.includes('tally'))) {
+  if (
+    toolNames.includes('llm_query') &&
+    (toolNames.includes('grep') || toolNames.includes('tally') || toolNames.includes('search') || toolNames.includes('outline'))
+  ) {
     lines.push(
       '- **Tool Routing Priority (Accuracy & Speed)**:',
-      '  1. **0-Token Exact Tools First (`grep` / `tally`)**: If the target has literal words, names, numbers, citations, identifiers, or regex patterns (whether finding or counting), ALWAYS use `grep` or `tally` first. NEVER use `llm_query` for literal/regex targets.',
-      '  2. **Semantic Scan (`llm_query`)**: Use `llm_query` ONLY when no literal keyword/regex applies (e.g. abstract category classification with mode="extract" and `categories`, or after literal grep variants return 0 matches).',
+      '  1. **0-Token Free Tools First (`search` / `grep` / `outline` / `tally`)**: If the target has literal words, names, numbers, citations, identifiers, or natural-language topics, ALWAYS use `grep`, `search`, `outline`, or `tally` first. NEVER use `llm_query` for literal/regex or BM25-searchable targets.',
+      '  2. **Semantic Scan (`llm_query`)**: Use `llm_query` ONLY when no literal keyword/regex or BM25 window search applies (e.g. full-document abstract category classification with mode="extract" and `categories`, or after free search/grep tools return 0 matches).',
     );
   }
   return AGENT_SYSTEM_PROMPT_TEMPLATE.replace('{{TOOL_GUIDANCE}}', `# Tool Usage\n${lines.join('\n')}`);

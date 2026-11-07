@@ -1,0 +1,83 @@
+{
+  "bench": "longbench-pro",
+  "method": "raf",
+  "startedAt": "2026-11-07T17:59:56.707Z",
+  "tasks": 4,
+  "taskIds": [
+    "longbench-pro-2bc1b1da4f5200e446327cf5141cb3b49b09ce016d1f127f54fb5ffb921a2fa4",
+    "longbench-pro-b2d18db83b5088c6c0c7a2e98d458516736ebec2d7dc147f3b16ec10bee92baf",
+    "longbench-pro-3139d2757c481648a56b95d46262efc28df133da70ef5c1b4602ffbc1c201d9c",
+    "longbench-pro-35ddea1dc1d6984bf63f9a767bdbefdd770b363e92ed73c69c7f51927c4ca1fc"
+  ],
+  "argv": [
+    "longbench-pro",
+    "--offset",
+    "8",
+    "--limit",
+    "4",
+    "--max-depth",
+    "2",
+    "--out",
+    "results/rlm-port-lbpro-slice"
+  ],
+  "tools": "all",
+  "models": {
+    "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+    "root": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16000,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        }
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "branch": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16000,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        }
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "query": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3-flash",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16384,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        },
+        "reasoning_effort": "low"
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "llmQuery": {
+      "reserveRatio": 0.3,
+      "concurrency": 4
+    }
+  }
+}

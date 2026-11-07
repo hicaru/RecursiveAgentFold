@@ -40,7 +40,11 @@ const envThinking = (k: string, d?: 'enabled' | 'disabled'): 'enabled' | 'disabl
 
 export interface ModelOverrides {
   rootModel?: string;
+  rootBaseUrl?: string;
+  rootApiKey?: string;
   branchModel?: string;
+  branchBaseUrl?: string;
+  branchApiKey?: string;
   queryModel?: string;
   queryBaseUrl?: string;
   reserveRatio?: number;
@@ -59,12 +63,14 @@ export interface BenchModels {
 export function createModels(o: ModelOverrides = {}): BenchModels {
   loadEnv();
   const apiKey = env('ZAI_API_KEY');
-  if (!apiKey) throw new Error('ZAI_API_KEY is not set (copy .env.example to .env)');
+  const rootApiKey = o.rootApiKey ?? env('RAF_ROOT_API_KEY', apiKey);
+  if (!rootApiKey) throw new Error('RAF_ROOT_API_KEY or ZAI_API_KEY is not set (copy .env.example to .env)');
   const baseUrl = env('ZAI_BASE_URL', 'https://api.z.ai/api/coding/paas/v4') ?? 'https://api.z.ai/api/coding/paas/v4';
+  const rootBaseUrl = o.rootBaseUrl ?? env('RAF_ROOT_BASE_URL', baseUrl) ?? baseUrl;
   const rootModel = o.rootModel ?? env('RAF_ROOT_MODEL', 'glm-5.3') ?? 'glm-5.3';
   const rootCfg = {
-    baseUrl,
-    apiKey,
+    baseUrl: rootBaseUrl,
+    apiKey: rootApiKey,
     model: rootModel,
     contextWindow: envNum('RAF_ROOT_CONTEXT', 200_000),
     maxOutputTokens: envNum('RAF_ROOT_MAX_OUTPUT', 16_000),
@@ -77,9 +83,14 @@ export function createModels(o: ModelOverrides = {}): BenchModels {
     timeoutMs: envNum('RAF_TIMEOUT_MS', 900_000),
   };
   const branchModel = o.branchModel ?? env('RAF_BRANCH_MODEL');
-  const branchBaseUrl = env('RAF_BRANCH_BASE_URL', baseUrl) ?? baseUrl;
-  const branchApiKey = env('RAF_BRANCH_API_KEY', apiKey) ?? apiKey;
-  const hasDistinctBranch = branchModel !== undefined || env('RAF_BRANCH_BASE_URL') !== undefined;
+  const branchBaseUrl = o.branchBaseUrl ?? env('RAF_BRANCH_BASE_URL', baseUrl) ?? baseUrl;
+  const branchApiKey = o.branchApiKey ?? env('RAF_BRANCH_API_KEY', apiKey ?? rootApiKey) ?? rootApiKey;
+  const hasDistinctBranch =
+    branchModel !== undefined ||
+    o.branchBaseUrl !== undefined ||
+    env('RAF_BRANCH_BASE_URL') !== undefined ||
+    o.branchApiKey !== undefined ||
+    env('RAF_BRANCH_API_KEY') !== undefined;
   const branchCfg = hasDistinctBranch
     ? {
         baseUrl: branchBaseUrl,
@@ -108,7 +119,7 @@ export function createModels(o: ModelOverrides = {}): BenchModels {
     queryThinking === 'enabled' || queryExtraBody !== undefined ? Math.max(16384, rawQueryMax) : rawQueryMax;
   const queryCfg = {
     baseUrl: o.queryBaseUrl ?? env('RAF_QUERY_BASE_URL', baseUrl) ?? baseUrl,
-    apiKey: env('RAF_QUERY_API_KEY', apiKey) ?? apiKey,
+    apiKey: env('RAF_QUERY_API_KEY', apiKey ?? rootApiKey) ?? rootApiKey,
     model: queryModel,
     contextWindow: envNum('RAF_QUERY_CONTEXT', 128_000),
     maxOutputTokens: queryMaxOutput,

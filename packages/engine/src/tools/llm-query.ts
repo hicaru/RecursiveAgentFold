@@ -99,6 +99,32 @@ function compressIndexRanges(idx: readonly number[]): string {
   return parts.join(', ');
 }
 
+/** Emit a margin diagnostic when adjacent category counts differ by < 5% of total and < 4% of their sum. */
+export function formatMarginNote(totals: Readonly<Record<string, number>>): string | undefined {
+  const sorted = Object.entries(totals).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (sorted.length < 2) return undefined;
+  let n = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    n += sorted[i]?.[1] ?? 0;
+  }
+  if (n <= 0) return undefined;
+  const pairs: string[] = [];
+  for (let i = 0; i + 1 < sorted.length; i++) {
+    const a = sorted[i];
+    const b = sorted[i + 1];
+    if (!a || !b) continue;
+    const [catA, cA] = a;
+    const [catB, cB] = b;
+    if (cA + cB <= 0) continue;
+    const diff = Math.abs(cA - cB);
+    if (diff / n < 0.05 && diff / (cA + cB) < 0.04) {
+      pairs.push(`${catA}(${cA}) vs ${catB}(${cB}) margin=${diff} (${((diff / n) * 100).toFixed(1)}% of total)`);
+    }
+  }
+  if (pairs.length === 0) return undefined;
+  return `[Margin notice: close counts on ${pairs.join('; ')} — if literal/regex patterns distinguish these categories, verify with tally/grep before answering]`;
+}
+
 /**
  * The llm_query engine: fan a query out over deterministic chunks of stored
  * documents using a non-thinking model, then aggregate compact findings.
@@ -328,6 +354,7 @@ export class LLMQueryEngine {
       const totals = sumCounts(findings);
       if (totals) {
         const withCounts = findings.filter((f) => f.counts).length;
+        const marginNote = formatMarginNote(totals);
         lines.push(
           `Summed "counts" (${withCounts}/${findings.length} chunks): ` +
             Object.entries(totals)
@@ -336,6 +363,7 @@ export class LLMQueryEngine {
               .join(', ') +
             (withCounts < findings.length ? ' (warning: some chunks omitted counts)' : ''),
         );
+        if (marginNote) lines.push(marginNote);
       }
     } else {
       if (relevant.length) {

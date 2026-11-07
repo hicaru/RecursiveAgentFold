@@ -15,6 +15,7 @@ export interface ToolContext {
   readonly signal?: AbortSignal;
   readonly board?: ResearchBoard;
   readonly callStack?: readonly string[];
+  readonly ancestorTasks?: readonly string[];
 }
 
 export interface Tool {

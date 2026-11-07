@@ -6,6 +6,7 @@ export * from './llm/openai-compatible.js';
 export * from './llm/mock.js';
 export * from './llm/usage.js';
 export * from './context/store.js';
+export * from './context/bm25.js';
 export * from './context/board.js';
 export * from './fold/state.js';
 export * from './protocol/parser.js';

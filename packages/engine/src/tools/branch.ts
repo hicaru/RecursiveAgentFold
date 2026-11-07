@@ -1,4 +1,4 @@
-import { normalizeScopeKey, normalizeTaskKey } from '../context/board.js';
+import { isAncestorEcho, normalizeScopeKey, normalizeTaskKey } from '../context/board.js';
 import type { ContextStore } from '../context/store.js';
 import type { FoldStateSnapshot } from '../fold/state.js';
 import { truncateToTokens } from '../tokens.js';
@@ -15,6 +15,7 @@ export interface BranchRunnerOptions {
   readonly initialBoardSnapshot?: string;
   readonly agentName?: string;
   readonly callStack?: readonly string[];
+  readonly ancestorTasks?: readonly string[];
   readonly signal?: AbortSignal;
 }
 
@@ -35,6 +36,7 @@ export interface BranchToolOptions {
   maxResultTokens?: number;
   consultOnly?: boolean;
   readonly ownScope?: string;
+  readonly maxSpecialists?: number;
 }
 
 export interface SubTaskSpec {
@@ -188,6 +190,11 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
 
       const runSingle = async (subTask: string, subScope?: string): Promise<string> => {
         const scopeKey = inferScope(subScope, subTask, ctx.store);
+        const sameOrUnspecifiedScope =
+          !subScope || !opts.ownScope || normalizeScopeKey(subScope) === normalizeScopeKey(opts.ownScope);
+        if (ctx.depth > 0 && sameOrUnspecifiedScope && ctx.ancestorTasks && isAncestorEcho(subTask, ctx.ancestorTasks)) {
+          return `[scope=${scopeKey}] [ledger: ancestor echo rejected — do NOT call branch on your own scope or re-delegate your assigned task. Use search / grep / read / tally directly on your scope document.]`;
+        }
         if (opts.ownScope && scopeKey === normalizeScopeKey(opts.ownScope)) {
           return `[scope=${scopeKey}] You are already the specialist responsible for [${scopeKey}]; do NOT call branch on your own scope! Use grep / read / tally directly on your document.`;
         }
@@ -204,6 +211,11 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
           }
         }
         const nextStack = [...stack, scopeKey];
+        const maxSpec = opts.maxSpecialists ?? 12;
+        const demoted =
+          ctx.board !== undefined && !ctx.board.hasSpecialist(scopeKey) && ctx.board.specialistCount() >= maxSpec;
+        const childMaxSteps = demoted ? Math.min(maxSteps, 4) : maxSteps;
+        const nextAncestors = ctx.ancestorTasks ? [...ctx.ancestorTasks, subTask] : [subTask];
         if (ctx.board) {
           const { result } = await ctx.board.runScopedBranch(
             scopeKey,
@@ -211,7 +223,7 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
             async (sInput) => {
               const r = await run(sInput.initialTask, {
                 depth: ctx.depth + 1,
-                maxSteps,
+                maxSteps: childMaxSteps,
                 parent: ctx.agentName,
                 scope: scopeKey,
                 initialState: sInput.previousState,
@@ -220,6 +232,7 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
                 initialBoardSnapshot: sInput.initialBoardSnapshot,
                 agentName: sInput.agentName,
                 callStack: nextStack,
+                ancestorTasks: nextAncestors,
                 signal: ctx.signal,
               });
               const status = `[scope=${scopeKey}] branch done: ${r.terminated}, ${r.steps} steps${r.error ? ` (error: ${r.error})` : ''}`;
@@ -237,10 +250,11 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
         }
         const r = await run(subTask, {
           depth: ctx.depth + 1,
-          maxSteps,
+          maxSteps: childMaxSteps,
           parent: ctx.agentName,
           scope: scopeKey,
           callStack: nextStack,
+          ancestorTasks: nextAncestors,
           signal: ctx.signal,
         });
         const status = `[scope=${scopeKey}] branch done: ${r.terminated}, ${r.steps} steps${r.error ? ` (error: ${r.error})` : ''}`;

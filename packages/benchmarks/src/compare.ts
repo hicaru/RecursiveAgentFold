@@ -20,6 +20,8 @@ interface Aggregate {
   readonly cachedTokens: number;
   readonly completionTokens: number;
   readonly cacheHitRate: number;
+  readonly rootCacheHitRate: number;
+  readonly branchCacheHitRate: number;
   readonly cost?: number;
 }
 
@@ -63,6 +65,10 @@ function summarize(rows: readonly TaskResult[], prices: RunData['prices']): Aggr
   let promptTokens = 0;
   let cachedTokens = 0;
   let completionTokens = 0;
+  let rootPrompt = 0;
+  let rootCached = 0;
+  let branchPrompt = 0;
+  let branchCached = 0;
   for (const r of rows) {
     score += r.score;
     if (r.score >= 1) correct++;
@@ -72,8 +78,14 @@ function summarize(rows: readonly TaskResult[], prices: RunData['prices']): Aggr
     promptTokens += r.total.promptTokens;
     cachedTokens += r.total.cachedTokens;
     completionTokens += r.total.completionTokens;
+    rootPrompt += r.usage?.root?.promptTokens ?? 0;
+    rootCached += r.usage?.root?.cachedTokens ?? 0;
+    branchPrompt += r.usage?.branch?.promptTokens ?? 0;
+    branchCached += r.usage?.branch?.cachedTokens ?? 0;
   }
   const cacheHitRate = promptTokens > 0 ? cachedTokens / promptTokens : 0;
+  const rootCacheHitRate = rootPrompt > 0 ? rootCached / rootPrompt : 0;
+  const branchCacheHitRate = branchPrompt > 0 ? branchCached / branchPrompt : 0;
   let cost: number | undefined;
   if (prices.root || prices.query) {
     let totalCost = 0;
@@ -101,6 +113,8 @@ function summarize(rows: readonly TaskResult[], prices: RunData['prices']): Aggr
     cachedTokens,
     completionTokens,
     cacheHitRate,
+    rootCacheHitRate,
+    branchCacheHitRate,
     ...(cost !== undefined ? { cost } : {}),
   };
 }
@@ -132,7 +146,7 @@ function formatAggregate(label: string, a: Aggregate): string {
   const cost = a.cost !== undefined ? ` cost=$${a.cost.toFixed(4)}` : '';
   return (
     `${label.padEnd(10)} n=${String(a.n).padEnd(3)} mean=${a.meanScore.toFixed(4)} correct=${a.correct}/${a.n} ` +
-    `filtered=${a.filtered} steps=${a.meanSteps.toFixed(2)} fmt=${a.formatIssues} cache=${pct(a.cacheHitRate)} ` +
+    `filtered=${a.filtered} steps=${a.meanSteps.toFixed(2)} fmt=${a.formatIssues} root_cache=${pct(a.rootCacheHitRate)} cache=${pct(a.cacheHitRate)} ` +
     `tokens=${a.promptTokens}/${a.cachedTokens}/${a.completionTokens}${cost}`
   );
 }

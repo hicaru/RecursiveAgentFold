@@ -90,6 +90,20 @@ const PROBES: readonly ToolProbe[] = Object.freeze([
     },
   },
   {
+    tool: 'search',
+    question: '文档 log 有 60 行。请直接调用 search 工具（BM25 检索，不要用 grep），用查询词 "灯塔 7742" 检索最相关的窗口。',
+    docs: [{ id: 'log', title: '巡检日志', text: logText() }],
+    checkArgs: (a) => (isText(a.query) ? undefined : 'query must be a non-empty string'),
+    checkObservation: (o) => (o.includes('7742') ? undefined : 'search did not locate 7742 window'),
+  },
+  {
+    tool: 'outline',
+    question: '请直接调用 outline 工具提取文档 doc 的结构大纲和章节行号（不要调用 read 或 grep）。',
+    docs: [{ id: 'doc', title: '章节示例', text: '# Chapter 1 Overview\nIntro line\n## Section 1.1 Architecture\nBody line\n# Chapter 2 Evaluation\nResult line' }],
+    checkArgs: () => undefined,
+    checkObservation: (o) => (o.includes('Chapter 1') && o.includes('Section 1.1') ? undefined : 'outline missing structural headings'),
+  },
+  {
     tool: 'grep',
     question: '文档 log 有 60 行。用正则搜索「灯塔」，列出所有匹配行的行号和原文。',
     docs: [{ id: 'log', title: '巡检日志', text: logText() }],
@@ -136,7 +150,7 @@ function buildTools(store: ContextStore, models: BenchModels, usage: UsageTracke
     store,
     llmQuery: { ...models.llmQuery, maxChunkTokens: 8192 },
     maxDepth: 1,
-    enable: { llm_query: true, branch: true, grep: true, tally: true, read: true, calculator: true },
+    enable: { llm_query: true, branch: true, search: true, outline: true, grep: true, tally: true, read: true, calculator: true },
     usage,
   });
   return raf.toolsFor(0);

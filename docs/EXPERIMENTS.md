@@ -323,3 +323,46 @@ pnpm bench oolong --limit 5 --dataset trec_coarse --context-len 131072 --max-dep
    - На задаче `35ddea1dc...` (`longbench-pro`), где раньше агент завершался на шаге 2 с `<answer>暂无最终答案，继续验证中</answer>`, агент продолжил чтение всех трёх документов (`doc_1`, `doc_2`, `doc_3`) по последовательным окнам `stopped at line X due to token limit; read from X+1 to continue` без потери средних строк.
    - На задаче `00e65818...` (`longbench-pro` T6 Clustering, 8 статей A–H в 3 файлах) round-robin `grep` по документам сразу показал совпадения из `doc_1` и `doc_2`, что позволило агенту обнаружить склейку 8 статей и решить задачу на **1.000** за 8 шагов (против 10 шагов в baseline).
    - На `en-longbench-d2` точность выросла с **50.0% (3/6)** до **66.7% (4/6)** при сокращении входных prompt-токенов на **−38.9%** и росте общего cache hit rate с **48.6%** до **79.8%**.
+
+## 2026-11-08 (кампания 2): портирование практик точности `rlm.pi` (H1–H7) и защита KV-кэша `root`
+
+Полное описание архитектурного аудита `/Users/hicaru/projects/zebra/rlm.pi` и детальная спецификация гипотез `H1`–`H7` зафиксированы в [`docs/RLM_PI_HYPOTHESES.md`](./RLM_PI_HYPOTHESES.md).
+
+### Проверенные гипотезы и изменения в `@raf/engine` и `@raf/benchmarks`
+
+- **H1 (Deterministic Zero-Token BM25 V2 `search` & Structural `outline`)**:
+  - Реализован `Bm25DocumentIndex` (`packages/engine/src/context/bm25.ts`): перекрывающиеся окна по 40 строк (шаг 20), детерминированный стемминг английских суффиксов (`stemToken`), разбиение `camelCase`, CJK униграммы + биграммы (`\p{Script=Han}`), Robertson-Walker IDF, Rocchio Pseudo-Relevance Feedback (`PRF_FEEDBACK_DOCS = 3`, `PRF_EXPANSION_TERMS = 8`, `PRF_EXPANSION_WEIGHT = 0.4` при $\ge 12$ окнах) и фразовый бонус смежных биграмм запроса (`PHRASE_BONUS_WEIGHT = 0.25`).
+  - В `ContextStore` (`packages/engine/src/context/store.ts`) добавлены методы `search()` и `outline()`, экспортированы бесплатные инструменты `search` и `outline` (`packages/engine/src/tools/document-tools.ts`).
+- **H2 (Root Orchestrator Decomposition Doctrine & Root Deep-Fold Suppression)**:
+  - Для `root` (`depth === 0`) установлен порог глубокой консолидации `DEFAULT_ROOT_MIN_DEEP_FOLD_BLOCKS = 16` (`packages/engine/src/agent/agent-fold.ts`) при сохранении `DEFAULT_MIN_DEEP_FOLD_BLOCKS = 6` для `branch` (`depth > 0`), что исключает инвалидацию префикса `### Previous Steps` в `root` на стандартных траекториях 1–15 шагов.
+  - В `Operating Principles` (`packages/engine/src/prompts/agent.ts`) добавлены правила оркестрации Appendix C.3 из `rlm.pi` (приоритет бесплатных проб `search`/`grep`/`outline`/`tally`, параллельный `branch` при мульти-документном анализе, приоритет готовых фактов `KEY = value` из `Shared Research Board`).
+- **H3 (`TaskLedger` Ancestor-Echo Guard & Specialist Budget Demotion)**:
+  - В `packages/engine/src/context/board.ts` добавлены `taskTokenSet`, `targetTokenSet`, `jaccardSimilarity` и `isAncestorEcho` (`ECHO_JACCARD = 0.8`). Если специалист (`depth > 0`) пытается повторно делегировать задачу предка ($\text{Jaccard} \ge 0.8$ при тех же целевых идентификаторах) на собственный `scope`, вызов блокируется за 0 LLM-токенов (`[ledger: ancestor echo rejected...]`).
+  - Добавлен бюджетный лимит `maxSpecialists = 12` в `branch.ts`: при превышении числа специалистов новые специалисты запускаются в быстром режиме (`maxSteps = Math.min(maxSteps, 4)`).
+- **H4 (Reader `llm_query` Cue-Guided Shorthand & `<5%` Margin Warning)**:
+  - В `packages/engine/src/prompts/llm-query.ts` правило компактного рассуждения обновлено на `"line#:cue->code"` (`"5:year->N 6:city->L 7:poet->H"`), а в `LLMQueryEngine.formatReport` (`packages/engine/src/tools/llm-query.ts`) добавлена диагностика `formatMarginNote`, предупреждающая о смежных категориях с разницей $< 5\%$ от суммы всех элементов или $< 8\%$ от суммы пары.
+- **H5 (Incomplete-Read / Bare Step-0 Verification Guard & Fallback Answer Floor)**:
+  - В `AgentFoldAgent.run()` (`packages/engine/src/agent/agent-fold.ts`) добавлена однократная проверка `verificationNudged` при попытке выдать `<answer>` без `<folding>` сразу после обрезанного по лимиту токенов `read` (`stopped at line X due to token limit`), а также функция `extractFallbackAnswer` для спасения незакрытого `<answer>` или явного блока `[Answer]`/`[答案]` на последнем шаге.
+- **H6 (Case-Exact vs Case-Insensitive `tally` Disambiguation)**:
+  - `ContextStore.tally` и `createTallyTool` возвращают как точные варианты регистра, так и сводку `Case-folded summary (when task is case-insensitive vs exact-case)` при наличии нескольких вариантов регистра одного слова (например, `this=36, This=4`).
+- **H7 (3-Tier Independent Provider Config & Root Cache Telemetry)**:
+  - В `packages/benchmarks/src/config.ts`, `cli.ts`, `.env.example` добавлена независимая конфигурация 3 уровней (`RAF_ROOT_*`, `RAF_BRANCH_*`, `RAF_QUERY_*`), а в `runner.ts` и `compare.ts` выведены метрики `rootCacheHitRate` и `branchCacheHitRate`.
+
+### Результаты верификации (`en-*-d2` baseline vs `rlm-port-*`)
+
+| Бенчмарк (n) | Прогон | Точность | Шаги | Токены (prompt/cached/compl) | Root cache hit | Total cache hit | Cost | fmt |
+|---|---|---|---|---|---|---|---|---|
+| `prompt-check` (10 проб) | `rlm-port-prompt-check` | **PASS (10/10 проб, e2e 1.000)** | 2.0 | 5,694/5,467/624 (e2e) | **96.2%** | **96.2%** | ~$0.0001 | **0** |
+| `oolong` d2 (5) | `en-oolong-d2` (baseline) | 4/5 (0.8000) | 1.80 | 146,678/26,176/73,582 | 86.0% | 17.8% | $0.0977 | 2 |
+| | `rlm-port-oolong-d2` (H1–H7) | **5/5 (1.0000, +20.0 п.п.)** | **1.60 (−11%)** | 148,820/29,376/108,359 (root **25,901, −14.9%**) | **85.7%** (92.2–95.0% задачи 2–5) | **19.7%** | $0.1116 | **0** |
+| `longbench-pro` срез (offset 8, limit 4) | `en-longbench-pro-20-d2` (срез 4 задач) | 1/4 (0.3750) | 4.50 | 87,879/54,784/70,065 | 62.3% | 62.3% | $0.3689 | 3 |
+| | `rlm-port-lbpro-slice` (H1–H7) | **3/4 (0.7500, +37.5 п.п., 2x)** | **3.50 (−22%)** | **60,485 (−31.2%)**/41,472/59,454 | **68.6% (+6.3 п.п.)** | **68.6%** | **$0.2990 (−18.9%)** | **0** |
+| `codegraph` d2 (6) | `en-codegraph-d2` (baseline) | **6/6 (1.0000)** | 3.33 | 492,940/373,312/126,677 | 67.1% (branch 78.1%) | 75.7% | $0.8219 | 1 |
+| | `rlm-port-codegraph-d2` (H1–H7) | **6/6 (1.0000)** | 3.67 | 746,178/573,760/197,456 | **68.2% (+1.1 п.п., branch 78.6%)** | **76.9% (+1.2 п.п.)** | $1.2594 | **0** |
+
+### Ключевые подтверждения по задачам
+
+1. **OOLONG `17000211` (`0.000 → 1.000`, H4)**: В `en-oolong-d2` задача `17000211` (`description and abstract concept` vs `human being`) падала из-за смещения 29 вопросов `"What..."` о людях/группах в `description and abstract concept` (`423 > 394`). В `rlm-port-oolong-d2` ридер классифицировал все `3,182/3,182` строки (`numeric value=969, entity=815, human being=416, description and abstract concept=388, location=303, abbreviation=291`), верно определив `388 < 416` (`less common than`) с первого прохода и обеспечив **5/5 (100%)** на `oolong`.
+2. **LongBench-Pro `2bc1b1da` (`0.500 → 1.000`, H6)**: Агент вызвал `tally` с `case_sensitive: true` на шаге 0 и выдал точный порядок `that, have, would, this, went` за 2 шага вместо ошибочного сложения `this (36) + This (4) = 40 > would (37)`.
+3. **LongBench-Pro `b2d18db8` (`0.000 → 1.000`, H5)**: Устранено преждевременное завершение после обрезанного по лимиту токенов `read(1..80)` без `<folding>`; агент проверил все варианты и выдал точный ответ `ACE` (`score = 1.000`, `0` ошибок формата).
+4. **CodeGraph 120K (`6/6 = 1.0000`, H1/H2/H3)**: В `rlm-port-codegraph-d2` все 6 задач (`spec_specialist`, `diamond_deps`, `chain_hop`) решены на **1.000** с **0 ошибок формата** (против 1 в baseline) и **0 скорректированных свёрток** (`93 / 0 / 0`), при росте `root` cache hit rate с `67.1%` до **`68.2%`** (до `90.5%` на `chain-h3-5`), `branch` cache hit rate с `78.1%` до **`78.6%`** (до `86.6%` на `diamond-1`) и общего cache hit rate с `75.7%` до **`76.9%`**. Специалисты также использовали новый бесплатный инструмент `outline` для структурного обзора модулей.

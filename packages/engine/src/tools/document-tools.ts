@@ -27,6 +27,86 @@ export function createListDocumentsTool(): Tool {
   };
 }
 
+export function createSearchTool(opts: DocumentToolOptions = {}): Tool {
+  return {
+    name: 'search',
+    description:
+      'Rank 40-line document windows against a natural-language or keyword query using Okapi BM25 V2 (stemming + query expansion + phrase bonus). Free (0 LLM tokens); use before llm_query or when exact grep regexes are uncertain.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Natural-language or keyword query.' },
+        documents: { type: 'array', items: { type: 'string' }, description: 'Document ids (default: all).' },
+        k: { type: 'integer', description: 'Number of top windows to return (default 10, max 30).' },
+      },
+      required: ['query'],
+    },
+    async execute(args, ctx) {
+      const query = (argString(args, 'query') ?? '').trim();
+      if (!query) throw new ToolArgumentError('search requires a non-empty "query" string.');
+      const k = Math.max(1, Math.min(30, Math.floor(argNumber(args, 'k') ?? 10)));
+      const docIds = argStringList(args, 'documents');
+      const hits = ctx.store.search(query, {
+        ...(docIds !== undefined ? { docIds } : {}),
+        k,
+      });
+      if (hits.length === 0) {
+        return `search "${query}": 0 matching windows.`;
+      }
+      const blocks = Array.from(
+        { length: hits.length },
+        (_, i) => {
+          const h = hits[i];
+          if (!h) return '';
+          return `[#${i + 1}] ${h.docId}:L${h.startLine}-${h.endLine} (score=${h.score.toFixed(2)})\n${h.snippet}`;
+        },
+      );
+      const out = `search "${query}": top ${hits.length} window(s)\n${blocks.join('\n')}`;
+      return truncateToTokens(out, opts.maxReadTokens ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxReadTokens).text;
+    },
+  };
+}
+
+export function createOutlineTool(opts: DocumentToolOptions = {}): Tool {
+  return {
+    name: 'outline',
+    description:
+      'Extract structural headings, section titles, and code definitions with line numbers for a document (or all documents if omitted). Use to orient on document structure and section boundaries.',
+    parameters: {
+      type: 'object',
+      properties: {
+        document: { type: 'string', description: 'Document id (default: all documents).' },
+        max_entries: { type: 'integer', description: 'Max structural entries to return (default 60, max 200).' },
+      },
+    },
+    async execute(args, ctx) {
+      const docId = argString(args, 'document');
+      const maxEntries = Math.max(1, Math.min(200, Math.floor(argNumber(args, 'max_entries') ?? 60)));
+      const maxTokens = opts.maxReadTokens ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxReadTokens;
+      if (docId) {
+        const r = ctx.store.outline(docId, { maxEntries });
+        const body = r.entries.map((e) => `L${e.line}: ${e.text}`).join('\n');
+        return truncateToTokens(
+          `outline ${r.docId} (${r.totalLines} lines, ${r.entries.length} entries):\n${body}`,
+          maxTokens,
+        ).text;
+      }
+      const docs = ctx.store.list();
+      if (docs.length === 0) return '(no documents loaded)';
+      const perDocMax = Math.max(15, Math.floor(maxEntries / docs.length));
+      const sections: string[] = [];
+      for (let i = 0; i < docs.length; i++) {
+        const d = docs[i];
+        if (!d) continue;
+        const r = ctx.store.outline(d.id, { maxEntries: perDocMax });
+        const body = r.entries.map((e) => `  L${e.line}: ${e.text}`).join('\n');
+        sections.push(`outline ${r.docId} (${r.totalLines} lines, ${r.entries.length} entries):\n${body}`);
+      }
+      return truncateToTokens(sections.join('\n\n'), maxTokens).text;
+    },
+  };
+}
+
 export function createGrepTool(opts: DocumentToolOptions = {}): Tool {
   return {
     name: 'grep',
@@ -103,7 +183,26 @@ export function createTallyTool(): Tool {
         });
       }
       const rows = r.counts.slice(0, top).map(([k, n]) => `${n}\t${k}`);
-      return `tally /${pattern}/: ${r.totalMatches} matches, ${r.distinct} distinct values${r.distinct > top ? ` (showing top ${top})` : ''}\ncount\tvalue\n${rows.join('\n')}`;
+      const multiCaseLines: string[] = [];
+      if (args.case_sensitive !== true && r.caseFoldedCounts) {
+        const foldedSlice = r.caseFoldedCounts.slice(0, top);
+        for (let i = 0; i < foldedSlice.length; i++) {
+          const item = foldedSlice[i];
+          if (!item) continue;
+          const [lowerKey, total, variants] = item;
+          const variantEntries = Object.entries(variants);
+          if (variantEntries.length > 1) {
+            variantEntries.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+            const breakdown = variantEntries.map(([v, c]) => `${v}=${c}`).join(', ');
+            multiCaseLines.push(`${lowerKey}: ${total} total (exact-case: ${breakdown})`);
+          }
+        }
+      }
+      const caseSuffix =
+        multiCaseLines.length > 0
+          ? `\nCase-folded summary (when task is case-insensitive vs exact-case):\n${multiCaseLines.join('\n')}`
+          : '';
+      return `tally /${pattern}/: ${r.totalMatches} matches, ${r.distinct} distinct values${r.distinct > top ? ` (showing top ${top})` : ''}\ncount\tvalue\n${rows.join('\n')}${caseSuffix}`;
     },
   };
 }

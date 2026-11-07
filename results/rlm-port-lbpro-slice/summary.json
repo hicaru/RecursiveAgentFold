@@ -1,0 +1,73 @@
+{
+  "bench": "longbench-pro",
+  "method": "raf",
+  "n": 4,
+  "meanScore": 0.75,
+  "correct": 3,
+  "meanOfficial": 0.75,
+  "meanLenient": 0.75,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 0.75,
+  "meanSteps": 3.5,
+  "meanWallSec": 166.954,
+  "formatIssues": 0,
+  "folds": {
+    "granular": 10,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 0,
+  "tokens": {
+    "prompt": 60485,
+    "cached": 41472,
+    "completion": 59454,
+    "rootCacheHitRate": 0.6856576010581136,
+    "branchCacheHitRate": 0,
+    "cacheHitRate": 0.6856576010581136
+  },
+  "byRole": {
+    "root": {
+      "calls": 14,
+      "promptTokens": 60485,
+      "completionTokens": 59454,
+      "cachedTokens": 41472,
+      "reasoningTokens": 50729,
+      "latencyMs": 667729,
+      "errors": 0,
+      "cacheHitRate": 0.6856576010581136
+    }
+  },
+  "byTask": {
+    "T6. Aggregation & Clustering": {
+      "n": 1,
+      "score": 1
+    },
+    "T3. Evidence-Grounded QA": {
+      "n": 1,
+      "score": 1
+    },
+    "T10. Rule Induction & In-Context Learning": {
+      "n": 1,
+      "score": 1
+    },
+    "T7. Consistency & Compliance Checking": {
+      "n": 1,
+      "score": 0
+    }
+  },
+  "byAnswerType": {
+    "?": {
+      "n": 4,
+      "score": 0.75
+    }
+  },
+  "cost": {
+    "totalUsd": 0.298999,
+    "perTaskUsd": 0.07475,
+    "cacheSavedUsd": 0.047278,
+    "byRoleUsd": {
+      "root": 0.298999
+    }
+  }
+}

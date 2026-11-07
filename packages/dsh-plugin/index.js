@@ -9,7 +9,14 @@ const ENGINE_STANDARD = 'standard';
 const ENGINE_RAF = 'raf';
 const ENGINE_ROUTE = '/plugins/@raf/dsh-plugin/engine';
 const RUNS_ROUTE = '/plugins/@raf/dsh-plugin/runs';
-const DEFAULT_SETTINGS = Object.freeze({ depth: 2, reserve: 0.3, concurrency: 4 });
+const DEFAULT_SETTINGS = Object.freeze({
+  depth: 2,
+  reserve: 0.3,
+  concurrency: 4,
+  rootModel: '',
+  branchModel: '',
+  queryModel: '',
+});
 const DEPTH_MIN = 1;
 const DEPTH_MAX = 3;
 const RESERVE_MIN = 0.1;
@@ -46,12 +53,19 @@ function toReserve(value) {
   return Number((Math.round(clamped / 0.05) * 0.05).toFixed(2));
 }
 
+function toModelString(value) {
+  return typeof value === 'string' ? value.trim().slice(0, 160) : '';
+}
+
 function sanitizeSettings(value) {
   const source = value !== null && typeof value === 'object' ? value : {};
   return Object.freeze({
     depth: toInteger(source.depth, DEFAULT_SETTINGS.depth, DEPTH_MIN, DEPTH_MAX),
     reserve: toReserve(source.reserve),
     concurrency: toInteger(source.concurrency, DEFAULT_SETTINGS.concurrency, CONCURRENCY_MIN, CONCURRENCY_MAX),
+    rootModel: toModelString(source.rootModel),
+    branchModel: toModelString(source.branchModel),
+    queryModel: toModelString(source.queryModel),
   });
 }
 
@@ -229,22 +243,61 @@ function mapUsage(usage) {
   };
 }
 
+function parseModelSpec(spec, fallback) {
+  const trimmed = typeof spec === 'string' ? spec.trim() : '';
+  if (trimmed === '') return undefined;
+  if (trimmed.includes('/')) {
+    const slash = trimmed.indexOf('/');
+    return {
+      provider: trimmed.slice(0, slash).trim() || fallback.provider,
+      model: trimmed.slice(slash + 1).trim() || fallback.model,
+    };
+  }
+  return { provider: fallback.provider, model: trimmed };
+}
+
+function resolveTierTarget(outer, settings, tier, fallback = { provider: outer.provider, model: outer.model }) {
+  const settingValue =
+    tier === 'ROOT'
+      ? settings?.rootModel
+      : tier === 'BRANCH'
+        ? settings?.branchModel
+        : tier === 'QUERY'
+          ? settings?.queryModel
+          : '';
+  const fromSettings = parseModelSpec(settingValue, fallback);
+  if (fromSettings !== undefined) return fromSettings;
+  const rawProvider = (process.env[`RAF_${tier}_PROVIDER`] ?? '').trim();
+  const rawModel = (process.env[`RAF_${tier}_MODEL`] ?? '').trim();
+  if (rawProvider === '' && rawModel === '') return fallback;
+  if (rawProvider === '' && rawModel.includes('/')) {
+    return parseModelSpec(rawModel, fallback) ?? fallback;
+  }
+  return {
+    provider: rawProvider || fallback.provider,
+    model: rawModel || fallback.model,
+  };
+}
+
 class DshLlmClient {
-  constructor(ctx, outer, profile, reasoningEffort) {
+  constructor(ctx, outer, profile, reasoningEffort, target) {
     this.ctx = ctx;
     this.outer = outer;
     this.profile = profile;
     this.reasoningEffort = reasoningEffort;
+    this.provider = target?.provider ?? outer.provider;
+    this.model = target?.model ?? outer.model;
   }
 
   async complete(request) {
     const signal = request.signal ?? this.outer.signal;
     if (signal?.aborted) throw signal.reason ?? new Error('aborted');
     const started = Date.now();
+    const targetOuter = { ...this.outer, provider: this.provider, model: this.model };
     const options = {
-      provider: this.outer.provider,
-      model: this.outer.model,
-      messages: request.messages.map((message) => dshMessage(message, this.outer)),
+      provider: this.provider,
+      model: this.model,
+      messages: request.messages.map((message) => dshMessage(message, targetOuter)),
       sessionId: this.outer.sessionId,
       // Tag RAF calls so the listener skips them even outside the ALS guard.
       purpose: `raf-${request.purpose ?? 'root'}`,
@@ -283,7 +336,7 @@ class DshLlmClient {
       text,
       reasoning,
       usage: mapUsage(usage),
-      model: this.outer.model,
+      model: this.model,
       latencyMs: Date.now() - started,
       ...(finishKind === 'max-tokens' ? { finishReason: 'length' } : {}),
     };
@@ -297,11 +350,16 @@ function shortText(value, limit) {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-function formatTrace(events, settings, outer) {
+function formatTrace(events, settings, outer, usage) {
   const lines = [];
   lines.push('RAF execution trace (diagnostic data, not model reasoning).');
   lines.push(`model: ${outer.provider}/${outer.model}`);
   lines.push(`settings: depth=${settings.depth} reserve=${settings.reserve} readers=${settings.concurrency}`);
+  if (usage !== null && typeof usage === 'object') {
+    lines.push(
+      `usage: in=${usage.input ?? 0} out=${usage.output ?? 0} cached=${usage.cached ?? 0} root_cache=${Math.round((usage.rootCacheHitRate ?? 0) * 100)}% total_cache=${Math.round((usage.cacheHitRate ?? 0) * 100)}%`,
+    );
+  }
   for (const event of events) {
     switch (event.type) {
       case 'run_start':
@@ -391,6 +449,8 @@ const RAF_DSH_TOOLS = Object.freeze(
 const RAF_DSH_NAME = Object.freeze({
   read: 'read_file',
   grep: 'grep_files',
+  search: 'search_files',
+  outline: 'outline_files',
 });
 
 function contentText(blocks) {
@@ -427,7 +487,17 @@ function toolResultText(result) {
   return '';
 }
 
-function createDshTools(ctx, sessionId, signal) {
+function toDocId(prefix, rawLabel, fallbackIndex) {
+  const cleaned = String(rawLabel ?? '')
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/[^A-Za-z0-9_.\-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(-52);
+  return `${prefix}_${cleaned || String(fallbackIndex)}`;
+}
+
+function createDshTools(ctx, sessionId, signal, sessionState) {
   const agents = ctx.get('agents');
   const tools = ctx.get('tools');
   if (agents === undefined || tools === undefined) return [];
@@ -465,7 +535,25 @@ function createDshTools(ctx, sessionId, signal) {
             agent,
           });
           const first = Array.isArray(batch.results) ? batch.results[0] : undefined;
-          return toolResultText(first);
+          const text = toolResultText(first);
+          if (
+            !text.startsWith('Tool error:') &&
+            text.length >= 1200 &&
+            (definition.name === 'read' || definition.name === 'web_fetch')
+          ) {
+            const rawTarget =
+              args?.path ?? args?.file_path ?? args?.filePath ?? args?.url ?? `${definition.name}_${(sessionState?.docs?.size ?? 0) + 1}`;
+            const docId = toDocId(definition.name === 'web_fetch' ? 'web' : 'file', rawTarget, (sessionState?.docs?.size ?? 0) + 1);
+            const title = String(rawTarget);
+            try {
+              const doc = toolCtx.store.add(text, { id: docId, title });
+              sessionState?.docs?.set(docId, { title, text });
+              return `[Indexed in ContextStore as document "${docId}" (${doc.lines.length} lines, ~${doc.tokens} tokens) — use search, outline, grep, tally, read, branch(scope="${docId}"), or llm_query on "${docId}"]\n${text}`;
+            } catch {
+              return text;
+            }
+          }
+          return text;
         } catch (error) {
           return `Tool ${definition.name} failed: ${error instanceof Error ? error.message : String(error)}`;
         }
@@ -642,20 +730,25 @@ function createInlineTrace(ctx, outer, signal) {
   };
 }
 
-const sessionQueryCaches = new Map();
+const sessionStates = new Map();
 
-function getSessionQueryCache(sessionId) {
+function getSessionState(sessionId, raf) {
   const key = typeof sessionId === 'string' && sessionId !== '' ? sessionId : 'default';
-  let cache = sessionQueryCaches.get(key);
-  if (!cache) {
-    if (sessionQueryCaches.size >= 100) {
-      const oldestKey = sessionQueryCaches.keys().next().value;
-      if (oldestKey !== undefined) sessionQueryCaches.delete(oldestKey);
+  let state = sessionStates.get(key);
+  if (!state) {
+    if (sessionStates.size >= 100) {
+      const oldestKey = sessionStates.keys().next().value;
+      if (oldestKey !== undefined) sessionStates.delete(oldestKey);
     }
-    cache = { memo: new Map(), chunkCounts: new Map() };
-    sessionQueryCaches.set(key, cache);
+    state = {
+      memo: new Map(),
+      chunkCounts: new Map(),
+      board: new raf.ResearchBoard(),
+      docs: new Map(),
+    };
+    sessionStates.set(key, state);
   }
-  return cache;
+  return state;
 }
 
 async function* rafStream(ctx, outer, settings, runs) {
@@ -677,31 +770,56 @@ async function* rafStream(ctx, outer, settings, runs) {
       question: effectiveQuestion,
     });
     const raf = await loadRaf();
+    const sessionState = getSessionState(outer.sessionId, raf);
     const contextWindow = contextWindowOf(ctx, outer.sessionId);
+    const rootTarget = resolveTierTarget(outer, settings, 'ROOT');
+    const branchTarget = resolveTierTarget(outer, settings, 'BRANCH', rootTarget);
+    const queryTarget = resolveTierTarget(outer, settings, 'QUERY', rootTarget);
     const rootProfile = {
-      name: outer.model,
+      name: rootTarget.model,
+      contextWindow,
+      maxOutputTokens: RAF_ROOT_MAX_OUTPUT,
+    };
+    const branchProfile = {
+      name: branchTarget.model,
       contextWindow,
       maxOutputTokens: RAF_ROOT_MAX_OUTPUT,
     };
     const queryProfile = {
-      name: outer.model,
+      name: queryTarget.model,
       contextWindow,
       maxOutputTokens: RAF_QUERY_MAX_OUTPUT,
     };
     const store = new raf.ContextStore();
     if (transcript !== '') store.add(transcript, { id: 'session', title: 'DSH session transcript' });
-    const rootLLM = new DshLlmClient(ctx, outer, rootProfile, outer.reasoningEffort);
-    const queryLLM = new DshLlmClient(ctx, outer, queryProfile, 'low');
-    const extraTools = createDshTools(ctx, outer.sessionId, signal);
+    for (const [docId, docEntry] of sessionState.docs.entries()) {
+      if (docId !== 'session' && typeof docEntry?.text === 'string' && docEntry.text !== '') {
+        store.add(docEntry.text, { id: docId, title: docEntry.title ?? docId });
+      }
+    }
+    const rootLLM = new DshLlmClient(ctx, outer, rootProfile, outer.reasoningEffort, rootTarget);
+    const branchLLM =
+      branchTarget.provider !== rootTarget.provider || branchTarget.model !== rootTarget.model
+        ? new DshLlmClient(ctx, outer, branchProfile, outer.reasoningEffort, branchTarget)
+        : undefined;
+    const queryLLM = new DshLlmClient(ctx, outer, queryProfile, 'low', queryTarget);
+    const extraTools = createDshTools(ctx, outer.sessionId, signal, sessionState);
     const inline = createInlineTrace(ctx, outer, signal);
     const events = [];
     const engine = new raf.RecursiveAgentFold({
       rootLLM,
+      ...(branchLLM !== undefined ? { branchLLM } : {}),
       queryLLM,
       store,
+      board: sessionState.board,
       maxDepth: settings.depth,
       agent: { temperature: 0 },
-      llmQuery: { reserveRatio: settings.reserve, concurrency: settings.concurrency, temperature: 0, cache: getSessionQueryCache(outer.sessionId) },
+      llmQuery: {
+        reserveRatio: settings.reserve,
+        concurrency: settings.concurrency,
+        temperature: 0,
+        cache: { memo: sessionState.memo, chunkCounts: sessionState.chunkCounts },
+      },
       rootMaxSteps: RAF_ROOT_MAX_STEPS,
       extraTools,
       signal,
@@ -721,23 +839,29 @@ async function* rafStream(ctx, outer, settings, runs) {
           ? `RAF engine error: ${result.error}`
           : 'RAF engine returned no answer.';
     const total = result.usage.total();
+    const byRole = result.usage.byRole();
+    const rootCacheHitRate = byRole.root?.cacheHitRate ?? 0;
+    const branchCacheHitRate = byRole.branch?.cacheHitRate ?? 0;
+    const runUsage = {
+      input: total.promptTokens,
+      output: total.completionTokens,
+      cached: total.cachedTokens,
+      cacheHitRate: total.cacheHitRate,
+      rootCacheHitRate,
+      branchCacheHitRate,
+      latencyMs: total.latencyMs,
+      calls: total.calls,
+      errors: total.errors,
+    };
     runs.finish(run, {
       status: result.terminated === 'error' ? 'error' : 'done',
       termination: result.terminated,
       answer: text,
       error: result.error ?? null,
-      usage: {
-        input: total.promptTokens,
-        output: total.completionTokens,
-        cached: total.cachedTokens,
-        cacheHitRate: total.cacheHitRate,
-        latencyMs: total.latencyMs,
-        calls: total.calls,
-        errors: total.errors,
-      },
+      usage: runUsage,
     });
     finished = true;
-    const trace = formatTrace(events, settings, outer);
+    const trace = formatTrace(events, settings, outer, runUsage);
     let index = 0;
     if (trace !== '') {
       const reasoning = `\n~~~text\n${trace}\n~~~\n`;

@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { ContextStore } from '../src/context/store.js';
-import { ResearchBoard } from '../src/context/board.js';
+import { isAncestorEcho, ResearchBoard } from '../src/context/board.js';
 import { ScriptedLLM } from '../src/llm/mock.js';
 import { RecursiveAgentFold } from '../src/runtime.js';
-import { computeChunkTokens, LLMQueryEngine } from '../src/tools/llm-query.js';
+import { computeChunkTokens, formatMarginNote, LLMQueryEngine } from '../src/tools/llm-query.js';
 import { UsageTracker } from '../src/llm/usage.js';
 import type { AgentEvent } from '../src/agent/events.js';
-import { AgentFoldAgent } from '../src/agent/agent-fold.js';
+import { AgentFoldAgent, extractFallbackAnswer } from '../src/agent/agent-fold.js';
 import { FoldState } from '../src/fold/state.js';
-import { createGrepTool, createReadTool } from '../src/tools/document-tools.js';
+import { createGrepTool, createOutlineTool, createReadTool, createSearchTool, createTallyTool } from '../src/tools/document-tools.js';
 
 function haystack(lines: number, needleAt: number): string {
   const out: string[] = [];
@@ -926,5 +926,227 @@ describe('accuracy & prefix cache hardening (H2a, H2b, H2c, H3)', () => {
     const res2 = await engine2.query({ query: 'Count alpha and beta in turn 2', mode: 'extract', categories: ['alpha', 'beta'] });
     const memoHitsTurn2 = res2.findings.filter((f) => f.memoHit).length;
     expect(memoHitsTurn2).toBeGreaterThanOrEqual(turn1Chunks - 1);
+  });
+});
+
+describe('rlm.pi best practices port & root cache optimization (H1-H6)', () => {
+  it('H1: BM25 V2 search ranks morphological variants, phrase bonus,PRF, and CJK n-grams; outline extracts structure', async () => {
+    const store = new ContextStore();
+    const filler = Array.from({ length: 300 }, (_, i) => `Line ${i + 1}: routine administrative notes and general log records.`);
+    filler[140] = 'Section 4: The agency is modernising sustainable healthcare innovations across regional hospitals.';
+    filler[240] = '第五卷：黄帝之曾孙颛顼高阳氏登帝位，定历法而理四时。';
+    store.add(filler.join('\n'), { id: 'report', title: 'Annual Report' });
+
+    const enHits = store.search('sustainable healthcare innovation', { k: 5 });
+    expect(enHits.length).toBeGreaterThan(0);
+    expect(enHits[0]?.docId).toBe('report');
+    expect(enHits[0]?.startLine).toBeLessThanOrEqual(141);
+    expect(enHits[0]?.endLine).toBeGreaterThanOrEqual(141);
+    expect(enHits[0]?.snippet).toContain('modernising sustainable healthcare innovations');
+
+    const cjkHits = store.search('颛顼 黄帝 曾孙', { k: 3 });
+    expect(cjkHits.length).toBeGreaterThan(0);
+    expect(cjkHits[0]?.startLine).toBeLessThanOrEqual(241);
+    expect(cjkHits[0]?.endLine).toBeGreaterThanOrEqual(241);
+    expect(cjkHits[0]?.snippet).toContain('颛顼');
+
+    const searchTool = createSearchTool();
+    const searchObs = await searchTool.execute(
+      { query: 'sustainable healthcare innovation', k: 3 },
+      { store, usage: new UsageTracker(), depth: 0, agentName: 'root', step: 0, emit: () => {} },
+    );
+    expect(searchObs).toContain('search "sustainable healthcare innovation": top');
+    expect(searchObs).toContain('report:L');
+
+    const structuredStore = new ContextStore();
+    structuredStore.add(
+      [
+        '# 1. Architecture Overview',
+        'Some introductory text.',
+        '## 1.1 Storage Engine',
+        'export class StorageEngine {',
+        '  run() {}',
+        '}',
+        '第二章 系统评估',
+        'Evaluation details.',
+      ].join('\n'),
+      { id: 'spec', title: 'Spec' },
+    );
+    const outlineTool = createOutlineTool();
+    const outlineObs = await outlineTool.execute(
+      { document: 'spec' },
+      { store: structuredStore, usage: new UsageTracker(), depth: 0, agentName: 'root', step: 0, emit: () => {} },
+    );
+    expect(outlineObs).toContain('L1: # 1. Architecture Overview');
+    expect(outlineObs).toContain('L3: ## 1.1 Storage Engine');
+    expect(outlineObs).toContain('L4: export class StorageEngine {');
+    expect(outlineObs).toContain('L7: 第二章 系统评估');
+  });
+
+  it('H2: Root (depth=0) defers mid-run deep folds below 16 blocks to preserve prefix cache, while branch (depth=1) consolidates at 6 blocks', async () => {
+    const store = new ContextStore();
+    store.add('K = 42\n', { id: 'doc1' });
+
+    const makeScript = () => {
+      let call = 0;
+      return new ScriptedLLM(() => {
+        const step = call++;
+        if (step === 0) {
+          return '<motivation>start</motivation><tool_call>{"name":"grep","arguments":{"pattern":"K"}}</tool_call>';
+        }
+        if (step >= 1 && step <= 6) {
+          return `<folding>{"range":[${step - 1},${step - 1}],"summary":"step ${step - 1} ok"}</folding><motivation>step ${step}</motivation><tool_call>{"name":"grep","arguments":{"pattern":"K"}}</tool_call>`;
+        }
+        if (step === 7) {
+          // Request a mid-run deep fold [0, 6] (retracting 6 existing blocks 0..5) while still calling a tool
+          return '<folding>{"range":[0,6],"summary":"consolidated 0..6"}</folding><motivation>final check</motivation><tool_call>{"name":"grep","arguments":{"pattern":"K"}}</tool_call>';
+        }
+        return '<folding>{"range":[7,7],"summary":"done"}</folding><motivation>finish</motivation><answer>42</answer>';
+      });
+    };
+
+    const rootFolds: string[] = [];
+    const rootAgent = new AgentFoldAgent({
+      llm: makeScript(),
+      tools: [createGrepTool()],
+      store,
+      depth: 0,
+      onEvent: (e) => {
+        if (e.type === 'fold') rootFolds.push(e.outcome.kind);
+      },
+    });
+    await rootAgent.run('Find K');
+    // Root at depth=0 has default threshold 16, so the [0,6] deep fold at step 7 is deferred to granular [6,6]
+    expect(rootFolds).not.toContain('deep');
+
+    const branchFolds: string[] = [];
+    const branchAgent = new AgentFoldAgent({
+      llm: makeScript(),
+      tools: [createGrepTool()],
+      store,
+      depth: 1,
+      scope: 'doc1',
+      onEvent: (e) => {
+        if (e.type === 'fold') branchFolds.push(e.outcome.kind);
+      },
+    });
+    await branchAgent.run('Find K');
+    // Branch at depth=1 has default threshold 6, so [0,6] deep fold is allowed
+    expect(branchFolds).toContain('deep');
+  });
+
+  it('H3: TaskLedger blocks ancestor-echo re-delegation while allowing same question on a different target module, and demotes specialist step budget past maxSpecialists', async () => {
+    expect(
+      isAncestorEcho('Please analyze module lib_auth and compute AUTH_KEY', ['Analyze module lib_auth and compute AUTH_KEY']),
+    ).toBe(true);
+    expect(
+      isAncestorEcho('Analyze module lib_crypto and compute AUTH_KEY', ['Analyze module lib_auth and compute AUTH_KEY']),
+    ).toBe(false);
+
+    const store = new ContextStore();
+    store.add('VAL = 10\n', { id: 'mod_a' });
+    store.add('VAL = 20\n', { id: 'mod_b' });
+
+    let echoBlocked = false;
+    const root = new ScriptedLLM((req) => {
+      const user = req.messages[req.messages.length - 1]?.content ?? '';
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+      if (step === 0) {
+        return '<motivation>Delegate mod_a</motivation><tool_call>{"name":"branch","arguments":{"scope":"mod_a","task":"Inspect custom metric alpha beta gamma"}}</tool_call>';
+      }
+      return '<folding>{"range":[0,0],"summary":"done"}</folding><motivation>answer</motivation><answer>30</answer>';
+    });
+    const branch = new ScriptedLLM((req) => {
+      const user = req.messages[req.messages.length - 1]?.content ?? '';
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+      if (step === 0) {
+        // Attempt to re-delegate the ancestor task without specifying a different scope
+        return '<motivation>Echo parent task</motivation><tool_call>{"name":"branch","arguments":{"task":"Please inspect custom metric alpha beta gamma"}}</tool_call>';
+      }
+      if (user.includes('ancestor echo rejected')) {
+        echoBlocked = true;
+      }
+      return '<folding>{"range":[0,0],"summary":"echo blocked"}</folding><motivation>done</motivation><answer>10</answer>';
+    });
+    const raf = new RecursiveAgentFold({ rootLLM: root, branchLLM: branch, store, maxDepth: 2 });
+    const res = await raf.run('Root question');
+    expect(res.answer).toBe('30');
+    expect(echoBlocked).toBe(true);
+  });
+
+  it('H4: formatMarginNote emits a verification notice when adjacent category counts are within <5% of total or <8% of pair sum', () => {
+    const note = formatMarginNote({
+      'numeric value': 971,
+      'description and abstract concept': 423,
+      'human being': 394,
+      location: 503,
+    });
+    expect(note).toBeDefined();
+    expect(note).toContain('[Margin notice: close counts on');
+    expect(note).toContain('description and abstract concept(423) vs human being(394)');
+
+    const wideMargin = formatMarginNote({
+      alpha: 900,
+      beta: 100,
+    });
+    expect(wideMargin).toBeUndefined();
+  });
+
+  it('H5: nudges once when an agent answers immediately after a token-capped read without folding, and salvages unclosed <answer> on forcing step', async () => {
+    const store = new ContextStore();
+    const lines = Array.from({ length: 20 }, (_, i) => `Option_${i + 1}: ${'x'.repeat(180)}`);
+    store.add(lines.join('\n'), { id: 'doc' });
+
+    let step1Calls = 0;
+    const llm = new ScriptedLLM((req) => {
+      const user = req.messages[req.messages.length - 1]?.content ?? '';
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+      if (step === 0) {
+        return '<motivation>Read doc</motivation><tool_call>{"name":"read","arguments":{"document":"doc","start_line":1,"end_line":20}}</tool_call>';
+      }
+      if (step === 1) {
+        step1Calls++;
+        if (step1Calls === 1) {
+          // Premature answer without <folding> right after a truncated read
+          return '<motivation>Guessing early</motivation><answer>AE</answer>';
+        }
+        return '<folding>{"range":[0,0],"summary":"read partial lines"}</folding><motivation>Verified all options</motivation><answer>ACE</answer>';
+      }
+      return '<answer>ACE</answer>';
+    });
+
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [createReadTool({ maxReadLines: 20, maxReadTokens: 250 })],
+      store,
+      maxSteps: 4,
+    });
+    const res = await agent.run('Which options are valid?');
+    expect(res.answer).toBe('ACE');
+    expect(step1Calls).toBe(2);
+
+    // Verify extractFallbackAnswer salvages unclosed <answer> or [Answer] marker
+    expect(extractFallbackAnswer('<motivation>final</motivation><answer>[Answer]\n42')).toBe('[Answer]\n42');
+    expect(extractFallbackAnswer('Reasoning summary...\n[Answer]\n["A", "C"]')).toBe('[Answer]\n["A", "C"]');
+  });
+
+  it('H6: createTallyTool reports both exact-case counts and case-folded breakdown when casing variants exist', async () => {
+    const store = new ContextStore();
+    const words = [
+      ...Array.from({ length: 37 }, () => 'would'),
+      ...Array.from({ length: 36 }, () => 'this'),
+      ...Array.from({ length: 4 }, () => 'This'),
+    ];
+    store.add(words.join('\n'), { id: 'corpus' });
+    const tallyTool = createTallyTool();
+    const obs = await tallyTool.execute(
+      { pattern: '\\b(would|this)\\b' },
+      { store, usage: new UsageTracker(), depth: 0, agentName: 'root', step: 0, emit: () => {} },
+    );
+    expect(obs).toContain('37\twould');
+    expect(obs).toContain('36\tthis');
+    expect(obs).toContain('4\tThis');
+    expect(obs).toContain('Case-folded summary (when task is case-insensitive vs exact-case):');
+    expect(obs).toContain('this: 40 total (exact-case: this=36, This=4)');
   });
 });

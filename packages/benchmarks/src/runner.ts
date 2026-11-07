@@ -107,10 +107,10 @@ async function runDirect(task: BenchTask, cfg: RunConfig, usage: UsageTracker): 
   }
 }
 
-/** Tool presets: vanilla AgentFold = grep/read/calculator only (no llm_query, branch, tally). */
+/** Tool presets: vanilla AgentFold = search/outline/grep/read/calculator only (no llm_query, branch, tally). */
 export function toolPreset(cfg: Pick<RunConfig, 'method' | 'tools'>): Record<string, boolean> {
-  const all = ['llm_query', 'branch', 'grep', 'tally', 'read', 'calculator'];
-  const chosen = cfg.tools ?? (cfg.method === 'raf' ? all : ['grep', 'read', 'calculator']);
+  const all = ['llm_query', 'branch', 'search', 'outline', 'grep', 'tally', 'read', 'calculator'];
+  const chosen = cfg.tools ?? (cfg.method === 'raf' ? all : ['search', 'outline', 'grep', 'read', 'calculator']);
   return Object.fromEntries(all.map((t) => [t, chosen.includes(t)]));
 }
 
@@ -213,7 +213,7 @@ export async function runTasks(tasks: BenchTask[], cfg: RunConfig): Promise<Task
           done++;
           log(
             `[${done}/${tasks.length}] ${task.id} score=${result.score.toFixed(3)} out=${JSON.stringify((r.output ?? '').slice(0, 80))} ` +
-              `steps=${r.steps} ${r.terminated} tokens=${result.total.promptTokens}/${result.total.completionTokens} cache=${(result.total.cacheHitRate * 100).toFixed(1)}%` +
+              `steps=${r.steps} ${r.terminated} tokens=${result.total.promptTokens}/${result.total.completionTokens} root_cache=${((result.usage.root?.cacheHitRate ?? 0) * 100).toFixed(1)}% cache=${(result.total.cacheHitRate * 100).toFixed(1)}%` +
               (r.error ? ` error=${r.error.slice(0, 200)}` : ''),
           );
         }),
@@ -289,7 +289,14 @@ export function summarize(results: TaskResult[], extra: Record<string, unknown> 
     formatIssues: sum((r) => r.formatIssues),
     folds: { granular: sum((r) => r.folds.granular), deep: sum((r) => r.folds.deep), corrected: sum((r) => r.folds.corrected) },
     llmQueryCalls: sum((r) => r.llmQueryCalls),
-    tokens: { prompt: promptTokens, cached: cachedTokens, completion: sum((r) => r.total.completionTokens), cacheHitRate: promptTokens ? cachedTokens / promptTokens : 0 },
+    tokens: {
+      prompt: promptTokens,
+      cached: cachedTokens,
+      completion: sum((r) => r.total.completionTokens),
+      rootCacheHitRate: roles.root?.cacheHitRate ?? 0,
+      branchCacheHitRate: roles.branch?.cacheHitRate ?? 0,
+      cacheHitRate: promptTokens ? cachedTokens / promptTokens : 0,
+    },
     byRole: roles,
     byTask: byKey('task'),
     byAnswerType: byKey('answer_type'),
@@ -319,7 +326,9 @@ export function writeSummary(outDir: string, summary: ReturnType<typeof summariz
     `| folds granular / deep / corrected | ${summary.folds.granular} / ${summary.folds.deep} / ${summary.folds.corrected} |`,
     `| llm_query calls | ${summary.llmQueryCalls} |`,
     `| prompt / cached / completion tokens | ${summary.tokens.prompt} / ${summary.tokens.cached} / ${summary.tokens.completion} |`,
-    `| cache hit rate | ${pct(summary.tokens.cacheHitRate)} |`,
+    `| root cache hit rate | **${pct(summary.tokens.rootCacheHitRate)}** |`,
+    `| branch cache hit rate | ${pct(summary.tokens.branchCacheHitRate)} |`,
+    `| cache hit rate (all tiers) | ${pct(summary.tokens.cacheHitRate)} |`,
     ...(summary.cost
       ? [
           `| cost (list price, USD) | **$${summary.cost.totalUsd.toFixed(4)}** |`,

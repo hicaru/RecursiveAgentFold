@@ -5,7 +5,7 @@ import { ResearchBoard } from './context/board.js';
 import { UsageTracker } from './llm/usage.js';
 import { createBranchTool, type BranchRunnerOptions } from './tools/branch.js';
 import { createCalculatorTool } from './tools/calculator.js';
-import { createGrepTool, createListDocumentsTool, createReadTool, createTallyTool, type DocumentToolOptions } from './tools/document-tools.js';
+import { createGrepTool, createListDocumentsTool, createOutlineTool, createReadTool, createSearchTool, createTallyTool, type DocumentToolOptions } from './tools/document-tools.js';
 import { createLLMQueryTool, LLMQueryEngine, type LLMQueryOptions } from './tools/llm-query.js';
 import type { Tool } from './tools/types.js';
 import type { LLMClient } from './types.js';
@@ -32,7 +32,7 @@ export interface RecursiveAgentFoldOptions {
   rootMaxSteps?: number;
   branchMaxSteps?: number;
   /** Which tools to expose. Default: all available. */
-  enable?: Partial<Record<'llm_query' | 'branch' | 'grep' | 'tally' | 'read' | 'list_documents' | 'calculator', boolean>>;
+  enable?: Partial<Record<'llm_query' | 'branch' | 'search' | 'outline' | 'grep' | 'tally' | 'read' | 'list_documents' | 'calculator', boolean>>;
   /** Extra tools (plugins) appended after the built-ins. */
   extraTools?: Tool[];
   agent?: Partial<Omit<AgentFoldConfig, 'llm' | 'tools' | 'store' | 'depth' | 'name' | 'usage' | 'onEvent'>>;
@@ -80,6 +80,8 @@ export class RecursiveAgentFold {
     const maxDepth = this.opts.maxDepth ?? DEFAULT_MAX_DEPTH;
     const tools: Tool[] = [];
     if (this.queryEngine) tools.push(createLLMQueryTool(this.queryEngine));
+    if (en.search !== false) tools.push(createSearchTool(this.opts.documentTools));
+    if (en.outline !== false) tools.push(createOutlineTool(this.opts.documentTools));
     if (en.grep !== false) tools.push(createGrepTool(this.opts.documentTools));
     if (en.tally !== false) tools.push(createTallyTool());
     if (en.read !== false) tools.push(createReadTool(this.opts.documentTools));
@@ -111,6 +113,7 @@ export class RecursiveAgentFold {
       initialBoardSnapshot,
       agentName,
       callStack,
+      ancestorTasks,
       signal,
     } = opts;
     const llm = depth === 0 ? this.opts.rootLLM : (this.opts.branchLLM ?? this.opts.rootLLM);
@@ -134,6 +137,7 @@ export class RecursiveAgentFold {
       initialBoardCount,
       initialBoardSnapshot,
       callStack,
+      ancestorTasks,
     });
     return agent.run(question);
   }

@@ -1,4 +1,5 @@
 import { CharRatioEstimator, defaultEstimator, type TokenEstimator } from '../tokens.js';
+import { Bm25DocumentIndex, type SearchOptions, type SearchWindowHit } from './bm25.js';
 
 export interface StoredDocument {
   id: string;
@@ -62,6 +63,9 @@ function hashLines(lines: readonly string[], start: number, end: number): string
   }
   return (h >>> 0).toString(36);
 }
+
+const OUTLINE_HEADER_RE =
+  /^(?:\s*#{1,6}\s+\S|\s*(?:export\s+)?(?:async\s+)?(?:function|class|interface|type|const|let|enum|def|struct|impl|mod|module|package)\s+[A-Za-z0-9_]+|\s*(?:Chapter|Section|Part|Article|Table|Appendix|Annual Report)\b|\s*第[一二三四五六七八九十百千万零〇0-9]+[章节篇条部分]|\s*[篇章节]\s*[一二三四五六七八九十0-9]+|\s*\d+(?:\.\d+)*\s+[A-Z\p{Script=Han}])/u;
 /**
  * Holds the (possibly mega-large) contexts outside of every agent window.
  * Agents only see a manifest; content reaches models through llm_query
@@ -74,6 +78,7 @@ function hashLines(lines: readonly string[], start: number, end: number): string
 export class ContextStore {
   private readonly docs = new Map<string, StoredDocument>();
   private readonly chunkCache = new Map<string, Chunk[]>();
+  private bm25Index: Bm25DocumentIndex | undefined;
   private readonly estimator: TokenEstimator;
   private readonly maxLineChars: number;
   private readonly previewLines: number;
@@ -113,6 +118,7 @@ export class ContextStore {
     };
     this.docs.set(id, doc);
     for (const k of [...this.chunkCache.keys()]) if (k.startsWith(`${id}@`)) this.chunkCache.delete(k);
+    this.bm25Index = undefined;
     return doc;
   }
 
@@ -204,6 +210,54 @@ export class ContextStore {
     return { text, startLine: s, endLine: e, totalLines: doc.lines.length };
   }
 
+  /** Rank 40-line document windows against a query using Okapi BM25 V2. */
+  search(query: string, opts: SearchOptions = {}): SearchWindowHit[] {
+    if (!this.bm25Index) {
+      this.bm25Index = new Bm25DocumentIndex(this.list());
+    }
+    return this.bm25Index.search(query, opts);
+  }
+
+  /** Extract structural headings, section titles, and definitions with 1-based line numbers. */
+  outline(
+    docId: string,
+    opts: { maxEntries?: number } = {},
+  ): { docId: string; totalLines: number; entries: Array<{ line: number; text: string }> } {
+    const doc = this.get(docId);
+    const maxEntries = Math.max(1, Math.min(200, Math.floor(opts.maxEntries ?? 60)));
+    const totalLines = doc.lines.length;
+    if (totalLines === 0) return { docId, totalLines: 0, entries: [] };
+    const matched: Array<{ line: number; text: string }> = [];
+    for (let i = 0; i < totalLines; i++) {
+      const raw = doc.lines[i] ?? '';
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      if (OUTLINE_HEADER_RE.test(raw)) {
+        matched.push({ line: i + 1, text: trimmed.length > 160 ? `${trimmed.slice(0, 160)}…` : trimmed });
+      }
+    }
+    if (matched.length === 0) {
+      const targetLandmarks = Math.min(20, maxEntries);
+      const step = Math.max(1, Math.ceil(totalLines / targetLandmarks));
+      const landmarks: Array<{ line: number; text: string }> = [];
+      for (let i = 0; i < totalLines && landmarks.length < maxEntries; i += step) {
+        const raw = (doc.lines[i] ?? '').trim();
+        if (raw) {
+          landmarks.push({ line: i + 1, text: raw.length > 160 ? `${raw.slice(0, 160)}…` : raw });
+        }
+      }
+      return { docId, totalLines, entries: landmarks };
+    }
+    if (matched.length <= maxEntries) {
+      return { docId, totalLines, entries: matched };
+    }
+    const sampled = Array.from({ length: maxEntries }, (_, idx) => {
+      const pos = Math.min(matched.length - 1, Math.floor((idx * (matched.length - 1)) / Math.max(1, maxEntries - 1)));
+      return matched[pos] ?? { line: 1, text: '' };
+    });
+    return { docId, totalLines, entries: sampled };
+  }
+
   grep(
     pattern: string,
     opts: { docIds?: string[]; ignoreCase?: boolean; maxMatches?: number; maxLineChars?: number } = {},
@@ -275,9 +329,15 @@ export class ContextStore {
   tally(
     pattern: string,
     opts: { docIds?: string[]; ignoreCase?: boolean } = {},
-  ): { counts: Array<[string, number]>; totalMatches: number; distinct: number } {
+  ): {
+    counts: Array<[string, number]>;
+    totalMatches: number;
+    distinct: number;
+    caseFoldedCounts?: Array<[string, number, Readonly<Record<string, number>>]>;
+  } {
     const re = new RegExp(pattern, opts.ignoreCase === false ? 'g' : 'gi');
     const counts = new Map<string, number>();
+    const folded = new Map<string, { total: number; variants: Record<string, number> }>();
     let totalMatches = 0;
     const ids = opts.docIds?.length ? opts.docIds : [...this.docs.keys()];
     for (const id of ids) {
@@ -286,11 +346,22 @@ export class ContextStore {
         for (const m of line.matchAll(re)) {
           const key = m[1] ?? m[0];
           counts.set(key, (counts.get(key) ?? 0) + 1);
+          const lowerKey = key.toLowerCase();
+          let entry = folded.get(lowerKey);
+          if (!entry) {
+            entry = { total: 0, variants: {} };
+            folded.set(lowerKey, entry);
+          }
+          entry.total++;
+          entry.variants[key] = (entry.variants[key] ?? 0) + 1;
           totalMatches++;
         }
       }
     }
     const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-    return { counts: sorted, totalMatches, distinct: sorted.length };
+    const caseFoldedCounts: Array<[string, number, Readonly<Record<string, number>>]> = [...folded.entries()]
+      .sort((a, b) => b[1].total - a[1].total || a[0].localeCompare(b[0]))
+      .map(([k, v]) => [k, v.total, v.variants]);
+    return { counts: sorted, totalMatches, distinct: sorted.length, caseFoldedCounts };
   }
 }

@@ -54,6 +54,82 @@ export function normalizeScopeKey(scope: string): string {
 export function normalizeTaskKey(task: string): string {
   return task.trim().replace(/\s+/g, ' ').toLowerCase();
 }
+export const ECHO_JACCARD = 0.8;
+
+const TASK_NOISE_WORDS: Readonly<Record<string, true>> = Object.freeze({
+  a: true, an: true, and: true, are: true, as: true, at: true, be: true, by: true,
+  for: true, from: true, has: true, in: true, is: true, it: true, of: true, on: true,
+  or: true, that: true, the: true, to: true, was: true, were: true, will: true, with: true,
+  please: true, find: true, determine: true, analyze: true, inspect: true, calculate: true,
+  compute: true, what: true, which: true, how: true, document: true, module: true,
+  file: true, scope: true, task: true, question: true,
+});
+
+const TASK_TOK_RE = /[a-z0-9_.\-]{2,}|\p{Script=Han}{2,}/gu;
+const TARGET_ID_RE = /\b(?:(?:lib|mod|dep|service|pkg|doc|app|spec)[_-][a-z0-9_-]+|[A-Z][A-Z0-9_]{2,}|doc[_-]?\d+)\b/g;
+
+/** Extract normalized content tokens from a task string for echo detection. */
+export function taskTokenSet(text: string): ReadonlySet<string> {
+  const lower = text.toLowerCase();
+  const out = new Set<string>();
+  for (const m of lower.matchAll(TASK_TOK_RE)) {
+    const tok = m[0];
+    if (tok && !TASK_NOISE_WORDS[tok]) {
+      out.add(tok);
+    }
+  }
+  return out;
+}
+
+/** Extract target module, document, or constant identifiers from a task string. */
+export function targetTokenSet(text: string): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const m of text.matchAll(TARGET_ID_RE)) {
+    const tok = m[0];
+    if (tok) out.add(tok.toLowerCase());
+  }
+  return out;
+}
+
+/** Compute Jaccard similarity between two token sets. */
+export function jaccardSimilarity(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
+  if (a.size === 0 && b.size === 0) return 1;
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  for (const x of a) {
+    if (b.has(x)) inter++;
+  }
+  const union = a.size + b.size - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const x of a) {
+    if (!b.has(x)) return false;
+  }
+  return true;
+}
+
+/** Check whether childTask echoes any ancestor task with >= 0.8 Jaccard and identical target identifiers. */
+export function isAncestorEcho(childTask: string, ancestorTasks: readonly string[]): boolean {
+  const childTokens = taskTokenSet(childTask);
+  if (childTokens.size === 0) return false;
+  const childTargets = targetTokenSet(childTask);
+  for (let i = 0; i < ancestorTasks.length; i++) {
+    const anc = ancestorTasks[i];
+    if (!anc) continue;
+    const ancTokens = taskTokenSet(anc);
+    if (jaccardSimilarity(childTokens, ancTokens) >= ECHO_JACCARD) {
+      const ancTargets = targetTokenSet(anc);
+      if (setsEqual(childTargets, ancTargets)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -146,6 +222,10 @@ export class ResearchBoard {
 
   getSpecialist(scope: string): SpecialistSession | undefined {
     return this._specialists.get(normalizeScopeKey(scope));
+  }
+
+  specialistCount(): number {
+    return this._specialists.size;
   }
 
   findCounts(scope?: string, categories?: readonly string[]): Readonly<Record<string, number>> | undefined {

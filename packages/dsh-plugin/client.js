@@ -25,6 +25,9 @@ window.__ModuleLoader__.load({
       depth: 2,
       reserve: 0.3,
       concurrency: 4,
+      rootModel: '',
+      branchModel: '',
+      queryModel: '',
     });
 
     const EN = Object.freeze({
@@ -43,6 +46,13 @@ window.__ModuleLoader__.load({
       'tuning.reserve.desc': 'Share of each reader window kept free for the prompt.',
       'tuning.concurrency.title': 'Readers',
       'tuning.concurrency.desc': 'Parallel llm_query calls over the context.',
+      'tuning.rootModel.title': 'Root model',
+      'tuning.rootModel.desc': 'Orchestrator model (provider/model). Blank uses the Session model.',
+      'tuning.branchModel.title': 'Branch model (sub-agents)',
+      'tuning.branchModel.desc': 'Scoped specialist model (e.g. deepseek/deepseek-chat). Blank uses Root.',
+      'tuning.queryModel.title': 'Reader model (llm_query)',
+      'tuning.queryModel.desc': 'Fast chunk reader model (e.g. zai-coding-cn/glm-5.3-flash). Blank uses Root.',
+      'tuning.modelPlaceholder': 'Session default (or provider/model)',
       'tuning.decrease': 'Decrease',
       'tuning.increase': 'Increase',
       'menu.head': 'Engine',
@@ -58,6 +68,7 @@ window.__ModuleLoader__.load({
       'view.agents': 'Agents',
       'view.steps': 'Steps',
       'view.tokens': 'Tokens',
+      'view.rootCache': 'Root cache',
       'view.cache': 'Cache',
       'view.duration': 'Duration',
       'view.model': 'Model',
@@ -96,6 +107,13 @@ window.__ModuleLoader__.load({
       'tuning.reserve.desc': 'Доля окна читателя, свободная для промпта.',
       'tuning.concurrency.title': 'Читатели',
       'tuning.concurrency.desc': 'Параллельные вызовы llm_query по контексту.',
+      'tuning.rootModel.title': 'Модель корня (root)',
+      'tuning.rootModel.desc': 'Модель оркестратора (provider/model). Пусто — модель сессии.',
+      'tuning.branchModel.title': 'Модель веток (branch)',
+      'tuning.branchModel.desc': 'Модель суб-агентов (например deepseek/deepseek-chat). Пусто — корень.',
+      'tuning.queryModel.title': 'Модель читателя (llm_query)',
+      'tuning.queryModel.desc': 'Быстрая модель чтения чанков (например zai-coding-cn/glm-5.3-flash).',
+      'tuning.modelPlaceholder': 'По умолчанию сессии (или provider/model)',
       'tuning.decrease': 'Уменьшить',
       'tuning.increase': 'Увеличить',
       'menu.head': 'Движок',
@@ -111,6 +129,7 @@ window.__ModuleLoader__.load({
       'view.agents': 'Агенты',
       'view.steps': 'Шаги',
       'view.tokens': 'Токены',
+      'view.rootCache': 'Кэш корня',
       'view.cache': 'Кэш',
       'view.duration': 'Время',
       'view.model': 'Модель',
@@ -158,6 +177,8 @@ window.__ModuleLoader__.load({
 .rafx-range{display:flex;align-items:center;gap:12px;width:260px;max-width:100%}
 .rafx-range .rafx-slider{flex:1;min-width:0}
 .rafx-value{min-width:38px;text-align:right;font-family:var(--ds-font-family-code,monospace);font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--rafx-ink-2)}
+.rafx-input{box-sizing:border-box;width:240px;max-width:100%;height:30px;padding:0 10px;border:.5px solid var(--rafx-line);border-radius:8px;background:var(--rafx-surface-2);color:var(--rafx-ink);font-family:var(--ds-font-family-code,monospace);font-size:12px}
+.rafx-input::placeholder{color:var(--rafx-ink-3);font-family:inherit}
 .rafx-slider{width:100%;height:18px;margin:0;accent-color:var(--rafx-business);cursor:pointer}
 .rafx-seg{display:inline-flex;gap:2px;padding:2px;border-radius:10px;background:var(--rafx-surface-2)}
 .rafx-segBtn{width:30px;height:24px;border:0;border-radius:8px;background:transparent;color:var(--rafx-ink-3);font:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:background .14s,color .14s}
@@ -258,7 +279,7 @@ window.__ModuleLoader__.load({
 .rafx-toolGlyph{display:grid;place-items:center;width:22px;height:22px;flex:none;border-radius:5px;background:var(--rafx-surface-2);color:var(--dsw-alias-label-caption);font-family:var(--ds-font-family-code,monospace);font-size:8.5px;font-weight:700;letter-spacing:-.03em}
 .rafx-tool[data-tool=llm_query] .rafx-toolGlyph{color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 11%,transparent)}
 .rafx-tool[data-tool=branch] .rafx-toolGlyph{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 10%,transparent)}
-.rafx-tool[data-tool=grep] .rafx-toolGlyph,.rafx-tool[data-tool=read] .rafx-toolGlyph{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 10%,transparent)}
+.rafx-tool[data-tool=grep] .rafx-toolGlyph,.rafx-tool[data-tool=read] .rafx-toolGlyph,.rafx-tool[data-tool=search] .rafx-toolGlyph,.rafx-tool[data-tool=outline] .rafx-toolGlyph,.rafx-tool[data-tool=tally] .rafx-toolGlyph{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 10%,transparent)}
 .rafx-toolName{font-family:var(--ds-font-family-code,monospace);font-size:11px;font-weight:600;line-height:16px;color:var(--rafx-ink)}
 .rafx-toolMeta{margin-left:auto;font-family:var(--ds-font-family-code,monospace);font-size:9.5px;line-height:14px;color:var(--dsw-alias-label-caption);font-variant-numeric:tabular-nums}
 .rafx-toolChevron{display:inline-flex;flex:none;color:var(--dsw-alias-label-caption);transition:transform .12s}
@@ -303,12 +324,19 @@ window.__ModuleLoader__.load({
       return Number((Math.round(clamped / RESERVE_STEP) * RESERVE_STEP).toFixed(2));
     }
 
+    function toModelString(value) {
+      return typeof value === 'string' ? value.trim().slice(0, 160) : '';
+    }
+
     function sanitizeSettings(value) {
       const source = value !== null && typeof value === 'object' ? value : {};
       return Object.freeze({
         depth: toInteger(source.depth, DEFAULT_SETTINGS.depth, DEPTH_MIN, DEPTH_MAX),
         reserve: toReserve(source.reserve),
         concurrency: toInteger(source.concurrency, DEFAULT_SETTINGS.concurrency, CONCURRENCY_MIN, CONCURRENCY_MAX),
+        rootModel: toModelString(source.rootModel),
+        branchModel: toModelString(source.branchModel),
+        queryModel: toModelString(source.queryModel),
       });
     }
 
@@ -366,6 +394,9 @@ window.__ModuleLoader__.load({
             depth: DEFAULT_SETTINGS.depth,
             reserve: DEFAULT_SETTINGS.reserve,
             concurrency: DEFAULT_SETTINGS.concurrency,
+            rootModel: DEFAULT_SETTINGS.rootModel,
+            branchModel: DEFAULT_SETTINGS.branchModel,
+            queryModel: DEFAULT_SETTINGS.queryModel,
           });
           persist();
           emit();
@@ -1023,6 +1054,42 @@ window.__ModuleLoader__.load({
                   onChange: (value) => settingsStore.update({ concurrency: value }),
                 }),
               }),
+              h(SettingRow, {
+                label: t('tuning.rootModel.title'),
+                hint: t('tuning.rootModel.desc'),
+                control: h('input', {
+                  type: 'text',
+                  className: 'rafx-input',
+                  value: settings.rootModel ?? '',
+                  placeholder: t('tuning.modelPlaceholder'),
+                  'aria-label': t('tuning.rootModel.title'),
+                  onChange: (event) => settingsStore.update({ rootModel: event.target.value }),
+                }),
+              }),
+              h(SettingRow, {
+                label: t('tuning.branchModel.title'),
+                hint: t('tuning.branchModel.desc'),
+                control: h('input', {
+                  type: 'text',
+                  className: 'rafx-input',
+                  value: settings.branchModel ?? '',
+                  placeholder: t('tuning.modelPlaceholder'),
+                  'aria-label': t('tuning.branchModel.title'),
+                  onChange: (event) => settingsStore.update({ branchModel: event.target.value }),
+                }),
+              }),
+              h(SettingRow, {
+                label: t('tuning.queryModel.title'),
+                hint: t('tuning.queryModel.desc'),
+                control: h('input', {
+                  type: 'text',
+                  className: 'rafx-input',
+                  value: settings.queryModel ?? '',
+                  placeholder: t('tuning.modelPlaceholder'),
+                  'aria-label': t('tuning.queryModel.title'),
+                  onChange: (event) => settingsStore.update({ queryModel: event.target.value }),
+                }),
+              }),
             ),
           ),
         ),
@@ -1032,6 +1099,8 @@ window.__ModuleLoader__.load({
 
     const TOOL_BADGES = Object.freeze({
       llm_query: 'LQ',
+      search: 'SR',
+      outline: 'OL',
       grep: 'GR',
       read: 'RD',
       tally: 'TL',
@@ -1134,7 +1203,17 @@ window.__ModuleLoader__.load({
     }
 
     function usageOfRun(run) {
-      if (run === null || typeof run !== 'object') return usageOfCalls([]);
+      if (run === null || typeof run !== 'object') return { ...usageOfCalls([]), rootCacheHitRate: 0 };
+      let rootInput = 0;
+      let rootCached = 0;
+      for (const entry of Array.isArray(run.events) ? run.events : []) {
+        const event = entry === null || typeof entry !== 'object' ? null : entry.event;
+        if (event !== null && typeof event === 'object' && event.type === 'llm_call' && event.role === 'root' && event.usage !== null && typeof event.usage === 'object') {
+          rootInput += Number(event.usage.promptTokens ?? 0);
+          rootCached += Number(event.usage.cachedTokens ?? 0);
+        }
+      }
+      const computedRootCache = rootInput > 0 ? rootCached / rootInput : 0;
       if (run.usage !== null && typeof run.usage === 'object') {
         return {
           input: Number(run.usage.input ?? 0),
@@ -1144,9 +1223,10 @@ window.__ModuleLoader__.load({
           errors: Number(run.usage.errors ?? 0),
           latencyMs: Number(run.usage.latencyMs ?? 0),
           cacheHitRate: Number(run.usage.cacheHitRate ?? 0),
+          rootCacheHitRate: Number(run.usage.rootCacheHitRate ?? computedRootCache),
         };
       }
-      let usage = { input: 0, output: 0, cached: 0, calls: 0, cacheHitRate: 0 };
+      let usage = { input: 0, output: 0, cached: 0, calls: 0, cacheHitRate: 0, rootCacheHitRate: computedRootCache };
       for (const entry of Array.isArray(run.events) ? run.events : []) {
         const event = entry === null || typeof entry !== 'object' ? null : entry.event;
         if (event === null || typeof event !== 'object') continue;
@@ -1158,6 +1238,7 @@ window.__ModuleLoader__.load({
         }
       }
       usage.cacheHitRate = usage.input > 0 ? usage.cached / usage.input : 0;
+      usage.rootCacheHitRate = computedRootCache;
       return usage;
     }
 
@@ -1712,6 +1793,7 @@ window.__ModuleLoader__.load({
             h(RafStat, { label: t('view.steps'), value: String(run?.stepCount ?? selectedSummary?.stepCount ?? 0) }),
             h(RafStat, { label: t('view.agents'), value: String(run?.agentCount ?? selectedSummary?.agentCount ?? 0) }),
             h(RafStat, { label: t('view.tokens'), value: `${formatTokens(usage.input)} / ${formatTokens(usage.output)}` }),
+            h(RafStat, { label: t('view.rootCache'), value: formatPercent(usage.rootCacheHitRate ?? usage.cacheHitRate) }),
             h(RafStat, { label: t('view.cache'), value: formatPercent(usage.cacheHitRate) }),
             h(RafStat, { label: t('view.duration'), value: formatDuration(duration) }),
           ),

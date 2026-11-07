@@ -43,6 +43,7 @@ export interface AgentFoldConfig {
   readonly followUpQuestion?: string;
   /** Active scope call stack for cycle prevention across inter-agent queries. */
   readonly callStack?: readonly string[];
+  readonly ancestorTasks?: readonly string[];
   readonly scope?: string;
   readonly maxDepth?: number;
   readonly initialBoardRev?: number;
@@ -58,6 +59,7 @@ const PROVIDER_REFUSAL = /\/1301\]|unsafe or sensitive/i;
 const PROTOCOL_TAG = /<\s*\/?\s*(?:think|folding|folded_output|fold|折叠|motivation|explanation|动机|tool_call|answer)\b[^>]*>/i;
 export const DEFAULT_MAX_OBSERVATION_TOKENS = 3200;
 export const DEFAULT_MIN_DEEP_FOLD_BLOCKS = 6;
+export const DEFAULT_ROOT_MIN_DEEP_FOLD_BLOCKS = 16;
 
 /** Normalize text for the answer-echo guard. */
 function echoText(text: string): string {
@@ -90,6 +92,25 @@ function isPlaceholderAnswer(answer: string): boolean {
   if (clean.length > 120) return false;
   return PLACEHOLDER_ANSWER.test(clean) || /(?:暂无最终答案|继续验证中|尚未确定最终答案|need more steps to verify)/i.test(clean);
 }
+
+/** Salvage a final answer from raw model output when the forcing step exhausts format retries. */
+export function extractFallbackAnswer(rawText: string): string | undefined {
+  const unclosed = /<\s*answer\b[^>]*>([\s\S]+)$/i.exec(rawText);
+  if (unclosed?.[1]) {
+    const cleaned = unclosed[1].replace(/<\s*\/?[a-z_]*$/i, '').trim();
+    if (cleaned !== '' && !PROTOCOL_TAG.test(cleaned) && !isPlaceholderAnswer(cleaned)) {
+      return cleaned;
+    }
+  }
+  const marker = /(?:^|\n)\s*(\[(?:Answer|答案)\]\s*[\s\S]+|(?:Final\s+)?Answer\s*:\s*[^\n]+)$/i.exec(rawText);
+  if (marker?.[1]) {
+    const cleaned = marker[1].trim();
+    if (cleaned !== '' && !PROTOCOL_TAG.test(cleaned) && !isPlaceholderAnswer(cleaned)) {
+      return cleaned;
+    }
+  }
+  return undefined;
+}
 export interface AgentRunResult {
   answer: string | null;
   steps: number;
@@ -114,6 +135,8 @@ export class AgentFoldAgent {
   private readonly systemPrompt: string;
   private readonly initialBoardRev: number;
   private readonly initialBoardSnapshot: string | undefined;
+  private readonly initialManifest: string;
+  private currentTaskQuestion = '';
 
   constructor(private readonly cfg: AgentFoldConfig) {
     this.depth = cfg.depth ?? 0;
@@ -132,6 +155,7 @@ export class AgentFoldAgent {
         : cfg.board && this.initialBoardRev > 0
           ? cfg.board.renderSettled()
           : undefined;
+    this.initialManifest = cfg.store.manifest();
   }
   private emit(e: AgentEvent) {
     this.cfg.onEvent?.(e);
@@ -148,7 +172,7 @@ export class AgentFoldAgent {
       for (const b of blocks) prev.push(`**${renderBlockLabel(b)}** ${b.summary}`);
       if (latest) prev.push(renderLatest(latest));
     }
-    const parts: string[] = [`### Documents\n${this.cfg.store.manifest()}`];
+    const parts: string[] = [`### Documents\n${this.initialManifest}`];
     if (this.initialBoardSnapshot) parts.push(`### Shared Research Board\n${this.initialBoardSnapshot}`);
     const isScopedSpecialist =
       this.name.startsWith('specialist#') || (this.depth > 0 && this.cfg.scope !== undefined);
@@ -156,15 +180,15 @@ export class AgentFoldAgent {
     const atMaxDepth = this.cfg.maxDepth !== undefined && this.depth >= this.cfg.maxDepth;
     const taskBlock = isScopedSpecialist
       ? atMaxDepth
-        ? `### Task\n${question.trim()}\n(Note: You are specialist sub-agent ${this.name} responsible ONLY for [scope=${scopeLabel}] at max depth d=${this.depth}. Do NOT call branch on your own scope or unstudied scopes; use grep/read/tally on your scope document, or call branch ONLY to query an existing specialist [scope=...] already listed on the board.)`
-        : `### Task\n${question.trim()}\n(Note: You are specialist sub-agent ${this.name} responsible ONLY for [scope=${scopeLabel}]. Use grep/read/tally directly on your scope document and NEVER call branch on your own scope; for cross-module dependencies, check the board first or call branch with the target [scope=...].)`
+        ? `### Task\n${question.trim()}\n(Note: You are specialist sub-agent ${this.name} responsible ONLY for [scope=${scopeLabel}] at max depth d=${this.depth}. Do NOT call branch on your own scope or unstudied scopes; use search/outline/grep/read/tally on your scope document, or call branch ONLY to query an existing specialist [scope=...] already listed on the board.)`
+        : `### Task\n${question.trim()}\n(Note: You are specialist sub-agent ${this.name} responsible ONLY for [scope=${scopeLabel}]. Use search/outline/grep/read/tally directly on your scope document and NEVER call branch on your own scope; for cross-module dependencies, check the board first or call branch with the target [scope=...].)`
       : `### Task\n${question.trim()}`;
     parts.push(taskBlock, prev.join('\n'));
     const delta = this.cfg.board?.renderSince(this.initialBoardRev, this.cfg.scope);
     if (delta) parts.push(`### New Board Findings\n${delta}`);
     if (this.cfg.followUpQuestion) {
       parts.push(
-        `### Follow-up Question\n${this.cfg.followUpQuestion.trim()}\n(Reuse exact key=value facts and formulas already recorded in Previous Steps above if sufficient; if the follow-up asks about a new identifier/index not yet recorded as an explicit key=value in your summaries, verify it with grep/read first.)`,
+        `### Follow-up Question\n${this.cfg.followUpQuestion.trim()}\n(Reuse exact key=value facts and formulas already recorded in Previous Steps above if sufficient; if the follow-up asks about a new identifier/index not yet recorded as an explicit key=value in your summaries, verify it with search/outline/grep/read first.)`,
       );
     }
     parts.push(FORMAT_REMINDER(state.currentStep, latest?.step));
@@ -176,6 +200,8 @@ export class AgentFoldAgent {
   }
 
   async run(question: string): Promise<AgentRunResult> {
+    this.currentTaskQuestion = question;
+    let verificationNudged = false;
     const state = this.cfg.initialState ? FoldState.restore(this.cfg.initialState) : new FoldState();
     const startStep = state.currentStep;
     const isSpecialist =
@@ -202,6 +228,7 @@ export class AgentFoldAgent {
       const expectFolding = state.latest !== undefined;
       let parsed: ParsedResponse | undefined;
       let outputTruncated = false;
+      let lastRawText = '';
       let tail: string | undefined = forcing ? FORCE_ANSWER : undefined;
       const maxRetries = this.cfg.maxFormatRetries ?? 2;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -233,6 +260,7 @@ export class AgentFoldAgent {
             attempt,
           });
           text = res.text;
+          lastRawText = text;
           reasoning = res.reasoning;
           outputTruncated = res.finishReason === 'length' || res.finishReason === 'max-tokens';
           truncatedReasoning =
@@ -281,6 +309,30 @@ export class AgentFoldAgent {
             p.errors.push('the <answer> repeats the folding summary; output a standalone final answer instead');
           }
         }
+        if (!forcing && !verificationNudged && p.errors.length === 0 && p.answer !== undefined) {
+          if (
+            state.latest !== undefined &&
+            p.folding === undefined &&
+            state.latest.action.name === 'read' &&
+            state.latest.observation.includes('stopped at line ')
+          ) {
+            verificationNudged = true;
+            p.errors.push(
+              'your previous read stopped mid-window at the token limit and you omitted <folding>; emit <folding> for the previous step and read the remaining lines (or verify all options) before outputting <answer>',
+            );
+          } else if (
+            step === 0 &&
+            !isSpecialist &&
+            p.motivation === undefined &&
+            this.cfg.store.totalTokens() >= 1000 &&
+            (this.cfg.board === undefined || this.cfg.board.entries().length === 0)
+          ) {
+            verificationNudged = true;
+            p.errors.push(
+              'you emitted a bare <answer> at Step 0 without <motivation> or inspecting the documents; call a tool to inspect the documents first',
+            );
+          }
+        }
         if (p.errors.length === 0) {
           parsed = p;
           break;
@@ -292,7 +344,14 @@ export class AgentFoldAgent {
       }
       if (!parsed || parsed.errors.length) {
         // Unrecoverable format failure: if there is any text-like answer, stop; else record a failed step.
-        if (forcing) return finish({ answer: null, steps: Math.max(0, step - startStep), terminated: 'max_steps', error: parsed?.errors.join('; ') });
+        if (forcing) {
+          const fallback = extractFallbackAnswer(lastRawText);
+          if (fallback !== undefined) {
+            this.emit({ type: 'answer', agent: this.name, step, answer: fallback });
+            return finish({ answer: fallback, steps: step - startStep + 1, terminated: 'forced_answer' });
+          }
+          return finish({ answer: null, steps: Math.max(0, step - startStep), terminated: 'max_steps', error: parsed?.errors.join('; ') });
+        }
         if (state.latest) state.applyFold({ range: [state.latest.step, state.latest.step], summary: fallbackSummary(state.latest) });
         state.setLatest({
           step,
@@ -312,7 +371,8 @@ export class AgentFoldAgent {
           summary: fallbackSummary(state.latest),
         };
         let deferredDeep = false;
-        const minDeep = this.cfg.minDeepFoldBlocks ?? DEFAULT_MIN_DEEP_FOLD_BLOCKS;
+        const defaultMinDeep = this.depth === 0 ? DEFAULT_ROOT_MIN_DEEP_FOLD_BLOCKS : DEFAULT_MIN_DEEP_FOLD_BLOCKS;
+        const minDeep = this.cfg.minDeepFoldBlocks ?? defaultMinDeep;
         if ((parsed.answer === undefined || isSpecialist) && requested.range[0] < latestStep && minDeep > 1) {
           const wouldRetract = state.blocks.filter((b) => b.to >= requested.range[0]).length;
           if (wouldRetract < minDeep) {
@@ -378,6 +438,7 @@ export class AgentFoldAgent {
           signal: this.cfg.signal,
           board: this.cfg.board,
           callStack: this.cfg.callStack,
+          ancestorTasks: [...(this.cfg.ancestorTasks ?? []), this.cfg.followUpQuestion ?? this.currentTaskQuestion],
         });
       } catch (e) {
         error = (e as Error).message;

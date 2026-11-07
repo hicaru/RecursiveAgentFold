@@ -47,12 +47,12 @@ For a RAF Session, `llm/stream` builds a `ContextStore` from the Session transcr
 
 - the latest **human** message (`source.kind === 'user'`) is the question;
 - every other message — including DSH's synthetic instruction, runtime, skill, and time messages — is the document;
-- RAF's `llm_query`, `grep`, `read`, `tally`, `branch`, and `calculator` operate on that transcript;
-- DSH coding tools are exposed to RAF as `read_file`, `glob`, `grep_files`, `bash`, `write`, `edit`, `apply_patch`, `lsp`, `web_search`, and `web_fetch`. `read_file` and `grep_files` avoid the names `read` and `grep`, which RAF uses for its own context-store tools;
+- RAF's `search` (BM25 V2 window retrieval), `outline` (structural skeleton), `llm_query`, `grep`, `read`, `tally`, `branch`, and `calculator` operate on that transcript;
+- DSH coding tools are exposed to RAF as `read_file`, `glob`, `grep_files`, `search_files`, `outline_files`, `bash`, `write`, `edit`, `apply_patch`, `lsp`, `web_search`, and `web_fetch`. `read_file`, `grep_files`, `search_files`, and `outline_files` avoid colliding with RAF's own context-store tools;
 - the final `<answer>` becomes one assistant message in DSH;
 - RAF token usage is reported in the same message's usage chunk.
 
-RAF runs inside one outer model request. Its internal model calls use the Session provider and model through `ctx.llm`. Root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 4,096 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. Internal calls are tagged with an `AsyncLocalStorage` guard and a `raf-*` `purpose` value, so the listener does not intercept them again.
+RAF runs inside one outer model request. Its internal model calls use the Session provider and model through `ctx.llm` by default, with optional 3-tier environment overrides (`RAF_ROOT_PROVIDER`/`RAF_ROOT_MODEL`, `RAF_BRANCH_PROVIDER`/`RAF_BRANCH_MODEL`, `RAF_QUERY_PROVIDER`/`RAF_QUERY_MODEL`). Root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 4,096 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. Internal calls are tagged with an `AsyncLocalStorage` guard and a `raf-*` `purpose` value, so the listener does not intercept them again.
 
 DSH marks internal calls with `purpose` (`session-title`, `compaction`, `auto-review`, `onboarding_use_case`). The listener passes every such call through. RAF therefore never answers a title prompt or a compaction summary.
 
@@ -62,7 +62,7 @@ RAF writes native Session events while it runs, so Chat and Trajectory show its 
 
 - each RAF tool call appends an assistant message with the agent label (`root`, `branch#1@1`) and the model's motivation, then a `tool-call` block;
 - the matching result appends a native `tool/result` event, so the tool card expands normally;
-- internal RAF tools (`read`, `grep`, `llm_query`, `branch`, `calculator`) and DSH tools (`read_file`, `bash`, and so on) use the same inline rows;
+- internal RAF tools (`search`, `outline`, `read`, `grep`, `tally`, `llm_query`, `branch`, `calculator`) and DSH tools (`read_file`, `bash`, and so on) use the same inline rows;
 - subagent calls carry their `branch` label, so the root and every subagent show their own tools in order.
 
 The events are synthetic: RAF already executed the tool, and the Host appends only the display records. The tool is not executed again. The separate live dock was removed; the **RAF** tab remains the detailed per-agent inspector.

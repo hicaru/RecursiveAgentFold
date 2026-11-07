@@ -106,7 +106,9 @@ async function main() {
     options: {
       method: { type: 'string', default: 'raf' },
       'root-model': { type: 'string' },
+      'root-base-url': { type: 'string' },
       'branch-model': { type: 'string' },
+      'branch-base-url': { type: 'string' },
       'query-model': { type: 'string' },
       'query-base-url': { type: 'string' },
       'reserve-ratio': { type: 'string' },
@@ -165,7 +167,9 @@ async function main() {
   const outDir = values.out ? resolve(process.env.INIT_CWD ?? process.cwd(), values.out) : join(root, 'results', `${stamp}-${cmd}-${method}`);
   const modelOverrides = {
     rootModel: values['root-model'],
+    rootBaseUrl: values['root-base-url'],
     branchModel: values['branch-model'],
+    branchBaseUrl: values['branch-base-url'],
     queryModel: values['query-model'],
     queryBaseUrl: values['query-base-url'],
     reserveRatio: opt(values['reserve-ratio'], Number),
