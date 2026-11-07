@@ -83,8 +83,8 @@ const PROBES: readonly ToolProbe[] = Object.freeze([
       return a.mode === 'extract' ? undefined : 'mode must be "extract" for semantic counting';
     },
     checkObservation: (o) => {
-      if (!o.includes('"counts" 已汇总')) return 'reader returned no summed counts';
-      const tail = /"counts" 已汇总[^：]*：(.+)/.exec(o)?.[1] ?? '';
+      if (!o.includes('Summed "counts"')) return 'reader returned no summed counts';
+      const tail = /Summed "counts"[^:]*:\s*(.+)/.exec(o)?.[1] ?? '';
       const total = [...tail.matchAll(/=(\d+)/g)].reduce((a, m) => a + Number(m[1]), 0);
       return total === 1200 ? undefined : `summed counts total ${total}, expected 1200`;
     },
@@ -94,7 +94,7 @@ const PROBES: readonly ToolProbe[] = Object.freeze([
     question: '文档 log 有 60 行。用正则搜索「灯塔」，列出所有匹配行的行号和原文。',
     docs: [{ id: 'log', title: '巡检日志', text: logText() }],
     checkArgs: (a) => (isText(a.pattern) ? undefined : 'pattern must be a non-empty string'),
-    checkObservation: (o) => (o.includes('行匹配') ? undefined : 'grep report missing match count'),
+    checkObservation: (o) => (o.includes('matching lines') ? undefined : 'grep report missing match count'),
   },
   {
     tool: 'read',
@@ -109,7 +109,7 @@ const PROBES: readonly ToolProbe[] = Object.freeze([
     question: '在文档 users 中精确统计每个 "User: <id>" 的出现次数，按次数从高到低。',
     docs: [{ id: 'users', title: '用户事件', text: usersText() }],
     checkArgs: (a) => (isText(a.pattern) ? undefined : 'pattern must be a non-empty string'),
-    checkObservation: (o) => (o.includes('6 个匹配') && o.includes('3 个不同值') ? undefined : 'tally counts are wrong'),
+    checkObservation: (o) => (o.includes('6 matches') && o.includes('3 distinct values') ? undefined : 'tally counts are wrong'),
   },
   {
     tool: 'calculator',
@@ -123,7 +123,7 @@ const PROBES: readonly ToolProbe[] = Object.freeze([
     question: '把独立子任务「统计文档 count 中 cat 和 dog 各有多少行」交给一个全新上下文的子代理，只返回它的结果。',
     docs: [{ id: 'count', title: '类别行', text: countText() }],
     checkArgs: (a) => (isText(a.task) ? undefined : 'task must be a non-empty string'),
-    checkObservation: (o) => (o.includes('branch 完成') && o.includes('子代理完成') ? undefined : 'branch result missing'),
+    checkObservation: (o) => (o.includes('branch done') && o.includes('子代理完成') ? undefined : 'branch result missing'),
   },
 ]);
 
@@ -384,7 +384,7 @@ export async function promptCheck(
 
 async function ping(llm: BenchModels['root'], label: string, log: (s: string) => void): Promise<boolean> {
   try {
-    const r = await llm.complete({ messages: [{ role: 'user', content: '只回复两个字母：OK' }], maxTokens: 512 });
+    const r = await llm.complete({ messages: [{ role: 'user', content: 'Reply with two letters only: OK' }], maxTokens: 512 });
     log(`  ✓ ${label} (${llm.profile.name}) → ${JSON.stringify(r.text.trim().slice(0, 40))} usage=${JSON.stringify(r.usage)} ${r.latencyMs}ms`);
     return true;
   } catch (e) {

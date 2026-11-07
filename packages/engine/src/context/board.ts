@@ -10,6 +10,7 @@ export interface BoardEntry {
   readonly key: string;
   readonly summary: string;
   readonly counts?: Readonly<Record<string, number>>;
+  readonly inProgress?: boolean;
 }
 
 export interface SpecialistSession {
@@ -90,6 +91,14 @@ export class ResearchBoard {
     return this._rev;
   }
 
+  settledRev(): number {
+    let max = 0;
+    for (const e of this._entries) {
+      if (!e.inProgress && e.rev > max) max = e.rev;
+    }
+    return max;
+  }
+
   record(entry: Omit<BoardEntry, 'id' | 'rev'>): BoardEntry {
     const rev = ++this._rev;
     const dedupKey = `${entry.kind}|${entry.scope}|${entry.key}`;
@@ -106,6 +115,7 @@ export class ResearchBoard {
           key: entry.key,
           summary: entry.summary,
           ...(entry.counts ? { counts: Object.freeze({ ...entry.counts }) } : {}),
+          ...(entry.inProgress !== undefined ? { inProgress: entry.inProgress } : {}),
         };
         this._entries[idx] = updated;
         return updated;
@@ -120,6 +130,7 @@ export class ResearchBoard {
       key: entry.key,
       summary: entry.summary,
       ...(entry.counts ? { counts: Object.freeze({ ...entry.counts }) } : {}),
+      ...(entry.inProgress !== undefined ? { inProgress: entry.inProgress } : {}),
     };
     this._entries.push(created);
     return created;
@@ -155,8 +166,15 @@ export class ResearchBoard {
   }
 
   render(maxTokens = 1200): string {
-    if (this._entries.length === 0) return '（暂无已共享的研究结论）';
+    if (this._entries.length === 0) return '(no shared findings yet)';
     const lines = this._entries.map((e) => this.formatEntry(e));
+    return truncateToTokens(lines.join('\n'), maxTokens, defaultEstimator).text;
+  }
+
+  renderSettled(maxTokens = 1200): string | undefined {
+    const settled = this._entries.filter((e) => !e.inProgress);
+    if (settled.length === 0) return undefined;
+    const lines = settled.map((e) => this.formatEntry(e));
     return truncateToTokens(lines.join('\n'), maxTokens, defaultEstimator).text;
   }
 
@@ -170,7 +188,7 @@ export class ResearchBoard {
     const budget = typeof excludeScopeOrMaxTokens === 'number' ? excludeScopeOrMaxTokens : maxTokens;
     const lines: string[] = [];
     for (const e of this._entries) {
-      if (e.rev <= sinceRev) continue;
+      if (e.rev <= sinceRev && !e.inProgress) continue;
       if (excludeScope !== undefined && e.kind === 'branch' && normalizeScopeKey(e.scope) === excludeScope) {
         continue;
       }
@@ -203,8 +221,8 @@ export class ResearchBoard {
     }
     let session = existingSession;
     if (!session) {
-      const initRev = this._rev;
-      const initSnap = this._entries.length > 0 ? this.render() : undefined;
+      const initRev = this.settledRev();
+      const initSnap = this.renderSettled();
       const depth = meta?.depth ?? 1;
       const parentAgent = meta?.parent ?? 'root';
       const idx = ++this._specialistCounter;
@@ -233,7 +251,8 @@ export class ResearchBoard {
         kind: 'branch',
         scope: normScope,
         key: normScope,
-        summary: `[进行中] ${session.agentName} (parent=${session.parentAgent}) 正在研读域 "${normScope}"：${task.trim().slice(0, 140)}`,
+        summary: `[in-progress] ${session.agentName} (parent=${session.parentAgent}) analyzing scope "${normScope}": ${task.trim().slice(0, 140)}`,
+        inProgress: true,
       });
     }
     const targetSession = session;
@@ -272,7 +291,7 @@ export class ResearchBoard {
         const combinedSummary = targetSession.historySummaries.join(' | ');
         targetSession.latestSummary =
           isFollowUp && targetSession.latestSummary !== '' && !targetSession.latestSummary.includes(out.resultText)
-            ? `${targetSession.latestSummary}\n\n[追问补充] ${out.resultText}`
+            ? `${targetSession.latestSummary}\n\n[follow-up] ${out.resultText}`
             : out.resultText;
         targetSession.qaMemo.set(normTask, out.resultText);
         this.record({
@@ -281,6 +300,7 @@ export class ResearchBoard {
           scope: normScope,
           key: normScope,
           summary: `${targetSession.agentName}: ${combinedSummary}`,
+          inProgress: false,
         });
         return { result: out.resultText, reused: false, scope: normScope };
       } finally {

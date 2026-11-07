@@ -1,0 +1,84 @@
+{
+  "bench": "longbench",
+  "method": "raf",
+  "startedAt": "2026-11-07T13:58:51.419Z",
+  "tasks": 6,
+  "taskIds": [
+    "longbench-66f94f9ebb02136c067c4fde",
+    "longbench-66fa208bbb02136c067c5fc1",
+    "longbench-66ec0c4c821e116aacb1994a",
+    "longbench-66ec56dd821e116aacb1cd0e",
+    "longbench-66ed875e821e116aacb2023e",
+    "longbench-66f8c9febb02136c067c4511"
+  ],
+  "argv": [
+    "longbench",
+    "--limit",
+    "6",
+    "--max-depth",
+    "2",
+    "--out",
+    "results/en-longbench-d2",
+    "--resume"
+  ],
+  "tools": "all",
+  "models": {
+    "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+    "root": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16000,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        }
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "branch": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16000,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        }
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "query": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3-flash",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16384,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        },
+        "reasoning_effort": "low"
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "llmQuery": {
+      "reserveRatio": 0.3,
+      "concurrency": 4
+    }
+  }
+}

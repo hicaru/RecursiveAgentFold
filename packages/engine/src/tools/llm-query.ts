@@ -8,6 +8,11 @@ import { createLimiter } from '../util/concurrency.js';
 import { tryParseLooseJSON } from '../util/json.js';
 import { argNumber, argString, argStringList, ToolArgumentError, type Tool } from './types.js';
 
+export interface LLMQueryCache {
+  readonly memo: Map<string, Omit<ChunkFinding, 'chunk' | 'memoHit'>>;
+  readonly chunkCounts: Map<string, Record<string, number>>;
+}
+
 export interface LLMQueryOptions {
   /** Fraction of the query model's window kept free for prompt + output. Default 0.3. */
   readonly reserveRatio?: number;
@@ -32,6 +37,7 @@ export interface LLMQueryOptions {
   readonly memoize?: boolean;
   readonly temperature?: number;
   readonly board?: ResearchBoard;
+  readonly cache?: LLMQueryCache;
 }
 
 export interface ChunkFinding {
@@ -98,9 +104,9 @@ function compressIndexRanges(idx: readonly number[]): string {
  * documents using a non-thinking model, then aggregate compact findings.
  */
 export class LLMQueryEngine {
-  private readonly memo = new Map<string, Omit<ChunkFinding, 'chunk' | 'memoHit'>>();
+  private readonly memo: Map<string, Omit<ChunkFinding, 'chunk' | 'memoHit'>>;
   private readonly inFlight = new Map<string, Promise<Omit<ChunkFinding, 'chunk' | 'memoHit'>>>();
-  private readonly chunkCounts = new Map<string, Record<string, number>>();
+  private readonly chunkCounts: Map<string, Record<string, number>>;
   private readonly limit: <T>(fn: () => Promise<T>) => Promise<T>;
   readonly board: ResearchBoard;
 
@@ -112,6 +118,8 @@ export class LLMQueryEngine {
   ) {
     this.limit = createLimiter(opts.concurrency ?? 4);
     this.board = opts.board ?? new ResearchBoard();
+    this.memo = opts.cache?.memo ?? new Map();
+    this.chunkCounts = opts.cache?.chunkCounts ?? new Map();
   }
 
   get defaultChunkTokens(): number {
@@ -159,7 +167,7 @@ export class LLMQueryEngine {
     const chunks = this.selectChunks(docIds, chunkTokens, args.startLine, args.endLine);
     const scan = chunks.reduce((a, c) => a + c.tokens, 0);
     if (scan > (this.opts.maxScanTokens ?? 4_000_000)) {
-      throw new ToolArgumentError(`llm_query 将扫描约 ${scan} token（上限 ${this.opts.maxScanTokens ?? 4_000_000}）；请缩小文档或行范围`);
+      throw new ToolArgumentError(`llm_query would scan ~${scan} tokens (limit ${this.opts.maxScanTokens ?? 4_000_000}); narrow documents or line range`);
     }
     const usage = args.usage ?? this.usage;
     const findings = await Promise.all(chunks.map((c) => this.limit(() => this.runChunk(c, args.query, mode, usage, args.signal, args.categories))));
@@ -173,12 +181,12 @@ export class LLMQueryEngine {
         scope,
         key: `${mode}:${args.query.slice(0, 160)}`,
         summary: totals
-          ? `counts(${findings.filter((f) => f.counts).length}/${findings.length}块): ` +
+          ? `counts(${findings.filter((f) => f.counts).length}/${findings.length} chunks): ` +
             Object.entries(totals)
               .sort((a, b) => b[1] - a[1])
               .map(([k, v]) => `${k}=${v}`)
               .join(', ')
-          : `相关 ${findings.filter((f) => f.relevant).length}/${findings.length} 块`,
+          : `relevant ${findings.filter((f) => f.relevant).length}/${findings.length} chunks`,
         ...(totals ? { counts: Object.freeze({ ...totals }) } : {}),
       });
     }
@@ -230,7 +238,7 @@ export class LLMQueryEngine {
 
     const execPromise = (async () => {
       const doc = this.store.get(chunk.docId);
-      const baseQueryContent = renderQueryMessage(query, mode);
+      const baseQueryContent = renderQueryMessage(query, mode, categories);
       const chunkMsg = {
         role: 'user' as const,
         content: renderChunkMessage({
@@ -248,7 +256,7 @@ export class LLMQueryEngine {
       for (let attempt = 0; attempt < 2; attempt++) {
         const queryContent =
           attempt > 0 && lastErr === 'reader response truncated or empty'
-            ? `${baseQueryContent}\n【重要：严禁逐行思考或列出中间过程，内部推理不超过 50 字，立即直接输出最终 JSON 对象！】`
+            ? `${baseQueryContent}\nCRITICAL: Your previous response ran out of tokens during thinking. Keep internal thinking under 50 words—do NOT list lines—and output the final JSON object immediately!`
             : baseQueryContent;
         const messages = [
           { role: 'system' as const, content: LLM_QUERY_SYSTEM },
@@ -299,7 +307,7 @@ export class LLMQueryEngine {
       const ev = f.evidence
         .slice(0, 5)
         .map((e) => `L${e.line ?? '?'} "${e.quote.length > 160 ? `${e.quote.slice(0, 160)}…` : e.quote}"`)
-        .join('；');
+        .join('; ');
       const textAnswer = f.answer.replace(/\s+/g, ' ').trim();
       const ans =
         textAnswer === '' && f.counts
@@ -307,36 +315,36 @@ export class LLMQueryEngine {
               .map(([k, v]) => `${k}=${v}`)
               .join(', ')
           : textAnswer;
-      return `#${f.chunk.index + 1} [${f.chunk.docId} L${f.chunk.startLine}-${f.chunk.endLine}] ${ans}${ev ? ` | 证据：${ev}` : ''}`;
+      return `#${f.chunk.index + 1} [${f.chunk.docId} L${f.chunk.startLine}-${f.chunk.endLine}] ${ans}${ev ? ` | evidence: ${ev}` : ''}`;
     };
     const lines: string[] = [];
     lines.push(
-      `llm_query（${mode}，模型 ${this.llm.profile.name}）扫描 ${findings.length} 个分块（约 ${chunkTokens.toLocaleString('en-US')} token）；相关 ${relevant.length}；错误 ${errors.length}；缓存 ${findings.filter((f) => f.memoHit).length}`,
+      `llm_query (${mode}, model ${this.llm.profile.name}) scanned ${findings.length} chunks (~${chunkTokens.toLocaleString('en-US')} tokens); relevant ${relevant.length}; errors ${errors.length}; cached ${findings.filter((f) => f.memoHit).length}`,
     );
-    lines.push(`查询：${query}`);
+    lines.push(`Query: ${query}`);
     if (mode === 'extract') {
-      lines.push('各分块结果（请自行汇总）：');
-      for (const f of findings) lines.push(f.error ? `#${f.chunk.index + 1} [${f.chunk.docId} L${f.chunk.startLine}-${f.chunk.endLine}] 错误：${f.error}` : fmt(f));
+      lines.push('Per-chunk findings (aggregate as needed):');
+      for (const f of findings) lines.push(f.error ? `#${f.chunk.index + 1} [${f.chunk.docId} L${f.chunk.startLine}-${f.chunk.endLine}] error: ${f.error}` : fmt(f));
       const totals = sumCounts(findings);
       if (totals) {
         const withCounts = findings.filter((f) => f.counts).length;
         lines.push(
-          `"counts" 已汇总（${withCounts}/${findings.length} 块）：` +
+          `Summed "counts" (${withCounts}/${findings.length} chunks): ` +
             Object.entries(totals)
               .sort((a, b) => b[1] - a[1])
               .map(([k, v]) => `${k}=${v}`)
               .join(', ') +
-            (withCounts < findings.length ? '（警告：部分分块未给出 counts）' : ''),
+            (withCounts < findings.length ? ' (warning: some chunks omitted counts)' : ''),
         );
       }
     } else {
       if (relevant.length) {
-        lines.push('相关分块：');
+        lines.push('Relevant chunks:');
         for (const f of relevant) lines.push(fmt(f));
-      } else lines.push('没有分块报告相关内容。');
+      } else lines.push('No chunks reported relevant content.');
       const irrelevant = findings.filter((f) => !f.relevant && !f.error).map((f) => f.chunk.index);
-      if (irrelevant.length) lines.push(`不相关：${compressIndexRanges(irrelevant)}`);
-      for (const f of errors) lines.push(`#${f.chunk.index + 1} [${f.chunk.docId} L${f.chunk.startLine}-${f.chunk.endLine}] 错误：${f.error}`);
+      if (irrelevant.length) lines.push(`Irrelevant: ${compressIndexRanges(irrelevant)}`);
+      for (const f of errors) lines.push(`#${f.chunk.index + 1} [${f.chunk.docId} L${f.chunk.startLine}-${f.chunk.endLine}] error: ${f.error}`);
     }
     return truncateToTokens(lines.join('\n'), this.opts.maxReportTokens ?? 6000).text;
   }
@@ -395,20 +403,20 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
   return {
     name: 'llm_query',
     description:
-      `用快速非推理阅读器模型（${engine.llm.profile.name}，${engine.llm.profile.contextWindow.toLocaleString('en-US')} token 窗口）扫描大文档。locate 默认按约 ${engine.defaultChunkTokens.toLocaleString('en-US')} token 分块，extract 默认按约 ${engine.defaultExtractChunkTokens.toLocaleString('en-US')} token 分块，查询并行作用于每个分块，返回带行号的各块发现。mode "locate"：定位内容；mode "extract"：在全部块上做抽取/分类/计数（由你汇总）。`,
+      `Scan large documents in parallel using fast chunk reader model (${engine.llm.profile.name}, ${engine.llm.profile.contextWindow.toLocaleString('en-US')} token window). Default chunk size: ~${engine.defaultChunkTokens.toLocaleString('en-US')} tokens for "locate", ~${engine.defaultExtractChunkTokens.toLocaleString('en-US')} tokens for "extract". Mode "locate" finds matching lines/quotes; mode "extract" classifies/counts items across all chunks and sums "counts".`,
     parameters: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: '自包含指令，作用于每个分块，并写明所需输出形式。' },
-        mode: { type: 'string', enum: ['locate', 'extract'], default: 'locate', description: 'locate=定位；extract=抽取/分类/计数。' },
-        documents: { type: 'array', items: { type: 'string' }, description: '文档 id（默认：全部）。' },
-        start_line: { type: 'integer', description: '可选：只扫描与此行区间重叠的分块（仅限单个文档）。' },
+        query: { type: 'string', description: 'Self-contained instruction applied to each chunk, specifying what to locate or count.' },
+        mode: { type: 'string', enum: ['locate', 'extract'], default: 'locate', description: 'locate = find relevant lines; extract = classify/count across all chunks.' },
+        documents: { type: 'array', items: { type: 'string' }, description: 'Document ids (default: all).' },
+        start_line: { type: 'integer', description: 'Optional: only scan chunks overlapping this line range (single document only).' },
         end_line: { type: 'integer' },
-        chunk_tokens: { type: 'integer', description: `可选：密集任务用更小的分块（2 的幂，locate 最大 ${engine.defaultChunkTokens}，extract 最大 ${engine.defaultExtractChunkTokens}）。` },
+        chunk_tokens: { type: 'integer', description: `Optional: smaller power-of-2 chunk size for dense tasks (max ${engine.defaultChunkTokens} for locate, ${engine.defaultExtractChunkTokens} for extract).` },
         categories: {
           type: 'array',
           items: { type: 'string' },
-          description: '可选（extract 计数/分类必填）：要统计的精确类别名称列表；用于跨查询复用缓存并自动汇总 counts。',
+          description: 'Optional (required for extract counting/classification): exact category names to count and sum across chunks.',
         },
       },
       required: ['query'],
@@ -416,12 +424,12 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
     async execute(args, ctx) {
       const query = argString(args, 'query') ?? '';
       const modeRaw = argString(args, 'mode', false) ?? 'locate';
-      if (modeRaw !== 'locate' && modeRaw !== 'extract') throw new ToolArgumentError('mode 必须是 "locate" 或 "extract"');
+      if (modeRaw !== 'locate' && modeRaw !== 'extract') throw new ToolArgumentError('mode must be "locate" or "extract"');
       const documents = argStringList(args, 'documents');
       const startLine = argNumber(args, 'start_line');
       const endLine = argNumber(args, 'end_line');
       if ((startLine !== undefined || endLine !== undefined) && (documents?.length ?? engine.store.list().length) !== 1) {
-        throw new ToolArgumentError('start_line/end_line 要求恰好一个文档');
+        throw new ToolArgumentError('start_line/end_line requires exactly one document');
       }
       const categories = argStringList(args, 'categories');
       const before = ctx.usage.byRole()['llm_query'];

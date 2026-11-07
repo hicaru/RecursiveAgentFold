@@ -642,6 +642,22 @@ function createInlineTrace(ctx, outer, signal) {
   };
 }
 
+const sessionQueryCaches = new Map();
+
+function getSessionQueryCache(sessionId) {
+  const key = typeof sessionId === 'string' && sessionId !== '' ? sessionId : 'default';
+  let cache = sessionQueryCaches.get(key);
+  if (!cache) {
+    if (sessionQueryCaches.size >= 100) {
+      const oldestKey = sessionQueryCaches.keys().next().value;
+      if (oldestKey !== undefined) sessionQueryCaches.delete(oldestKey);
+    }
+    cache = { memo: new Map(), chunkCounts: new Map() };
+    sessionQueryCaches.set(key, cache);
+  }
+  return cache;
+}
+
 async function* rafStream(ctx, outer, settings, runs) {
   const signal = outer.signal;
   let run;
@@ -675,7 +691,7 @@ async function* rafStream(ctx, outer, settings, runs) {
     const store = new raf.ContextStore();
     if (transcript !== '') store.add(transcript, { id: 'session', title: 'DSH session transcript' });
     const rootLLM = new DshLlmClient(ctx, outer, rootProfile, outer.reasoningEffort);
-    const queryLLM = new DshLlmClient(ctx, outer, queryProfile, undefined);
+    const queryLLM = new DshLlmClient(ctx, outer, queryProfile, 'low');
     const extraTools = createDshTools(ctx, outer.sessionId, signal);
     const inline = createInlineTrace(ctx, outer, signal);
     const events = [];
@@ -685,7 +701,7 @@ async function* rafStream(ctx, outer, settings, runs) {
       store,
       maxDepth: settings.depth,
       agent: { temperature: 0 },
-      llmQuery: { reserveRatio: settings.reserve, concurrency: settings.concurrency, temperature: 0 },
+      llmQuery: { reserveRatio: settings.reserve, concurrency: settings.concurrency, temperature: 0, cache: getSessionQueryCache(outer.sessionId) },
       rootMaxSteps: RAF_ROOT_MAX_STEPS,
       extraTools,
       signal,

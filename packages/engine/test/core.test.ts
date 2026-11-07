@@ -93,7 +93,7 @@ Shift focus.
     const atStep1 = parseAgentResponse(`<folding></folding>${tool}`, { expectFolding: true });
     expect(atStep1.errors).toEqual([]);
     expect(atStep1.folding).toBeUndefined();
-    expect(atStep1.warnings).toContain('缺少 <folding>');
+    expect(atStep1.warnings).toContain('missing <folding>');
   });
 
   it('handles unclosed tags and raw newlines in JSON strings', () => {
@@ -167,6 +167,26 @@ Shift focus.
     expect(pMixedFoldTag.errors).toEqual([]);
     expect(pMixedFoldTag.folding?.range).toEqual([4, 4]);
     expect(pMixedFoldTag.folding?.summary).toBe('步骤4已验证选项A成立');
+
+    // Bare folding JSON before <motivation> without <folding> tag
+    const pBareFold = parseAgentResponse(
+      '{"range": [0, 0], "summary": "Step 0: grep found 0 matches"} <motivation>Next probe</motivation>\n<tool_call>{"name": "grep", "arguments": {"pattern": "test"}}</tool_call>',
+      { expectFolding: true },
+    );
+    expect(pBareFold.errors).toEqual([]);
+    expect(pBareFold.folding).toEqual({ range: [0, 0], summary: 'Step 0: grep found 0 matches' });
+    expect(pBareFold.toolCall?.name).toBe('grep');
+
+    // Split folding summary after prematurely closed {"range": [5, 5]}
+    const pSplitSummary = parseAgentResponse(
+      '<folding>\n{"range": [5, 5]}\n"Verified years via tally on context: 1970=3, 1977=2."\n</folding>\n<motivation>Read lines</motivation>\n<tool_call>{"name": "read", "arguments": {"document": "context", "start_line": 1, "end_line": 10}}</tool_call>',
+      { expectFolding: true },
+    );
+    expect(pSplitSummary.errors).toEqual([]);
+    expect(pSplitSummary.folding).toEqual({
+      range: [5, 5],
+      summary: 'Verified years via tally on context: 1970=3, 1977=2.',
+    });
   });
 });
 

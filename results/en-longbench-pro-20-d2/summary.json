@@ -1,0 +1,98 @@
+{
+  "bench": "longbench-pro",
+  "method": "raf",
+  "n": 20,
+  "meanScore": 0.775,
+  "correct": 14,
+  "meanOfficial": 0.775,
+  "meanLenient": 0.775,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 0.775,
+  "meanSteps": 4.05,
+  "meanWallSec": 189.4585,
+  "formatIssues": 6,
+  "folds": {
+    "granular": 61,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 4,
+  "tokens": {
+    "prompt": 526073,
+    "cached": 218112,
+    "completion": 248463,
+    "cacheHitRate": 0.41460405685142554
+  },
+  "byRole": {
+    "root": {
+      "calls": 83,
+      "promptTokens": 313947,
+      "completionTokens": 244818,
+      "cachedTokens": 218112,
+      "reasoningTokens": 215853,
+      "latencyMs": 3754577,
+      "errors": 0,
+      "cacheHitRate": 0.6947414691014725
+    },
+    "llm_query": {
+      "calls": 18,
+      "promptTokens": 212126,
+      "completionTokens": 3645,
+      "cachedTokens": 0,
+      "reasoningTokens": 1423,
+      "latencyMs": 82558,
+      "errors": 0,
+      "cacheHitRate": 0
+    }
+  },
+  "byTask": {
+    "T1. Retrieval & Ranking": {
+      "n": 3,
+      "score": 0.6666666666666666
+    },
+    "T2. Sequencing & Structure Reconstruction": {
+      "n": 3,
+      "score": 0.6666666666666666
+    },
+    "T5. Attribution & Citation Alignment": {
+      "n": 2,
+      "score": 1
+    },
+    "T6. Aggregation & Clustering": {
+      "n": 7,
+      "score": 0.9285714285714286
+    },
+    "T9. Version & Code Diff Analysis": {
+      "n": 1,
+      "score": 1
+    },
+    "T3. Evidence-Grounded QA": {
+      "n": 1,
+      "score": 0
+    },
+    "T10. Rule Induction & In-Context Learning": {
+      "n": 1,
+      "score": 1
+    },
+    "T7. Consistency & Compliance Checking": {
+      "n": 2,
+      "score": 0.5
+    }
+  },
+  "byAnswerType": {
+    "?": {
+      "n": 20,
+      "score": 0.775
+    }
+  },
+  "cost": {
+    "totalUsd": 1.301719,
+    "perTaskUsd": 0.065086,
+    "cacheSavedUsd": 0.248648,
+    "byRoleUsd": {
+      "root": 1.268077,
+      "llm_query": 0.033641
+    }
+  }
+}

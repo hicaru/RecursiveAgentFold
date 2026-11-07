@@ -141,7 +141,7 @@ export class FoldState {
 export function fallbackSummary(i: Interaction, maxObsChars = 600): string {
   const obs = i.observation.replace(/\s+/g, ' ').trim();
   return (
-    `${i.motivation ? `${i.motivation.trim()} ` : ''}调用 ${i.action.name}(${JSON.stringify(i.action.arguments)})。` +
-    `结果（自动截断）：${obs.length > maxObsChars ? `${obs.slice(0, maxObsChars)}…` : obs}`
+    `${i.motivation ? `${i.motivation.trim()} ` : ''}Called ${i.action.name}(${JSON.stringify(i.action.arguments)}). ` +
+    `Result (truncated): ${obs.length > maxObsChars ? `${obs.slice(0, maxObsChars)}…` : obs}`
   );
 }

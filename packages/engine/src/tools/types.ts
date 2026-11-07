@@ -34,7 +34,7 @@ export class ToolArgumentError extends Error {
 export function argString(args: Record<string, unknown>, key: string, required = true): string | undefined {
   const v = args[key];
   if (v === undefined || v === null || v === '') {
-    if (required) throw new ToolArgumentError(`缺少必需参数 "${key}"`);
+    if (required) throw new ToolArgumentError(`missing required argument "${key}"`);
     return undefined;
   }
   if (typeof v === 'string') return v;
@@ -46,7 +46,7 @@ export function argNumber(args: Record<string, unknown>, key: string): number | 
   const v = args[key];
   if (v === undefined || v === null || v === '') return undefined;
   const n = typeof v === 'number' ? v : Number(v);
-  if (!Number.isFinite(n)) throw new ToolArgumentError(`参数 "${key}" 必须是数字`);
+  if (!Number.isFinite(n)) throw new ToolArgumentError(`argument "${key}" must be a number`);
   return n;
 }
 
@@ -55,7 +55,7 @@ export function argStringList(args: Record<string, unknown>, key: string): strin
   if (v === undefined || v === null || v === '') return undefined;
   if (Array.isArray(v)) return v.map(String);
   if (typeof v === 'string') return v.split(',').map((s) => s.trim()).filter(Boolean);
-  throw new ToolArgumentError(`参数 "${key}" 必须是字符串列表`);
+  throw new ToolArgumentError(`argument "${key}" must be a list of strings`);
 }
 
 /** Render tool schemas for the system prompt (stable ordering => cache-stable). */

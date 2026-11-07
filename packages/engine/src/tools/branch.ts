@@ -80,7 +80,7 @@ function parseSubTasks(raw: unknown, fallbackScope: string | undefined): SubTask
       const item = raw[i];
       if (typeof item === 'string') {
         const t = item.trim();
-        if (!t) throw new ToolArgumentError('tasks 数组不能包含空字符串');
+        if (!t) throw new ToolArgumentError('tasks array cannot contain empty strings');
         out[i] = fallbackScope ? { scope: fallbackScope, task: t } : { task: t };
       } else if (typeof item === 'object' && item !== null) {
         const rec = item as Record<string, unknown>;
@@ -93,11 +93,11 @@ function parseSubTasks(raw: unknown, fallbackScope: string | undefined): SubTask
                 ? rec.query
                 : '';
         const t = rawTask.trim();
-        if (!t) throw new ToolArgumentError('tasks 数组中的对象必须包含非空字符串 "task"');
+        if (!t) throw new ToolArgumentError('task objects in tasks array must contain a non-empty "task" string');
         const s = typeof rec.scope === 'string' && rec.scope.trim() !== '' ? rec.scope.trim() : fallbackScope;
         out[i] = s ? { scope: s, task: t } : { task: t };
       } else {
-        throw new ToolArgumentError('tasks 数组元素必须是字符串或 {scope, task} 对象');
+        throw new ToolArgumentError('elements of tasks array must be strings or {scope, task} objects');
       }
     }
     return out;
@@ -109,7 +109,7 @@ function parseSubTasks(raw: unknown, fallbackScope: string | undefined): SubTask
       .filter(Boolean)
       .map((t) => (fallbackScope ? { scope: fallbackScope, task: t } : { task: t }));
   }
-  throw new ToolArgumentError('参数 "tasks" 必须是任务列表');
+  throw new ToolArgumentError('argument "tasks" must be a task list');
 }
 
 export function mergeSubTasksByScope(specs: readonly SubTaskSpec[], store: ContextStore): SubTaskSpec[] {
@@ -134,7 +134,7 @@ export function mergeSubTasksByScope(specs: readonly SubTaskSpec[], store: Conte
   let idx = 0;
   for (const [scopeKey, g] of groups) {
     const combinedTask =
-      g.tasks.length === 1 ? (g.tasks[0] ?? '') : g.tasks.map((t, i) => `(${i + 1}) ${t}`).join('；');
+      g.tasks.length === 1 ? (g.tasks[0] ?? '') : g.tasks.map((t, i) => `(${i + 1}) ${t}`).join('; ');
     const finalScope = g.firstScope ?? (g.tasks.length > 1 ? scopeKey : undefined);
     merged[idx++] = finalScope ? { scope: finalScope, task: combinedTask } : { task: combinedTask };
   }
@@ -150,27 +150,27 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
   return {
     name: 'branch',
     description:
-      '把模块/文档研究任务交给带持久折叠记忆的专家子代理，或向已有专家子代理 [scope=...] 追问细节。传入 "scope"（如文档 id 或依赖模块名）以复用该专家上下文并自动去重；支持单个 "task" 或并行 "tasks"。',
+      'Delegate deep document/module research to a persistent scoped specialist sub-agent, or ask a follow-up question to an existing specialist [scope=...]. Pass "scope" (e.g. doc id or module name) to reuse specialist state/cache and deduplicate; supports single "task" or parallel "tasks".',
     parameters: {
       type: 'object',
       properties: {
         scope: {
           type: 'string',
-          description: '专家子代理负责的域标识（如文档 id、模块/依赖库名，如 "doc_a" 或 "lib_auth"）。相同 scope 自动复用该专家上下文与缓存并去重。',
+          description: 'Scope identifier for the specialist sub-agent (e.g. document id or module/library name such as "doc_a" or "lib_auth"). Reuses specialist state and cache.',
         },
-        task: { type: 'string', description: '向该专家子代理布置的研究指令或追问问题。' },
+        task: { type: 'string', description: 'Research instruction or follow-up question for the specialist.' },
         tasks: {
           type: 'array',
           items: {
             type: ['string', 'object'],
             properties: {
-              scope: { type: 'string', description: '子任务对应的文档 id 或模块/依赖名。' },
-              task: { type: 'string', description: '独立子任务指令或追问。' },
+              scope: { type: 'string', description: 'Document id or module/library scope for this subtask.' },
+              task: { type: 'string', description: 'Subtask instruction or follow-up question.' },
             },
           },
-          description: '可选：并行派发多个独立子任务（支持字符串或 {scope, task} 对象；相同 scope 自动合并去重）。',
+          description: 'Optional: dispatch multiple independent subtasks in parallel (strings or {scope, task} objects; same scope is merged and deduplicated).',
         },
-        max_steps: { type: 'integer', description: `步数预算（默认 ${opts.maxBranchSteps ?? 20}）。` },
+        max_steps: { type: 'integer', description: `Step budget (default ${opts.maxBranchSteps ?? 20}).` },
       },
       required: [],
     },
@@ -182,25 +182,25 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
         argString(args, 'query', false);
       const tasks = parseSubTasks(args.tasks, explicitScope);
       if (!task && tasks.length === 0) {
-        throw new ToolArgumentError('必须提供 "task" 或 "tasks"');
+        throw new ToolArgumentError('must provide "task" or "tasks"');
       }
       const maxSteps = Math.min(argNumber(args, 'max_steps') ?? opts.maxBranchSteps ?? 20, opts.maxBranchSteps ?? 20);
 
       const runSingle = async (subTask: string, subScope?: string): Promise<string> => {
         const scopeKey = inferScope(subScope, subTask, ctx.store);
         if (opts.ownScope && scopeKey === normalizeScopeKey(opts.ownScope)) {
-          return `[scope=${scopeKey}] 你当前已经是负责 [${scopeKey}] 的专家子代理，严禁对自身 scope 调用 branch！请直接使用 grep / read / tally 工具在本域文档中查证。`;
+          return `[scope=${scopeKey}] You are already the specialist responsible for [${scopeKey}]; do NOT call branch on your own scope! Use grep / read / tally directly on your document.`;
         }
         const stack = ctx.callStack ?? [];
         if (stack.includes(scopeKey)) {
           const existingSummary = ctx.board?.getSpecialist(scopeKey)?.latestSummary;
           return existingSummary
-            ? `[scope=${scopeKey}]（检测到循环调用，返回该专家最新已知结论）\n${existingSummary}`
-            : `[scope=${scopeKey}]（检测到循环调用同一专家 scope，请直接利用已有看板信息或文档工具完成当前子任务）`;
+            ? `[scope=${scopeKey}] (cycle detected on scope; returning latest known specialist summary)\n${existingSummary}`
+            : `[scope=${scopeKey}] (cycle detected on scope; use existing board findings or document tools directly)`;
         }
         if (opts.consultOnly) {
           if (!ctx.board || !ctx.board.hasSpecialist(scopeKey)) {
-            return `[scope=${scopeKey}] 该深度仅允许向看板上已有的专家子代理 [scope=...] 追问，请指定已存在的 scope 或直接使用 grep/read。`;
+            return `[scope=${scopeKey}] At max depth you may only query existing specialists [scope=...] already listed on the board; specify an existing scope or use grep/read directly.`;
           }
         }
         const nextStack = [...stack, scopeKey];
@@ -222,9 +222,9 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
                 callStack: nextStack,
                 signal: ctx.signal,
               });
-              const status = `[scope=${scopeKey}] branch 完成：${r.terminated}，共 ${r.steps} 步${r.error ? `（错误：${r.error}）` : ''}`;
-              const body = r.answer ?? '（未产生答案）';
-              const resultText = `${status}\n结果：\n${body}`;
+              const status = `[scope=${scopeKey}] branch done: ${r.terminated}, ${r.steps} steps${r.error ? ` (error: ${r.error})` : ''}`;
+              const body = r.answer ?? '(no answer produced)';
+              const resultText = `${status}\nResult:\n${body}`;
               return {
                 resultText,
                 answer: r.answer,
@@ -243,9 +243,9 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
           callStack: nextStack,
           signal: ctx.signal,
         });
-        const status = `[scope=${scopeKey}] branch 完成：${r.terminated}，共 ${r.steps} 步${r.error ? `（错误：${r.error}）` : ''}`;
-        const body = r.answer ?? '（未产生答案）';
-        return `${status}\n结果：\n${body}`;
+        const status = `[scope=${scopeKey}] branch done: ${r.terminated}, ${r.steps} steps${r.error ? ` (error: ${r.error})` : ''}`;
+        const body = r.answer ?? '(no answer produced)';
+        return `${status}\nResult:\n${body}`;
       };
 
       if (tasks.length > 0) {
@@ -255,7 +255,7 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
           .map((r, i) => {
             const spec = mergedTasks[i];
             const label = spec?.scope ? `[scope=${spec.scope}] ${spec.task}` : (spec?.task ?? '');
-            return `[子任务 #${i + 1}] ${label}\n${r}`;
+            return `[Subtask #${i + 1}] ${label}\n${r}`;
           })
           .join('\n\n');
         return truncateToTokens(summary, opts.maxResultTokens ?? 6000).text;

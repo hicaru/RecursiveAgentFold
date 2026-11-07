@@ -49,6 +49,19 @@ export interface ContextStoreOptions {
   readonly previewLineChars?: number;
 }
 
+function hashLines(lines: readonly string[], start: number, end: number): string {
+  let h = 0x811c9dc5;
+  for (let i = start; i < end; i++) {
+    const s = lines[i] ?? '';
+    for (let j = 0; j < s.length; j++) {
+      h ^= s.charCodeAt(j);
+      h = Math.imul(h, 0x01000193);
+    }
+    h ^= 10;
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
 /**
  * Holds the (possibly mega-large) contexts outside of every agent window.
  * Agents only see a manifest; content reaches models through llm_query
@@ -109,7 +122,7 @@ export class ContextStore {
 
   get(id: string): StoredDocument {
     const d = this.docs.get(id);
-    if (!d) throw new Error(`未知文档 "${id}"。可用：${[...this.docs.keys()].join('、') || '（无）'}`);
+    if (!d) throw new Error(`Unknown document "${id}". Available: ${[...this.docs.keys()].join(', ') || '(none)'}`);
     return d;
   }
 
@@ -125,12 +138,12 @@ export class ContextStore {
 
   /** Stable manifest rendered into the agent prompt (part of the cached prefix). */
   manifest(): string {
-    if (this.docs.size === 0) return '（未加载文档）';
+    if (this.docs.size === 0) return '(no documents loaded)';
     const out: string[] = [];
     for (const d of this.docs.values()) {
-      out.push(`- id: \`${d.id}\` — ${d.title} — 约 ${d.tokens.toLocaleString('en-US')} token，${d.lines.length.toLocaleString('en-US')} 行`);
+      out.push(`- id: \`${d.id}\` — ${d.title} — ~${d.tokens.toLocaleString('en-US')} tokens, ${d.lines.length.toLocaleString('en-US')} lines`);
       if (this.previewLines > 0 && d.lines.length >= this.previewMinLines) {
-        out.push('  示例首行：');
+        out.push('  Sample lines:');
         let shown = 0;
         for (let i = 0; i < d.lines.length && shown < this.previewLines; i++) {
           const line = d.lines[i] ?? '';
@@ -157,14 +170,15 @@ export class ContextStore {
     for (let i = 0; i < doc.lines.length; i++) {
       const t = lineTok(i);
       if (acc > 0 && acc + t > size) {
-        out.push({ docId, index: out.length, startLine: start + 1, endLine: i, tokens: acc, chunkTokens: size, key: `${docId}@${size}#${out.length}` });
+        out.push({ docId, index: out.length, startLine: start + 1, endLine: i, tokens: acc, chunkTokens: size, key: `${docId}@${size}#${out.length}:${hashLines(doc.lines, start, i)}` });
         start = i;
         acc = 0;
       }
       acc += t;
     }
     if (acc > 0 || out.length === 0) {
-      out.push({ docId, index: out.length, startLine: start + 1, endLine: Math.max(start + 1, doc.lines.length), tokens: acc, chunkTokens: size, key: `${docId}@${size}#${out.length}` });
+      const endIdx = Math.max(start + 1, doc.lines.length);
+      out.push({ docId, index: out.length, startLine: start + 1, endLine: endIdx, tokens: acc, chunkTokens: size, key: `${docId}@${size}#${out.length}:${hashLines(doc.lines, start, endIdx)}` });
     }
     const chunks = out.map((c) => ({ ...c, total: out.length }));
     this.chunkCache.set(cacheKey, chunks);
@@ -197,24 +211,60 @@ export class ContextStore {
     const re = new RegExp(pattern, opts.ignoreCase === false ? '' : 'i');
     const max = opts.maxMatches ?? 50;
     const maxChars = opts.maxLineChars ?? 300;
-    const matches: GrepMatch[] = [];
+    const perDocMatches: GrepMatch[][] = [];
     const perDoc: Record<string, number> = {};
     let total = 0;
     const ids = opts.docIds?.length ? opts.docIds : [...this.docs.keys()];
     for (const id of ids) {
       const doc = this.get(id);
       perDoc[id] = 0;
+      const docMatches: GrepMatch[] = [];
       for (let i = 0; i < doc.lines.length; i++) {
         const line = doc.lines[i] ?? '';
-        if (re.test(line)) {
+        const m = re.exec(line);
+        if (m) {
           total++;
           perDoc[id]++;
-          if (matches.length < max) {
-            matches.push({ docId: id, line: i + 1, text: line.length > maxChars ? `${line.slice(0, maxChars)}…` : line });
+          if (docMatches.length < max) {
+            let text: string;
+            if (line.length <= maxChars) {
+              text = line;
+            } else {
+              const matchIdx = m.index;
+              const matchLen = m[0].length;
+              if (matchIdx + matchLen <= maxChars) {
+                text = `${line.slice(0, maxChars)}…`;
+              } else {
+                const start = Math.max(0, Math.min(line.length - maxChars, matchIdx - Math.floor(maxChars / 3)));
+                const end = Math.min(line.length, start + maxChars);
+                text = `${start > 0 ? '…' : ''}${line.slice(start, end)}${end < line.length ? '…' : ''}`;
+              }
+            }
+            docMatches.push({ docId: id, line: i + 1, text });
           }
         }
       }
+      if (docMatches.length > 0) perDocMatches.push(docMatches);
     }
+    if (perDocMatches.length <= 1) {
+      return { matches: perDocMatches[0] ?? [], total, perDoc };
+    }
+    const selected: Array<GrepMatch & { readonly _docOrder: number }> = [];
+    let round = 0;
+    while (selected.length < max) {
+      let added = false;
+      for (let d = 0; d < perDocMatches.length && selected.length < max; d++) {
+        const item = perDocMatches[d]?.[round];
+        if (item) {
+          selected.push({ ...item, _docOrder: d });
+          added = true;
+        }
+      }
+      if (!added) break;
+      round++;
+    }
+    selected.sort((a, b) => a._docOrder - b._docOrder || a.line - b.line);
+    const matches = selected.map(({ _docOrder: _, ...m }) => m);
     return { matches, total, perDoc };
   }
 

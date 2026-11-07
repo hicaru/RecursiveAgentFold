@@ -105,7 +105,7 @@ export function evaluateExpression(src: string): number {
 export function createCalculatorTool(): Tool {
   return {
     name: 'calculator',
-    description: '精确计算算术表达式，如 "sum(12, 40, 7) / 3"。支持 + - * / % ^ 和 sum/min/max/avg/round/floor/ceil/abs/sqrt。',
+    description: 'Evaluate arithmetic expressions exactly, e.g. "sum(12, 40, 7) / 3". Supports + - * / % ^ and sum/min/max/avg/round/floor/ceil/abs/sqrt.',
     parameters: {
       type: 'object',
       properties: { expression: { type: 'string' } },
@@ -117,7 +117,7 @@ export function createCalculatorTool(): Tool {
         const v = evaluateExpression(expression);
         return `${expression} = ${Number.isInteger(v) ? v : Number(v.toPrecision(12))}`;
       } catch (e) {
-        throw new ToolArgumentError(`无法计算：${(e as Error).message}`);
+        throw new ToolArgumentError(`Cannot evaluate: ${(e as Error).message}`);
       }
     },
   };

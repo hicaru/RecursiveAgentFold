@@ -79,7 +79,7 @@ describe('RecursiveAgentFold end-to-end (scripted)', () => {
     const reader = scriptedReader();
     const root = new ScriptedLLM((req) => {
       const user = req.messages[1]!.content;
-      const step = Number(/当前是第 (\d+) 步/.exec(user)![1]);
+      const step = Number(/Step (\d+)\./.exec(user)![1]);
       switch (step) {
         case 0:
           return '<motivation>Locate first.</motivation><tool_call>{"name":"llm_query","arguments":{"query":"Find the vault passcode for project Orion","mode":"locate"}}</tool_call>';
@@ -95,7 +95,7 @@ describe('RecursiveAgentFold end-to-end (scripted)', () => {
     }, { name: 'root', contextWindow: 64_000 });
     const branch = new ScriptedLLM((req) => {
       const user = req.messages[1]!.content;
-      return /当前是第 0 步/.test(user)
+      return /Step 0\./.test(user)
         ? '<motivation>grep</motivation><tool_call>{"name":"grep","arguments":{"pattern":"passcode"}}</tool_call>'
         : '<folding>{"range":[0,0],"summary":"grep found 1 line"}</folding><answer>7341 (ctx:21007)</answer>';
     });
@@ -127,8 +127,8 @@ describe('RecursiveAgentFold end-to-end (scripted)', () => {
       n++;
       const user = req.messages[1]!.content;
       if (n === 1) return 'I forgot the format';
-      if (/步数上限/.test(user)) return '<answer>beta</answer>';
-      const step = Number(/当前是第 (\d+) 步/.exec(user)![1]);
+      if (/Step limit reached/.test(user)) return '<answer>beta</answer>';
+      const step = Number(/Step (\d+)\./.exec(user)![1]);
       return step === 0
         ? '<motivation>x</motivation><tool_call>{"name":"grep","arguments":{"pattern":"beta"}}</tool_call>'
         : '<motivation>again</motivation><tool_call>{"name":"grep","arguments":{"pattern":"beta"}}</tool_call>'; // missing folding → auto fold
@@ -147,12 +147,12 @@ describe('RecursiveAgentFold end-to-end (scripted)', () => {
     const state0 = new FoldState();
     const msgQ1Step0 = agent.buildMessages('Question A?', state0)[1]?.content ?? '';
     const msgQ2Step0 = agent.buildMessages('Question B?', state0)[1]?.content ?? '';
-    const taskIdx1 = msgQ1Step0.indexOf('\n\n### 任务\n');
-    const taskIdx2 = msgQ2Step0.indexOf('\n\n### 任务\n');
+    const taskIdx1 = msgQ1Step0.indexOf('\n\n### Task\n');
+    const taskIdx2 = msgQ2Step0.indexOf('\n\n### Task\n');
     expect(taskIdx1).toBeGreaterThan(0);
     expect(taskIdx1).toBe(taskIdx2);
     expect(msgQ1Step0.slice(0, taskIdx1)).toBe(msgQ2Step0.slice(0, taskIdx2));
-    expect(msgQ1Step0.slice(0, taskIdx1)).toContain('示例首行：');
+    expect(msgQ1Step0.slice(0, taskIdx1)).toContain('Sample lines:');
     expect(msgQ1Step0.slice(0, taskIdx1)).toContain('1| Filler line 1:');
     expect(msgQ1Step0.slice(0, taskIdx1)).toContain('2| Filler line 2:');
 
@@ -164,7 +164,7 @@ describe('RecursiveAgentFold end-to-end (scripted)', () => {
       observation: 'found 1',
     });
     const msgQ1Step1 = agent.buildMessages('Question A?', state1)[1]?.content ?? '';
-    const histHeader = '\n\n### 历史步骤\n';
+    const histHeader = '\n\n### Previous Steps\n';
     const histIdx0 = msgQ1Step0.indexOf(histHeader);
     const histIdx1 = msgQ1Step1.indexOf(histHeader);
     expect(histIdx0).toBeGreaterThan(0);
@@ -178,7 +178,7 @@ describe('RecursiveAgentFold end-to-end (scripted)', () => {
     const events: AgentEvent[] = [];
     const llm = new ScriptedLLM((req) => {
       const user = req.messages[1]?.content ?? '';
-      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
       switch (step) {
         case 0:
           return '<motivation>step 0</motivation><tool_call>{"name":"grep","arguments":{"pattern":"passcode","max_matches":5}}</tool_call>';
@@ -252,7 +252,7 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
     });
     const state0 = new FoldState();
     const msg0 = agent.buildMessages('Count animals', state0);
-    expect(msg0[1]?.content).toContain('### 共享研究看板');
+    expect(msg0[1]?.content).toContain('### Shared Research Board');
     expect(msg0[1]?.content).toContain('cat=65, dog=60');
 
     // Simulate step 1
@@ -266,8 +266,8 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
     const msg1 = agent.buildMessages('Count animals', state0);
 
     // Prefix up to ### 任务 should be byte-identical
-    const prefix0 = msg0[1]!.content.split('### 历史步骤')[0]!;
-    const prefix1 = msg1[1]!.content.split('### 历史步骤')[0]!;
+    const prefix0 = msg0[1]!.content.split('### Previous Steps')[0]!;
+    const prefix1 = msg1[1]!.content.split('### Previous Steps')[0]!;
     expect(prefix0).toBe(prefix1);
   });
 
@@ -309,7 +309,7 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
 
     const root = new ScriptedLLM((req) => {
       const user = req.messages[1]?.content ?? '';
-      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
       switch (step) {
         case 0:
           return '<motivation>Study lib_auth rounds</motivation><tool_call>{"name":"branch","arguments":{"scope":"lib_auth","task":"Find AUTH_KDF_ROUNDS in lib_auth"}}</tool_call>';
@@ -324,10 +324,10 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
     const branch = new ScriptedLLM((req) => {
       const user = req.messages[1]?.content ?? '';
       branchPrompts.push(user);
-      if (user.includes('### 协同追问')) {
+      if (user.includes('### Follow-up Question')) {
         return '<motivation>Answer directly from folded state</motivation><answer>250</answer>';
       }
-      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
       return step === 0
         ? '<motivation>grep lib_auth</motivation><tool_call>{"name":"grep","arguments":{"document":"lib_auth","pattern":"AUTH_"}}</tool_call>'
         : '<folding>{"range":[0,0],"summary":"grep lib_auth found AUTH_KDF_ROUNDS=8 and AUTH_SALT=250"}</folding><answer>8</answer>';
@@ -341,14 +341,14 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
     // Follow-up call (3rd branch prompt) must preserve [压缩步骤 0] and [压缩步骤 1] and include ### 协同追问
     const firstPrompt = branchPrompts[0] ?? '';
     const followUpPrompt = branchPrompts[2] ?? '';
-    expect(followUpPrompt).toContain('[压缩步骤 0]');
-    expect(followUpPrompt).toContain('[压缩步骤 1]');
-    expect(followUpPrompt).toContain('### 协同追问\nWhat is AUTH_SALT in lib_auth?');
-    expect(followUpPrompt).toContain('当前是第 2 步。上一步已归档');
+    expect(followUpPrompt).toContain('[Compressed Step 0]');
+    expect(followUpPrompt).toContain('[Compressed Step 1]');
+    expect(followUpPrompt).toContain('### Follow-up Question\nWhat is AUTH_SALT in lib_auth?');
+    expect(followUpPrompt).toContain('Step 2. Previous step archived');
 
-    // Prefix up to ### 历史步骤 must be 100% byte-identical between initial specialist run and follow-up
-    const prefixInit = firstPrompt.split('### 历史步骤')[0];
-    const prefixFollowUp = followUpPrompt.split('### 历史步骤')[0];
+    // Prefix up to ### Previous Steps must be 100% byte-identical between initial specialist run and follow-up
+    const prefixInit = firstPrompt.split('### Previous Steps')[0];
+    const prefixFollowUp = followUpPrompt.split('### Previous Steps')[0];
     expect(prefixInit).toBeDefined();
     expect(prefixFollowUp).toBe(prefixInit);
   });
@@ -414,7 +414,7 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
 
     const root = new ScriptedLLM((req) => {
       const user = req.messages[1]?.content ?? '';
-      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
       return step === 0
         ? '<motivation>First register mod_c specialist, then run mod_a</motivation><tool_call>{"name":"branch","arguments":{"tasks":[{"scope":"mod_c","task":"Inspect mod_c"},{"scope":"mod_a","task":"Inspect mod_a"}]}}</tool_call>'
         : `<folding>{"range":[0,0],"summary":"done"}</folding><answer>${user.includes('mod_b_ok') ? 'cycle-safe-and-consulted' : 'failed'}</answer>`;
@@ -422,27 +422,27 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
 
     const branch = new ScriptedLLM((req) => {
       const user = req.messages[1]?.content ?? '';
-      if (user.includes('### 任务\nInspect mod_c')) {
-        return user.includes('### 协同追问')
+      if (user.includes('### Task\nInspect mod_c')) {
+        return user.includes('### Follow-up Question')
           ? '<motivation>reply to leaf consult</motivation><answer>mod_c_val=99</answer>'
           : '<motivation>init mod_c</motivation><answer>mod_c_ready</answer>';
       }
-      if (user.includes('### 任务\nInspect mod_a')) {
-        const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      if (user.includes('### Task\nInspect mod_a')) {
+        const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
         return step === 0
           ? '<motivation>delegate to mod_b</motivation><tool_call>{"name":"branch","arguments":{"scope":"mod_b","task":"Inspect mod_b"}}</tool_call>'
           : `<folding>{"range":[0,0],"summary":"from mod_b"}</folding><answer>${user.includes('mod_b_verified') ? 'mod_b_ok' : 'mod_b_bad'}</answer>`;
       }
-      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
       if (step === 0) {
         return '<motivation>try cycle to mod_a</motivation><tool_call>{"name":"branch","arguments":{"scope":"mod_a","task":"Cycle back to mod_a"}}</tool_call>';
       }
       if (step === 1) {
-        if (user.includes('检测到循环调用')) leafSawCycle = true;
+        if (user.includes('cycle detected on scope')) leafSawCycle = true;
         return '<folding>{"range":[0,0],"summary":"cycle blocked"}</folding><motivation>try unstudied at leaf</motivation><tool_call>{"name":"branch","arguments":{"scope":"mod_unstudied","task":"Spawn new"}}</tool_call>';
       }
       if (step === 2) {
-        if (user.includes('该深度仅允许向看板上已有的专家子代理')) leafSawConsultOnlyBlock = true;
+        if (user.includes('At max depth you may only query existing specialists')) leafSawConsultOnlyBlock = true;
         return '<folding>{"range":[1,1],"summary":"unstudied blocked"}</folding><motivation>consult existing mod_c</motivation><tool_call>{"name":"branch","arguments":{"scope":"mod_c","task":"What is mod_c value?"}}</tool_call>';
       }
       if (user.includes('mod_c_val=99')) leafSawModC = true;
@@ -473,7 +473,7 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
     const state = new FoldState();
     const msg0 = agent.buildMessages('Question?', state)[1]?.content ?? '';
     expect(msg0).toContain('[branch][scope=lib_auth]');
-    expect(msg0).not.toContain('### 新增共享结论');
+    expect(msg0).not.toContain('### New Board Findings');
 
     // Record a new specialist conclusion while agent is running
     board.record({
@@ -484,11 +484,11 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
       summary: 'CRYPTO_PRIME_MOD = 509',
     });
     const msg1 = agent.buildMessages('Question?', state)[1]?.content ?? '';
-    expect(msg1).toContain('### 新增共享结论');
+    expect(msg1).toContain('### New Board Findings');
     expect(msg1).toContain('[branch][scope=lib_crypto] CRYPTO_PRIME_MOD = 509');
 
-    const prefix0 = msg0.split('### 历史步骤')[0];
-    const prefix1 = msg1.split('### 历史步骤')[0];
+    const prefix0 = msg0.split('### Previous Steps')[0];
+    const prefix1 = msg1.split('### Previous Steps')[0];
     expect(prefix1).toBe(prefix0);
   });
 
@@ -518,7 +518,7 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
 
     const root = new ScriptedLLM((req) => {
       const user = req.messages[req.messages.length - 1]?.content ?? '';
-      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
       if (step === 0) {
         return '<motivation>Spawn 3 parallel specialists for mod_0, mod_1, mod_2</motivation><tool_call>{"name":"branch","arguments":{"tasks":[{"scope":"mod_0","task":"Compute mod_0 + mod_1"},{"scope":"mod_1","task":"Find MOD_1_KEY and MOD_1_BONUS in mod_1"},{"scope":"mod_2","task":"Analyze mod_2 and mod_leaf"}]}}</tool_call>';
       }
@@ -527,22 +527,22 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
 
     const branch = new ScriptedLLM((req) => {
       const user = req.messages[req.messages.length - 1]?.content ?? '';
-      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
-      if (user.includes('专职负责域 [scope=mod_0]')) {
-        if (user.includes('[进行中]') && user.includes('mod_1')) mod0SawInFlightMod1 = true;
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+      if (user.includes('responsible ONLY for [scope=mod_0]')) {
+        if (user.includes('[in-progress]') && user.includes('mod_1')) mod0SawInFlightMod1 = true;
         if (step === 0) {
           return '<motivation> Try self branch first to test B2 guard </motivation><tool_call>{"name":"branch","arguments":{"scope":"mod_0","task":"self call"}}</tool_call>';
         }
         if (step === 1) {
-          if (user.includes('严禁对自身 scope 调用 branch')) selfBranchRejected = true;
+          if (user.includes('do NOT call branch on your own scope')) selfBranchRejected = true;
           return '<folding>{"range":[0,0],"summary":"self branch blocked"}</folding><motivation>Query peer mod_1 for MOD_1_KEY</motivation><tool_call>{"name":"branch","arguments":{"scope":"mod_1","task":"What is MOD_1_KEY?"}}</tool_call>';
         }
         return '<folding>{"range":[1,1],"summary":"got MOD_1_KEY=25"}</folding><answer>MOD_0_BASE = 10, MOD_1_KEY = 25</answer>';
       }
-      if (user.includes('专职负责域 [scope=mod_1]')) {
+      if (user.includes('responsible ONLY for [scope=mod_1]')) {
         return '<motivation>Read mod_1</motivation><answer>MOD_1_KEY = 25, MOD_1_BONUS = 87</answer>';
       }
-      if (user.includes('专职负责域 [scope=mod_2]')) {
+      if (user.includes('responsible ONLY for [scope=mod_2]')) {
         if (step === 0) {
           return '<motivation>Run llm_query on mod_2</motivation><tool_call>{"name":"llm_query","arguments":{"query":"Find MOD_2_FACTOR","documents":["mod_2"]}}</tool_call>';
         }
@@ -552,7 +552,7 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
         }
         return '<folding>{"range":[1,1],"summary":"LEAF_OFFSET = 7"}</folding><answer>MOD_2_FACTOR = 3, LEAF_OFFSET = 7</answer>';
       }
-      if (user.includes('专职负责域 [scope=mod_leaf]')) {
+      if (user.includes('responsible ONLY for [scope=mod_leaf]')) {
         if (step === 0) {
           return '<motivation>Leaf specialist calls llm_query</motivation><tool_call>{"name":"llm_query","arguments":{"query":"Find LEAF_OFFSET","documents":["mod_leaf"]}}</tool_call>';
         }
@@ -614,14 +614,14 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
     let branchInvocations = 0;
     const root = new ScriptedLLM((req) => {
       const user = req.messages[req.messages.length - 1]?.content ?? '';
-      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
       if (step === 0) {
         return '<motivation>Batch two tasks to same scope lib_core</motivation><tool_call>{"name":"branch","arguments":{"tasks":[{"scope":"lib_core","task":"Find X"},{"scope":"lib_core","task":"Find Y"}]}}</tool_call>';
       }
       if (step === 1) {
         return '<folding>{"range":[0,0],"summary":"first call done"}</folding><motivation>Follow up lib_core</motivation><tool_call>{"name":"branch","arguments":{"scope":"lib_core","task":"Compute hop pipeline for X and Y"}}</tool_call>';
       }
-      return `<folding>{"range":[1,1],"summary":"second call done"}</folding><answer>${user.includes('共 1 步') ? 'steps-accurate' : 'steps-wrong'}</answer>`;
+      return `<folding>{"range":[1,1],"summary":"second call done"}</folding><answer>${user.includes('1 steps') ? 'steps-accurate' : 'steps-wrong'}</answer>`;
     });
     const branch = new ScriptedLLM(() => {
       branchInvocations++;
@@ -650,7 +650,7 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
           usage: { promptTokens: 1000, completionTokens: 16000, cachedTokens: 800, reasoningTokens: 16000 },
         };
       }
-      if (user.includes('内部思考（reasoning）过长')) sawTruncationWarning = true;
+      if (user.includes('previous internal reasoning was too long')) sawTruncationWarning = true;
       return '<motivation>concise</motivation><answer>recovered</answer>';
     });
     const agent = new AgentFoldAgent({ llm, tools: [createGrepTool(), createReadTool()], store });
@@ -665,7 +665,7 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
       (req) => {
         readerAttempts++;
         const lastMsg = req.messages[req.messages.length - 1]?.content ?? '';
-        if (lastMsg.includes('内部推理不超过 50 字')) sawRetryPrompt = true;
+        if (lastMsg.includes('Keep internal thinking under 50 words')) sawRetryPrompt = true;
         if (readerAttempts === 1) {
           return { text: '', finishReason: 'length' };
         }
@@ -800,5 +800,131 @@ describe('truncated answer guard', () => {
     const result = await agent.run('summarize the project');
     expect(result.answer).toBe('complete answer');
     expect(events.some((event) => event.type === 'format_error' && event.errors.some((error) => error.includes('output token limit')))).toBe(true);
+  });
+});
+
+describe('accuracy & prefix cache hardening (H2a, H2b, H2c, H3)', () => {
+  it('H2a: rejects placeholder <answer> strings before maxSteps and retries until a real answer is emitted', async () => {
+    const store = new ContextStore();
+    store.add('target_value = 99', { id: 'ctx' });
+    const responses = [
+      '<motivation>wait</motivation><answer>暂无最终答案，继续验证中</answer>',
+      '<motivation>wait more</motivation><answer>No final answer yet, still verifying.</answer>',
+      '<motivation>done</motivation><answer>99</answer>',
+    ];
+    const llm = new ScriptedLLM((_req, index) => responses[Math.min(index, responses.length - 1)]!);
+    const events: AgentEvent[] = [];
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [createGrepTool()],
+      store,
+      maxSteps: 4,
+      maxFormatRetries: 2,
+      onEvent: (e) => events.push(e),
+    });
+    const res = await agent.run('What is target_value?');
+    expect(res.answer).toBe('99');
+    expect(res.formatIssues).toBe(2);
+    expect(events.filter((e) => e.type === 'format_error' && e.errors.some((err) => err.includes('verification placeholder')))).toHaveLength(2);
+  });
+
+  it('H2b: ContextStore.grep centers snippets around regex matches past char 300 on long lines', () => {
+    const store = new ContextStore();
+    const prefix = 'a'.repeat(1100);
+    const suffix = 'b'.repeat(400);
+    const longLine = `${prefix}NEEDLE_TOKEN=481516${suffix}`;
+    store.add(longLine, { id: 'longdoc' });
+    const res = store.grep('NEEDLE_TOKEN=\\d+');
+    expect(res.total).toBe(1);
+    expect(res.matches).toHaveLength(1);
+    expect(res.matches[0]?.text).toContain('NEEDLE_TOKEN=481516');
+    expect(res.matches[0]?.text.startsWith('…')).toBe(true);
+    expect(res.matches[0]?.text.endsWith('…')).toBe(true);
+
+    // Multi-document grep distributes maxMatches across matching documents
+    const multiStore = new ContextStore();
+    multiStore.add(Array.from({ length: 10 }, (_, i) => `hit_${i + 1}`).join('\n'), { id: 'doc_1' });
+    multiStore.add(Array.from({ length: 10 }, (_, i) => `hit_${i + 1}`).join('\n'), { id: 'doc_2' });
+    multiStore.add(Array.from({ length: 10 }, (_, i) => `hit_${i + 1}`).join('\n'), { id: 'doc_3' });
+    const multiRes = multiStore.grep('hit_', { maxMatches: 6 });
+    expect(multiRes.total).toBe(30);
+    expect(multiRes.matches.map((m) => m.docId)).toEqual(['doc_1', 'doc_1', 'doc_2', 'doc_2', 'doc_3', 'doc_3']);
+  });
+
+  it('H2c: createReadTool stops cleanly on a line boundary at maxReadTokens without omitting middle lines', async () => {
+    const store = new ContextStore();
+    const lines = Array.from({ length: 20 }, (_, i) => `Row_${i + 1}: ${'x'.repeat(180)}`);
+    store.add(lines.join('\n'), { id: 'doc' });
+    const readTool = createReadTool({ maxReadLines: 20, maxReadTokens: 250 });
+    const out = await readTool.execute(
+      { document: 'doc', start_line: 1, end_line: 20 },
+      { store, usage: new UsageTracker(), depth: 0, agentName: 'root', step: 0, emit: () => {} },
+    );
+    expect(out).toMatch(/doc lines 1-(\d+) of 20 \(stopped at line \1 due to token limit; read from \d+ to continue\)/);
+    expect(out).not.toContain('已截断');
+    const returnedRowNums = [...out.matchAll(/^\d+\| Row_(\d+):/gm)].map((m) => Number(m[1]));
+    expect(returnedRowNums.length).toBeGreaterThan(1);
+    expect(returnedRowNums.length).toBeLessThan(20);
+    for (let i = 0; i < returnedRowNums.length; i++) {
+      expect(returnedRowNums[i]).toBe(i + 1);
+    }
+  });
+
+  it('H3: parallel specialists share an identical initialBoardSnapshot and LLMQueryCache reuses content-hashed chunks across stores', async () => {
+    const board = new ResearchBoard();
+    const snapshots: Array<string | undefined> = [];
+    const deltas: Array<string | undefined> = [];
+    await Promise.all([
+      board.runScopedBranch('mod_a', 'Inspect mod_a', async (input) => {
+        snapshots.push(input.initialBoardSnapshot);
+        await Promise.resolve();
+        deltas.push(board.renderSince(input.initialBoardRev, 'mod_a'));
+        return { resultText: 'A=1', answer: '1', state: { blocks: [] } };
+      }),
+      board.runScopedBranch('mod_b', 'Inspect mod_b', async (input) => {
+        snapshots.push(input.initialBoardSnapshot);
+        await Promise.resolve();
+        deltas.push(board.renderSince(input.initialBoardRev, 'mod_b'));
+        return { resultText: 'B=2', answer: '2', state: { blocks: [] } };
+      }),
+    ]);
+    expect(snapshots).toEqual([undefined, undefined]);
+    expect(deltas[0]).toContain('[in-progress]');
+    expect(deltas[0]).toContain('mod_b');
+    expect(deltas[1]).toContain('[in-progress]');
+    expect(deltas[1]).toContain('mod_a');
+
+    // Cross-store LLMQueryCache reuse when earlier chunks are unchanged and new lines are appended
+    const sharedCache = { memo: new Map(), chunkCounts: new Map() };
+    const baseLines = Array.from({ length: 300 }, (_, i) => `entry ${i + 1}: ${i % 2 === 0 ? 'alpha' : 'beta'}`);
+    const storeTurn1 = new ContextStore();
+    storeTurn1.add(baseLines.join('\n'), { id: 'session' });
+    let readerCalls = 0;
+    const reader = new ScriptedLLM(() => {
+      readerCalls++;
+      return JSON.stringify({ relevant: true, answer: 'counts', counts: { alpha: 10, beta: 10 }, evidence: [] });
+    });
+    const engine1 = new LLMQueryEngine(reader, storeTurn1, new UsageTracker(), {
+      maxChunkTokens: 512,
+      minChunkTokens: 256,
+      cache: sharedCache,
+    });
+    const res1 = await engine1.query({ query: 'Count alpha and beta', mode: 'extract', categories: ['alpha', 'beta'] });
+    const turn1Chunks = res1.findings.length;
+    expect(turn1Chunks).toBeGreaterThan(2);
+    expect(readerCalls).toBe(turn1Chunks);
+
+    // Turn 2: append new lines to the end of 'session'; all full prefix chunks have identical content hashes
+    const storeTurn2 = new ContextStore();
+    const turn2Lines = [...baseLines, ...Array.from({ length: 100 }, (_, i) => `entry ${301 + i}: alpha`)];
+    storeTurn2.add(turn2Lines.join('\n'), { id: 'session' });
+    const engine2 = new LLMQueryEngine(reader, storeTurn2, new UsageTracker(), {
+      maxChunkTokens: 512,
+      minChunkTokens: 256,
+      cache: sharedCache,
+    });
+    const res2 = await engine2.query({ query: 'Count alpha and beta in turn 2', mode: 'extract', categories: ['alpha', 'beta'] });
+    const memoHitsTurn2 = res2.findings.filter((f) => f.memoHit).length;
+    expect(memoHitsTurn2).toBeGreaterThanOrEqual(turn1Chunks - 1);
   });
 });

@@ -1,0 +1,29 @@
+{
+  "bench": "needle",
+  "method": "raf",
+  "startedAt": "2026-11-07T12:36:04.826Z",
+  "tasks": 2,
+  "taskIds": [
+    "needle-20000-lookup-0",
+    "needle-20000-count-1"
+  ],
+  "argv": [
+    "needle",
+    "--tokens",
+    "20000",
+    "--tasks",
+    "2",
+    "--seed",
+    "11",
+    "--mock",
+    "--out",
+    "results/verify-en-mock"
+  ],
+  "tools": "all",
+  "models": {
+    "mock": true,
+    "llmQuery": {
+      "reserveRatio": 0.3
+    }
+  }
+}

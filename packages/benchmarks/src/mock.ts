@@ -13,7 +13,7 @@ export function createMockModels(llmQuery: LLMQueryOptions = {}): BenchModels {
       const lines = chunk.split('\n').length - 2;
       const q = req.messages[2]?.content ?? '';
       if (/EXTRACT/.test(q)) return JSON.stringify({ relevant: true, answer: `counted ${Math.max(0, lines)} lines; label counts unknown (mock)`, evidence: [] });
-      const words = (/查询：(.*)/.exec(q)?.[1] ?? '').toLowerCase().match(/[a-z]{5,}/g) ?? [];
+      const words = (/Query: (.*)/.exec(q)?.[1] ?? '').toLowerCase().match(/[a-z]{5,}/g) ?? [];
       const hitLine = chunk.split('\n').find((l) => words.some((w) => l.toLowerCase().includes(w)) && /^\d+\|/.test(l));
       return hitLine
         ? JSON.stringify({ relevant: true, answer: 'possible match (mock)', evidence: [{ line: Number(hitLine.split('|')[0]), quote: hitLine.slice(0, 80) }] })
@@ -25,7 +25,7 @@ export function createMockModels(llmQuery: LLMQueryOptions = {}): BenchModels {
     (req) => {
       const user = req.messages[req.messages.length - 1]?.content ?? '';
       if (req.purpose === 'direct') return 'Answer: 0';
-      const step = Number(/当前是第 (\d+) 步/.exec(user)?.[1] ?? 0);
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
       if (step === 0) {
         return '<motivation>Map a count over all chunks first.</motivation>\n<tool_call>{"name":"llm_query","arguments":{"query":"Classify every line into its label and return the count per label as JSON.","mode":"extract"}}</tool_call>';
       }

@@ -81,6 +81,15 @@ function isRawAnswerEcho(raw: string, answer: string): boolean {
   return match !== null && echoText(match[1] ?? '').includes(a);
 }
 
+const PLACEHOLDER_ANSWER =
+  /^(?:暂无(?:最终)?答案|还在验证|继续验证|尚无答案|未完待续|no final answer(?: yet)?|still verifying|continuing verification|verification in progress)(?:\b|[，。,.!！])/i;
+
+function isPlaceholderAnswer(answer: string): boolean {
+  const clean = echoText(answer);
+  if (clean === '') return true;
+  if (clean.length > 120) return false;
+  return PLACEHOLDER_ANSWER.test(clean) || /(?:暂无最终答案|继续验证中|尚未确定最终答案|need more steps to verify)/i.test(clean);
+}
 export interface AgentRunResult {
   answer: string | null;
   steps: number;
@@ -113,15 +122,15 @@ export class AgentFoldAgent {
     this.estimator = cfg.estimator ?? defaultEstimator;
     this.toolMap = new Map(cfg.tools.map((t) => [t.name, t]));
     this.systemPrompt =
-      `${buildAgentSystemPrompt(cfg.tools.map((t) => t.name))}\n\n# 可用工具\n${renderToolSchemas(cfg.tools)}` +
-      (cfg.systemPromptExtra ? `\n\n# 附加说明\n${cfg.systemPromptExtra}` : '');
+      `${buildAgentSystemPrompt(cfg.tools.map((t) => t.name))}\n\n# Tools\n${renderToolSchemas(cfg.tools)}` +
+      (cfg.systemPromptExtra ? `\n\n# Notes\n${cfg.systemPromptExtra}` : '');
     this.initialBoardRev =
-      cfg.initialBoardRev ?? cfg.initialBoardCount ?? (cfg.board ? cfg.board.currentRev() : 0);
+      cfg.initialBoardRev ?? cfg.initialBoardCount ?? (cfg.board ? cfg.board.settledRev() : 0);
     this.initialBoardSnapshot =
       cfg.initialBoardSnapshot !== undefined
         ? cfg.initialBoardSnapshot
         : cfg.board && this.initialBoardRev > 0
-          ? cfg.board.render()
+          ? cfg.board.renderSettled()
           : undefined;
   }
   private emit(e: AgentEvent) {
@@ -132,30 +141,30 @@ export class AgentFoldAgent {
   buildMessages(question: string, state: FoldState, extraUserTail?: string): ChatMessage[] {
     const blocks = state.blocks;
     const latest = state.latest;
-    const prev: string[] = ['### 历史步骤'];
+    const prev: string[] = ['### Previous Steps'];
     if (blocks.length === 0 && !latest) {
-      prev.push('（无）');
+      prev.push('(none)');
     } else {
       for (const b of blocks) prev.push(`**${renderBlockLabel(b)}** ${b.summary}`);
       if (latest) prev.push(renderLatest(latest));
     }
-    const parts: string[] = [`### 文档\n${this.cfg.store.manifest()}`];
-    if (this.initialBoardSnapshot) parts.push(`### 共享研究看板\n${this.initialBoardSnapshot}`);
+    const parts: string[] = [`### Documents\n${this.cfg.store.manifest()}`];
+    if (this.initialBoardSnapshot) parts.push(`### Shared Research Board\n${this.initialBoardSnapshot}`);
     const isScopedSpecialist =
       this.name.startsWith('specialist#') || (this.depth > 0 && this.cfg.scope !== undefined);
     const scopeLabel = this.cfg.scope ?? this.name;
     const atMaxDepth = this.cfg.maxDepth !== undefined && this.depth >= this.cfg.maxDepth;
     const taskBlock = isScopedSpecialist
       ? atMaxDepth
-        ? `### 任务\n${question.trim()}\n（注：你当前是专家子代理 ${this.name}，专职负责域 [scope=${scopeLabel}]；当前已达最大递归深度 d=${this.depth}，严禁对自身 scope 或未在看板注册的新域调用 branch，请直接用 grep/read 核查本域文档，或仅向看板上已有的其他专家 [scope=...] 追问。）`
-        : `### 任务\n${question.trim()}\n（注：你当前是专家子代理 ${this.name}，专职负责域 [scope=${scopeLabel}]；请直接用 grep/read 核查本域文档，切勿对自身 scope 调用 branch；若需跨模块信息，优先查阅看板或用 branch 向目标模块 [scope=...] 派发/追问。）`
-      : `### 任务\n${question.trim()}`;
+        ? `### Task\n${question.trim()}\n(Note: You are specialist sub-agent ${this.name} responsible ONLY for [scope=${scopeLabel}] at max depth d=${this.depth}. Do NOT call branch on your own scope or unstudied scopes; use grep/read/tally on your scope document, or call branch ONLY to query an existing specialist [scope=...] already listed on the board.)`
+        : `### Task\n${question.trim()}\n(Note: You are specialist sub-agent ${this.name} responsible ONLY for [scope=${scopeLabel}]. Use grep/read/tally directly on your scope document and NEVER call branch on your own scope; for cross-module dependencies, check the board first or call branch with the target [scope=...].)`
+      : `### Task\n${question.trim()}`;
     parts.push(taskBlock, prev.join('\n'));
     const delta = this.cfg.board?.renderSince(this.initialBoardRev, this.cfg.scope);
-    if (delta) parts.push(`### 新增共享结论\n${delta}`);
+    if (delta) parts.push(`### New Board Findings\n${delta}`);
     if (this.cfg.followUpQuestion) {
       parts.push(
-        `### 协同追问\n${this.cfg.followUpQuestion.trim()}\n（请优先复用上方「历史步骤」中已明确以 key=value 记录的精确结论与公式直接作答；若追问涉及的新标识符/下标未在摘要中以精确 key=value 写出，先用 grep/read 核实该项再作答。）`,
+        `### Follow-up Question\n${this.cfg.followUpQuestion.trim()}\n(Reuse exact key=value facts and formulas already recorded in Previous Steps above if sufficient; if the follow-up asks about a new identifier/index not yet recorded as an explicit key=value in your summaries, verify it with grep/read first.)`,
       );
     }
     parts.push(FORMAT_REMINDER(state.currentStep, latest?.step));
@@ -260,6 +269,9 @@ export class AgentFoldAgent {
             p.errors.push('the <answer> contains a protocol tag; return only the answer text');
           }
         }
+        if (!forcing && p.errors.length === 0 && p.answer !== undefined && isPlaceholderAnswer(p.answer)) {
+          p.errors.push('the <answer> is empty or a verification placeholder; emit a <tool_call> to continue verifying, or output the actual final answer');
+        }
         if (p.errors.length === 0 && p.answer !== undefined) {
           const lastBlock = state.blocks[state.blocks.length - 1];
           const echo =
@@ -284,9 +296,9 @@ export class AgentFoldAgent {
         if (state.latest) state.applyFold({ range: [state.latest.step, state.latest.step], summary: fallbackSummary(state.latest) });
         state.setLatest({
           step,
-          motivation: '（无效回复）',
+          motivation: '(invalid response)',
           action: { name: 'none', arguments: {} },
-          observation: `错误：你的回复无法解析（${parsed?.errors.join('；')}）。请严格遵循回复格式。`,
+          observation: `Error: your response could not be parsed (${parsed?.errors.join('; ')}). Follow the required tag format.`,
         });
         continue;
       }
@@ -320,8 +332,8 @@ export class AgentFoldAgent {
         if (isSpecialist) {
           const answerStep = state.currentStep;
           const queryTag = this.cfg.followUpQuestion
-            ? `追问「${this.cfg.followUpQuestion.replace(/\s+/g, ' ').slice(0, 60)}」`
-            : '初始任务';
+            ? `follow-up "${this.cfg.followUpQuestion.replace(/\s+/g, ' ').slice(0, 60)}"`
+            : 'initial task';
           const cleanAns = parsed.answer.replace(/\s+/g, ' ').trim().slice(0, 600);
           state.setLatest({
             step: answerStep,
@@ -331,7 +343,7 @@ export class AgentFoldAgent {
           });
           state.applyFold({
             range: [answerStep, answerStep],
-            summary: `完成${queryTag}，结论：${cleanAns}`,
+            summary: `Completed ${queryTag}; result: ${cleanAns}`,
           });
         }
         this.emit({ type: 'answer', agent: this.name, step, answer: parsed.answer });
@@ -352,8 +364,8 @@ export class AgentFoldAgent {
     let observation: string;
     let error: string | undefined;
     if (!tool) {
-      error = `未知工具 "${name}"`;
-      observation = `错误：未知工具 "${name}"。可用工具：${[...this.toolMap.keys()].join('、')}`;
+      error = `Unknown tool "${name}"`;
+      observation = `Error: unknown tool "${name}". Available tools: ${[...this.toolMap.keys()].join(', ')}`;
     } else {
       try {
         observation = await tool.execute(args, {
@@ -369,7 +381,7 @@ export class AgentFoldAgent {
         });
       } catch (e) {
         error = (e as Error).message;
-        observation = `错误：${error}`;
+        observation = `Error: ${error}`;
       }
     }
     const { text } = truncateToTokens(observation, this.cfg.maxObservationTokens ?? DEFAULT_MAX_OBSERVATION_TOKENS, this.estimator);
@@ -380,9 +392,9 @@ export class AgentFoldAgent {
 
 export function renderLatest(i: Interaction): string {
   return [
-    `**[步骤 ${i.step}]**`,
-    `**动机：** ${i.motivation || '（无）'}`,
-    `**工具调用：** ${JSON.stringify({ name: i.action.name, arguments: i.action.arguments })}`,
-    `**工具结果：**\n${i.observation}`,
+    `**[Step ${i.step}]**`,
+    `**Motivation:** ${i.motivation || '(none)'}`,
+    `**Tool Call:** ${JSON.stringify({ name: i.action.name, arguments: i.action.arguments })}`,
+    `**Observation:**\n${i.observation}`,
   ].join('\n');
 }
