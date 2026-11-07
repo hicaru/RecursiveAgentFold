@@ -55,8 +55,8 @@ export const TOOL_GUIDANCE: Record<string, string> = Object.freeze({
     '- **search**: Free BM25 V2 ranked window retrieval (stemming, phrase bonus, query expansion, CJK n-grams). Use `search` first when locating natural-language topics, paraphrases, or multi-term concepts where exact regex is uncertain.',
   outline:
     '- **outline**: Free structural skeleton (headings, sections, definitions with line numbers). Use to map document boundaries before reading.',
-  grep: '- **grep**: Exact string/regex search across documents; returns total matching lines per doc and top matches. Set `max_matches` to 5-10 when probing or counting.',
-  read: '- **read**: Read a small, exact line window (15-40 lines) to verify a located region. Never use `read` to browse large documents.',
+  grep: '- **grep**: Exact string/regex search across stored documents or workspace paths; returns total matching lines per doc and top matches. Set `max_matches` to 5-10 when probing or counting.',
+  read: '- **read**: Read a small, exact line window (15-40 lines) from a document ID or file path to verify a located region (auto-loads workspace files if needed). Never use `read` to browse large documents from line 1.',
   tally:
     '- **tally**: Deterministic exact regex/capture-group frequency counter. Never count regex matches by hand. When a task asks for frequencies of exact given terms (e.g. lowercase words), use the exact-case counts (or set `case_sensitive: true`) rather than adding capitalized sentence-start variants.',
   branch:
@@ -67,9 +67,8 @@ export const TOOL_GUIDANCE: Record<string, string> = Object.freeze({
 /** Resolve a tool name to its TOOL_GUIDANCE key; strips a leading prefix (e.g. "raf_"). */
 function resolveToolGuidanceKey(name: string): string | undefined {
   if (name in TOOL_GUIDANCE) return name;
-  const sep = name.indexOf('_');
-  if (sep > 0) {
-    const base = name.slice(sep + 1);
+  if (name.startsWith('raf_') || name.startsWith('ref_')) {
+    const base = name.slice(4);
     if (base in TOOL_GUIDANCE) return base;
   }
   return undefined;
@@ -95,6 +94,11 @@ export function buildAgentSystemPrompt(toolNames: string[]): string {
       '- **Tool Routing Priority (Accuracy & Speed)**:',
       '  1. **0-Token Free Tools First (`search` / `grep` / `outline` / `tally`)**: If the target has literal words, names, numbers, citations, identifiers, or natural-language topics, ALWAYS use `grep`, `search`, `outline`, or `tally` first. NEVER use `llm_query` for literal/regex or BM25-searchable targets.',
       '  2. **Semantic Scan (`llm_query`)**: Use `llm_query` ONLY when no literal keyword/regex or BM25 window search applies (e.g. full-document abstract category classification with mode="extract" and `categories`, or after free search/grep tools return 0 matches).',
+      ...(toolNames.includes('bash') || toolNames.includes('pwsh')
+        ? [
+            '  3. **RAF Context Tools Over Shell (`bash`)**: Always use `search`, `outline`, `grep`, `tally`, `read`, `add_document`, `list_documents`, `branch`, and `llm_query` for reading, searching, counting, and multi-file research. Never use `bash` (`cat`, `grep`, `rg`, `find`, `head`, `tail`, `wc`, or scripts) to read or search documents.',
+          ]
+        : []),
     );
   }
   return AGENT_SYSTEM_PROMPT_TEMPLATE.replace('{{TOOL_GUIDANCE}}', `# Tool Usage\n${lines.join('\n')}`);

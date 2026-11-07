@@ -43,7 +43,7 @@ export interface RecursiveAgentFoldOptions {
   maxDepth?: number;
   rootMaxSteps?: number;
   branchMaxSteps?: number;
-  /** Prefix applied to built-in tools of the root agent (host-native tool names). */
+  /** Prefix applied to every agent's built-in tools (host-native tool names). */
   readonly toolNamePrefix?: string;
   /** Which tools to expose. Default: all available. */
   enable?: Partial<
@@ -106,16 +106,20 @@ export class RecursiveAgentFold {
   toolsFor(depth: number, ownScope?: string): Tool[] {
     const en = this.opts.enable ?? {};
     const maxDepth = this.opts.maxDepth ?? DEFAULT_MAX_DEPTH;
+    const docToolOpts: DocumentToolOptions = {
+      ...this.opts.documentTools,
+      ...(this.opts.ingest !== undefined ? { ingest: this.opts.ingest } : {}),
+    };
     const builtins: Tool[] = [];
     if (this.queryEngine) builtins.push(createLLMQueryTool(this.queryEngine));
     if (en.add_document !== false) builtins.push(createAddDocumentTool(this.opts.ingest));
-    if (en.search !== false) builtins.push(createSearchTool(this.opts.documentTools));
-    if (en.outline !== false) builtins.push(createOutlineTool(this.opts.documentTools));
-    if (en.grep !== false) builtins.push(createGrepTool(this.opts.documentTools));
-    if (en.tally !== false) builtins.push(createTallyTool());
-    if (en.read !== false) builtins.push(createReadTool(this.opts.documentTools));
+    if (en.search !== false) builtins.push(createSearchTool(docToolOpts));
+    if (en.outline !== false) builtins.push(createOutlineTool(docToolOpts));
+    if (en.grep !== false) builtins.push(createGrepTool(docToolOpts));
+    if (en.tally !== false) builtins.push(createTallyTool(docToolOpts));
+    if (en.read !== false) builtins.push(createReadTool(docToolOpts));
     if (en.list_documents !== false) {
-      builtins.push(createListDocumentsTool());
+      builtins.push(createListDocumentsTool(docToolOpts));
     }
     if (en.calculator !== false) builtins.push(createCalculatorTool());
     if (en.branch !== false && maxDepth > 0 && depth <= maxDepth) {
@@ -127,7 +131,7 @@ export class RecursiveAgentFold {
         }),
       );
     }
-    const prefix = depth === 0 ? (this.opts.toolNamePrefix ?? '') : '';
+    const prefix = this.opts.toolNamePrefix ?? '';
     const tools =
       prefix === ''
         ? builtins

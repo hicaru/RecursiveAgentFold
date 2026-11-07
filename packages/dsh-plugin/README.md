@@ -46,16 +46,16 @@ The switch also stores the last selection as the default for new Sessions:
 For a RAF Session, the plugin builds a `ContextStore` from the Session transcript and drives `@raf/engine` one step at a time:
 
 - the latest **human** message (`source.kind === 'user'`) is the question;
-- every other message — including DSH's synthetic instruction, runtime, skill, and time messages — is the document;
-- RAF's context tools are registered as native DSH tools with a `raf_` prefix: `raf_search`, `raf_outline`, `raf_grep`, `raf_read`, `raf_tally`, `raf_llm_query`, `raf_branch`, `raf_calculator`, `raf_add_document`, and `raf_list_documents`;
-- DSH coding tools keep their native names (`read`, `glob`, `grep`, `bash`, `write`, `edit`, `apply_patch`, `lsp`, `web_search`, `web_fetch`) and execute through the normal DSH pipeline, including approvals;
-- each `llm/stream` call returns one RAF step: an assistant message with reasoning and one `tool-call` block, or the final text;
+- every other message — including DSH's synthetic instruction, runtime, skill, and time messages — is the document, along with pre-indexed workspace files;
+- RAF's context tools are registered as native unprefixed DSH tools: `search`, `outline`, `grep`, `read`, `tally`, `llm_query`, `branch`, `calculator`, `add_document`, and `list_documents`;
+- every DSH tool visible to the Session agent is bridged to RAF, including third-party plugin tools (for example a custom web-search API). In RAF mode, the native `read` and `grep` tools are overridden on the agent's tool scope by RAF's `read` and `grep` (which accept standard `file_path`, `path`, `offset`, `limit` parameters and auto-ingest workspace files into `ContextStore` on demand), while competing native sub-agent tools (`subagent`, `workflow`, `ralph`, etc.) are suppressed in favor of `branch`. Other DSH tools keep their native names and execute through the normal DSH pipeline, including approvals and plugin configuration;
+- each `llm/stream` call returns one RAF step: live reasoning text followed by one `tool-call` block, or the final text;
 - the native loop writes `step/start`, `assistant/message`, `tool/call`, `tool/result`, and `step/end` itself;
 - RAF token usage is attached to each native assistant message.
 
 The engine exposes `begin(question)`, `next()`, and `submit(observation)`. `next()` returns a tool action without executing it, so the native loop executes the tool and the next `next()` receives the observation. `AgentFoldAgent.run()` is the same loop with in-process tool execution, so CLI and benchmark behavior is unchanged.
 
-Internal model calls use the Session provider and model through `ctx.llm` by default, with optional 3-tier environment overrides (`RAF_ROOT_PROVIDER`/`RAF_ROOT_MODEL`, `RAF_BRANCH_PROVIDER`/`RAF_BRANCH_MODEL`, `RAF_QUERY_PROVIDER`/`RAF_QUERY_MODEL`). Root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 4,096 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. Internal calls are tagged with an `AsyncLocalStorage` guard and a `raf-*` `purpose` value, so the listener does not intercept them again.
+Internal model calls use the Session provider and model through `ctx.llm` by default, with optional 3-tier environment overrides (`RAF_ROOT_PROVIDER`/`RAF_ROOT_MODEL`, `RAF_BRANCH_PROVIDER`/`RAF_BRANCH_MODEL`, `RAF_QUERY_PROVIDER`/`RAF_QUERY_MODEL`). Root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 16,384 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. Internal calls are tagged with an `AsyncLocalStorage` guard and a `raf-*` `purpose` value, so the listener does not intercept them again.
 
 DSH marks internal calls with `purpose` (`session-title`, `compaction`, `auto-review`, `onboarding_use_case`). The listener passes every such call through. RAF therefore never answers a title prompt or a compaction summary.
 
@@ -63,14 +63,17 @@ DSH marks internal calls with `purpose` (`session-title`, `compaction`, `auto-re
 
 RAF does not write display-only session events. The native DSH loop writes them:
 
-- the plugin returns one assistant stream per step; the loop appends `assistant/message` with reasoning and one `tool-call` block;
-- the native tool pipeline appends `tool/call` and `tool/result`;
-- Chat renders the same `Think` and tool rows it renders for the standard agent, including the running `Deep diving` status;
+- the plugin streams the RAF model's reasoning deltas into the native assistant **text** as they arrive; the current thinking is visible without opening a reasoning disclosure;
+- when the step settles, the same assistant message carries the tool-call block; the native tool pipeline appends `tool/call` and `tool/result`;
+- Chat renders the visible reasoning text and the native tool rows, including the running `Deep diving` status;
+- the native tool pipeline and session log remain the source of truth for tool rows;
 - Trajectory and Statistics read the same native log.
 
 The separate Live Dock and its `conversation.input.dock` panel are gone, and the conversation no longer adds a RAF tab. The sidebar RAF page keeps its **Inspector** tab for the detailed per-agent trace.
 
-`raf_branch` has its own native tool row: it lists every branch task (scope + instruction) and the matching subtask result. The branch child steps remain in the sidebar Inspector.
+The client sets the Chat `ui-chat` work-details mode to `verbose` on load, so completed Turns keep their tool rows open. A saved profile value remains the fallback if the Chat settings form is unavailable.
+
+`branch` (and legacy `raf_branch`) has its own native tool row: it lists every branch task (scope + instruction). Each task expands to that branch agent's live steps, tool calls, and results from the RAF run registry; when the registry is unavailable, the matching subtask result from the tool output is shown instead. The sidebar Inspector keeps the full agent tree. Start a new RAF run after a Host reload to populate the in-memory run registry.
 
 ### Diagnostic trace
 
@@ -106,7 +109,7 @@ The settings page writes `{ depth, reserve, concurrency }` to `localStorage` and
 | `sidebar.panellist` | `raf` | Sidebar entry and icon. |
 | `conversation.input.left` | `raf-engine` | Composer engine switch. |
 | `shell.overlay` | `raf-engine-menu` | Fixed engine menu above the composer. |
-| `tool.call.toolview` | `raf_branch` | Native `raf_branch` tool row. |
+| `tool.call.toolview` | `branch` (`raf_branch`) | Native `branch` tool row. |
 
 ## Install
 

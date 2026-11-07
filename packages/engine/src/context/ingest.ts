@@ -5,7 +5,7 @@
 import { existsSync, type Stats } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { defaultEstimator } from '../tokens.js';
 import { createLimiter } from '../util/concurrency.js';
 import { documentExtFromPath, getAnydoc, type AnydocHandle } from './anydoc.js';
@@ -14,6 +14,7 @@ import {
   checkPathSafety,
   enumerateFiles,
   isBinary,
+  isInsideRoot,
   isSensitivePath,
   type SkipReason,
   type SkippedFile,
@@ -41,6 +42,8 @@ export interface IngestOptions {
   readonly idPrefix?: string;
   readonly signal?: AbortSignal;
   readonly maxWalkFileBytes?: number;
+  readonly maxFiles?: number;
+  readonly skipRichDocuments?: boolean;
 }
 
 export interface IngestResult {
@@ -74,11 +77,11 @@ export function deriveSourceId(sourcePath: string, resolvedPath: string): string
   return sanitizeDocId(base);
 }
 
-function makeDocId(prefix: string | undefined, relPath: string): string {
+export function makeDocId(prefix: string | undefined, relPath: string): string {
   const cleanRel = sanitizeDocId(relPath);
   if (!prefix) return cleanRel;
   const cleanPrefix = sanitizeDocId(prefix);
-  if (cleanRel === cleanPrefix || cleanRel.startsWith(`${cleanPrefix}/`)) return cleanRel;
+  if (!cleanPrefix || cleanRel === cleanPrefix || cleanRel.startsWith(`${cleanPrefix}/`)) return cleanRel;
   return `${cleanPrefix}/${cleanRel}`;
 }
 
@@ -223,10 +226,19 @@ export async function resolveIngestSource(
     return { ok: false, error: `add_document: path not found: ${resolvedPath}` };
   }
 
-  const sourceId = opts.idPrefix ? sanitizeDocId(opts.idPrefix) : deriveSourceId(trimmed, resolvedPath);
+  const sourceId =
+    opts.idPrefix !== undefined
+      ? opts.idPrefix === ''
+        ? ''
+        : sanitizeDocId(opts.idPrefix)
+      : deriveSourceId(trimmed, resolvedPath);
 
   if (s.isDirectory()) {
-    const paths = await enumerateFiles(resolvedPath, opts.signal);
+    const allPaths = await enumerateFiles(resolvedPath, opts.signal);
+    const maxFiles = opts.maxFiles !== undefined && opts.maxFiles > 0 ? opts.maxFiles : undefined;
+    const paths = maxFiles !== undefined && allPaths.length > maxFiles ? allPaths.slice(0, maxFiles) : allPaths;
+    const overflowPaths =
+      maxFiles !== undefined && allPaths.length > maxFiles ? allPaths.slice(maxFiles) : [];
     const anydoc = await getAnydoc();
     const limit = createLimiter(INGEST_CONCURRENCY);
     const maxWalkBytes = opts.maxWalkFileBytes ?? MAX_WALK_FILE_BYTES;
@@ -254,6 +266,10 @@ export async function resolveIngestSource(
           }
           const format = anydoc?.formatFromPath(rel) ?? documentExtFromPath(rel);
           if (format !== null) {
+            if (opts.skipRichDocuments === true) {
+              drops[i] = Object.freeze({ path: docPath, reason: 'unsupported' });
+              return;
+            }
             const docRes = await documentToIngestedFile(safety.realAbs, rel, sourceId, anydoc);
             if (docRes.ok) {
               slots[i] = docRes.value;
@@ -273,7 +289,7 @@ export async function resolveIngestSource(
     );
 
     const files = new Array<IngestedFile>(n);
-    const skipped = new Array<SkippedFile>(Math.min(n, MAX_SKIPPED_REPORTED));
+    const skipped = new Array<SkippedFile>(Math.min(n + overflowPaths.length, MAX_SKIPPED_REPORTED));
     let fi = 0;
     let si = 0;
     let totalTokens = 0;
@@ -296,6 +312,12 @@ export async function resolveIngestSource(
         }
       }
     }
+    for (let i = 0; i < overflowPaths.length && si < MAX_SKIPPED_REPORTED; i++) {
+      const rel = overflowPaths[i];
+      if (rel !== undefined) {
+        skipped[si++] = Object.freeze({ path: makeDocId(sourceId, rel), reason: 'oversized' });
+      }
+    }
     files.length = fi;
     skipped.length = si;
 
@@ -316,7 +338,13 @@ export async function resolveIngestSource(
   }
 
   // Single file
-  const rel = basename(resolvedPath);
+  let rel = basename(resolvedPath);
+  if (opts.idPrefix === undefined && opts.cwd !== undefined && isInsideRoot(resolvedPath, baseCwd)) {
+    const relFromCwd = relative(baseCwd, resolvedPath);
+    if (relFromCwd !== '' && !relFromCwd.startsWith('..')) {
+      rel = relFromCwd;
+    }
+  }
   if (isSensitivePath(rel) || isSensitivePath(trimmed.replace(/^\.\//, ''))) {
     return { ok: false, error: `add_document: refused sensitive path: ${resolvedPath}` };
   }

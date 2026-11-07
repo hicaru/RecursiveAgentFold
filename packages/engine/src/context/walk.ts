@@ -104,7 +104,7 @@ function absKey(path: string): string {
   return r.length > 1 && (r.endsWith('/') || r.endsWith('\\')) ? r.slice(0, -1) : r;
 }
 
-function isInsideRoot(fileAbs: string, rootAbs: string): boolean {
+export function isInsideRoot(fileAbs: string, rootAbs: string): boolean {
   const root = absKey(rootAbs);
   const file = absKey(fileAbs);
   if (file === root) return true;

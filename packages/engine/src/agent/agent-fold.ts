@@ -599,9 +599,6 @@ export class AgentFoldAgent {
 
   /** Route an unprefixed model tool call to its prefixed twin when only that tool exists. */
   private resolveToolAction(action: ToolAction): ToolAction {
-    if (!this.toolMap.has(action.name) && this.toolMap.has(`raf_${action.name}`)) {
-      return { ...action, name: `raf_${action.name}` };
-    }
     if (
       (action.name === 'read' || action.name === 'grep') &&
       this.toolMap.has(`raf_${action.name}`) &&
@@ -610,6 +607,43 @@ export class AgentFoldAgent {
       !('path' in action.arguments)
     ) {
       return { ...action, name: `raf_${action.name}` };
+    }
+    if (this.toolMap.has(action.name)) {
+      return action;
+    }
+    const stripped = action.name.replace(/^(?:raf|ref)_/, '');
+    if (stripped !== action.name && this.toolMap.has(stripped)) {
+      return { name: stripped, arguments: action.arguments };
+    }
+    if (this.toolMap.has(`raf_${action.name}`)) {
+      return { ...action, name: `raf_${action.name}` };
+    }
+    for (const candidate of this.toolMap.keys()) {
+      if (candidate.endsWith(`_${action.name}`)) {
+        return { ...action, name: candidate };
+      }
+    }
+    if (action.name === 'subagent' || action.name === 'sub_agent' || action.name === 'task') {
+      const branchTool = this.toolMap.get('branch') ?? [...this.toolMap.keys()].find((k) => k.endsWith('_branch'));
+      const branchName = typeof branchTool === 'string' ? branchTool : branchTool?.name;
+      if (branchName !== undefined) {
+        const rawArgs = action.arguments ?? {};
+        const mappedTask =
+          typeof rawArgs.task === 'string'
+            ? rawArgs.task
+            : typeof rawArgs.prompt === 'string'
+              ? rawArgs.prompt
+              : typeof rawArgs.description === 'string'
+                ? rawArgs.description
+                : undefined;
+        return {
+          name: branchName,
+          arguments: {
+            ...rawArgs,
+            ...(mappedTask !== undefined && rawArgs.task === undefined ? { task: mappedTask } : {}),
+          },
+        };
+      }
     }
     return action;
   }

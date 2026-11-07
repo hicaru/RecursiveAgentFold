@@ -29,7 +29,7 @@ const MAX_RUNS = 30;
 const MAX_RUN_EVENTS = 5000;
 const RAF_ROOT_MAX_STEPS = 32;
 const RAF_ROOT_MAX_OUTPUT = 16000;
-const RAF_QUERY_MAX_OUTPUT = 4096;
+const RAF_QUERY_MAX_OUTPUT = 16384;
 
 export const inject = ['agents', 'llm', 'tools'];
 
@@ -236,8 +236,10 @@ function mapUsage(usage) {
   const inputTokens = typeof source.inputTokens === 'number' ? source.inputTokens : 0;
   const outputTokens = typeof source.outputTokens === 'number' ? source.outputTokens : 0;
   const cachedTokens = typeof source.cacheReadTokens === 'number' ? source.cacheReadTokens : 0;
+  const cacheWriteTokens = typeof source.cacheWriteTokens === 'number' ? source.cacheWriteTokens : 0;
   return {
-    promptTokens: inputTokens,
+    // DSH reports uncached input, cache reads, and cache writes separately; engine prompt counts are totals.
+    promptTokens: inputTokens + cachedTokens + cacheWriteTokens,
     completionTokens: outputTokens,
     cachedTokens,
   };
@@ -287,6 +289,7 @@ class DshLlmClient {
     this.reasoningEffort = reasoningEffort;
     this.provider = target?.provider ?? outer.provider;
     this.model = target?.model ?? outer.model;
+    this.onDelta = undefined;
   }
 
   async complete(request) {
@@ -319,7 +322,10 @@ class DshLlmClient {
       for await (const chunk of this.ctx.llm.stream(options)) {
         if (chunk === null || typeof chunk !== 'object') continue;
         if (chunk.type === 'text-delta') text += chunk.text;
-        else if (chunk.type === 'reasoning-delta') reasoning += chunk.text;
+        else if (chunk.type === 'reasoning-delta') {
+          reasoning += chunk.text;
+          if (typeof this.onDelta === 'function') this.onDelta(chunk.text);
+        }
         else if (chunk.type === 'usage') usage = chunk.usage;
         else if (chunk.type === 'finish') {
           finishKind = chunk.reason?.kind;
@@ -370,10 +376,43 @@ function sanitizeRunEvent(event) {
 }
 
 
-const RAF_DSH_TOOLS = Object.freeze(
-  new Set(['read', 'glob', 'grep', 'bash', 'write', 'edit', 'apply_patch', 'lsp', 'web_search', 'web_fetch']),
+const RAF_BUILTIN_TOOL_NAMES = Object.freeze(
+  new Set([
+    'llm_query',
+    'add_document',
+    'search',
+    'outline',
+    'grep',
+    'tally',
+    'read',
+    'list_documents',
+    'calculator',
+    'branch',
+  ]),
+);
+
+// Native DSH tools superseded by RAF's ContextStore tools and scoped branch specialists.
+const RAF_REPLACED_DSH_TOOLS = Object.freeze(
+  new Set([
+    'read',
+    'grep',
+    'subagent',
+    'list_subagent_models',
+    'list_agents',
+    'send_message',
+    'interrupt_agent',
+    'workflow',
+    'ralph',
+    'spawn_teammate',
+    'wait_agent',
+    'team_task_create',
+    'team_task_list',
+    'team_task_get',
+    'team_task_update',
+  ]),
 );
 function contentText(blocks) {
+
   if (!Array.isArray(blocks)) return '';
   const parts = [];
   for (const block of blocks) {
@@ -451,7 +490,10 @@ function createDshTools(ctx, sessionId, signal, sessionState) {
     if (definition === null || typeof definition !== 'object') continue;
     if (typeof definition.name !== 'string' || typeof definition.execute !== 'function') continue;
     if (definition.deferLoading === true) continue;
-    if (!RAF_DSH_TOOLS.has(definition.name)) continue;
+    // RAF's own tools are registered natively; every other visible DSH tool is bridged.
+    if (definition.name.startsWith('raf_') || definition.name.startsWith('ref_')) continue;
+    if (RAF_BUILTIN_TOOL_NAMES.has(definition.name)) continue;
+    if (RAF_REPLACED_DSH_TOOLS.has(definition.name)) continue;
     extra.push({
       name: definition.name,
       description: definition.description,
@@ -616,12 +658,13 @@ function addUsage(left, right) {
 }
 
 function stepUsageChunk(usage) {
+  const cached = usage.cachedTokens > usage.promptTokens ? usage.promptTokens : usage.cachedTokens;
   return {
     type: 'usage',
     usage: {
-      inputTokens: usage.promptTokens,
+      inputTokens: Math.max(0, usage.promptTokens - cached),
       outputTokens: usage.completionTokens,
-      cacheReadTokens: usage.cachedTokens,
+      cacheReadTokens: cached,
       totalTokens: usage.promptTokens + usage.completionTokens,
     },
   };
@@ -682,12 +725,66 @@ function registerRafTools(toolsCtx, raf, state) {
     queryLLM: templateLlm,
     store: new raf.ContextStore(),
     maxDepth: DEPTH_MAX,
-    toolNamePrefix: 'raf_',
   });
   const disposers = [];
+  const perAgentDefinitions = [];
+  const agentOverrideDisposers = new WeakMap();
+  const trackedAgents = new Set();
+
+  function syncAgentOverrides(agent) {
+    if (agent === null || typeof agent !== 'object') return;
+    const sessionId = agent.session?.id ?? agent.id;
+    const isRaf = typeof sessionId === 'string' && engineOf(state, sessionId) === ENGINE_RAF;
+    const existing = agentOverrideDisposers.get(agent);
+    if (!isRaf) {
+      if (existing !== undefined) {
+        for (const dispose of existing) {
+          try {
+            dispose();
+          } catch {
+            // Ignore teardown errors.
+          }
+        }
+        agentOverrideDisposers.delete(agent);
+      }
+      trackedAgents.delete(agent);
+      return;
+    }
+    if (existing !== undefined) return;
+    const scopedTools = agent.ctx?.tools ?? agent.ctx?.get?.('tools');
+    if (scopedTools === undefined || typeof scopedTools.register !== 'function') return;
+    const agentDisposers = [];
+    for (const definition of perAgentDefinitions) {
+      try {
+        agentDisposers.push(scopedTools.register(definition));
+      } catch {
+        // Ignore if already registered in this agent scope.
+      }
+    }
+    if (agentDisposers.length > 0) {
+      agentOverrideDisposers.set(agent, agentDisposers);
+      trackedAgents.add(agent);
+    }
+  }
+
+  function syncAllAgents() {
+    try {
+      const agents = typeof toolsCtx.get === 'function' ? toolsCtx.get('agents') : undefined;
+      const list = typeof agents?.list === 'function' ? agents.list() : [];
+      if (Array.isArray(list)) {
+        for (const agent of list) syncAgentOverrides(agent);
+      }
+    } catch {
+      // Ignore if agents service is not ready.
+    }
+  }
+
   try {
+    const whenRaf = ({ agent }) => {
+      const sessionId = agent?.session?.id ?? agent?.id;
+      return typeof sessionId === 'string' && engineOf(state, sessionId) === ENGINE_RAF;
+    };
     for (const tool of template.toolsFor(0)) {
-      if (!tool.name.startsWith('raf_')) continue;
       const definition = {
         name: tool.name,
         description: tool.description,
@@ -701,7 +798,7 @@ function registerRafTools(toolsCtx, raf, state) {
           const sessionId = agent?.session?.id ?? agent?.id;
           const turn = typeof sessionId === 'string' ? activeTurns.get(sessionId) : undefined;
           if (turn === undefined) throw new Error(`RAF turn is not active for ${tool.name}`);
-          const live = turn.tools.get(tool.name);
+          const live = turn.tools.get(tool.name) ?? turn.tools.get(tool.name.replace(/^(?:raf|ref)_/, ''));
           if (live === undefined) throw new Error(`RAF tool ${tool.name} is not available`);
           const before = turn.engine.usage.total();
           const observation = await live.execute(args ?? {}, {
@@ -728,14 +825,24 @@ function registerRafTools(toolsCtx, raf, state) {
           return observation;
         },
       };
-      disposers.push(
-        toolsCtx.tools.register(definition, {
-          when: ({ agent }) => {
-            const sessionId = agent?.session?.id ?? agent?.id;
-            return typeof sessionId === 'string' && engineOf(state, sessionId) === ENGINE_RAF;
-          },
-        }),
-      );
+      if (RAF_REPLACED_DSH_TOOLS.has(tool.name)) {
+        perAgentDefinitions.push(definition);
+      }
+      try {
+        const disp = toolsCtx.tools.register(definition, { when: whenRaf });
+        if (typeof disp === 'function') disposers.push(disp);
+      } catch {
+        if (!perAgentDefinitions.includes(definition)) {
+          perAgentDefinitions.push(definition);
+        }
+      }
+    }
+    syncAllAgents();
+    if (typeof toolsCtx.on === 'function') {
+      const offCreated = toolsCtx.on('agent/created', (ev) => syncAgentOverrides(ev?.agent));
+      if (typeof offCreated === 'function') disposers.push(offCreated);
+      const offClaimed = toolsCtx.on('agent/inbox/claimed', (ev) => syncAgentOverrides(ev?.agent));
+      if (typeof offClaimed === 'function') disposers.push(offClaimed);
     }
   } catch (error) {
     for (const dispose of disposers) {
@@ -747,7 +854,21 @@ function registerRafTools(toolsCtx, raf, state) {
     }
     throw error;
   }
-  return () => {
+  const teardown = () => {
+    for (const agent of trackedAgents) {
+      const list = agentOverrideDisposers.get(agent);
+      if (list !== undefined) {
+        for (const dispose of list) {
+          try {
+            dispose();
+          } catch {
+            // Ignore teardown failures.
+          }
+        }
+        agentOverrideDisposers.delete(agent);
+      }
+    }
+    trackedAgents.clear();
     for (const dispose of disposers) {
       try {
         dispose();
@@ -756,6 +877,8 @@ function registerRafTools(toolsCtx, raf, state) {
       }
     }
   };
+  teardown.syncAllAgents = syncAllAgents;
+  return teardown;
 }
 
 const sessionStates = new Map();
@@ -774,6 +897,7 @@ function getSessionState(sessionId, raf) {
       board: new raf.ResearchBoard(),
       docs: new Map(),
       sources: new Set(),
+      workspaceIngested: false,
     };
     sessionStates.set(key, state);
   }
@@ -787,9 +911,24 @@ function sameTurn(turn, position, human, messages) {
   return toolResultFor(messages, turn.pendingCallId) !== undefined || turn.pendingObservation !== undefined;
 }
 
+function workspaceOf(ctx, session) {
+  try {
+    const workingDirectory = ctx.get('workingDirectory');
+    if (session !== undefined && workingDirectory !== undefined && typeof workingDirectory.get === 'function') {
+      const current = workingDirectory.get(session);
+      if (typeof current === 'string' && current !== '') return current;
+    }
+  } catch {
+    // Fall back to the original Session project.
+  }
+  if (session !== undefined && typeof session.header?.cwd === 'string' && session.header.cwd !== '') return session.header.cwd;
+  return process.cwd();
+}
+
 async function ensureTurn(ctx, outer, settings, runs, raf) {
   const session = getLiveSession(ctx, outer.sessionId);
   const position = session === undefined ? undefined : sessionPosition(session);
+  const workspace = workspaceOf(ctx, session);
   const messages = Array.isArray(outer.messages) ? outer.messages : [];
   const human = latestHumanMessage(messages);
   const existing = activeTurns.get(outer.sessionId);
@@ -834,6 +973,41 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
       }
     }
   };
+  if (!sessionState.workspaceIngested && typeof workspace === 'string' && workspace !== '') {
+    sessionState.workspaceIngested = true;
+    try {
+      const res = await store.addPath(workspace, {
+        cwd: workspace,
+        idPrefix: '',
+        maxFiles: 300,
+        skipRichDocuments: true,
+        signal: outer.signal,
+      });
+      persistIngested(res);
+      sessionState.sources.add(workspace);
+    } catch {
+      // Non-fatal if workspace is empty or inaccessible.
+    }
+  }
+  const promptPaths =
+    typeof raf.extractPromptPaths === 'function' ? raf.extractPromptPaths(effectiveQuestion, workspace) : [];
+  for (const promptPath of promptPaths) {
+    if (sessionState.sources.has(promptPath)) continue;
+    try {
+      const res = await store.addPath(promptPath, { cwd: workspace, signal: outer.signal });
+      persistIngested(res);
+      sessionState.sources.add(promptPath);
+      sessionState.board.record({
+        agent: 'root',
+        kind: 'tool',
+        scope: res.sourceId,
+        key: `add_document:${res.sourceId}`,
+        summary: `Loaded ${res.files.length} document(s) (~${res.totalTokens.toLocaleString('en-US')} tokens) under prefix "${res.sourceId}" from ${res.resolvedPath}`,
+      });
+    } catch (error) {
+      console.error('RAF: cannot auto-ingest prompt path', promptPath, error);
+    }
+  }
   const run = runs.create({
     sessionId: outer.sessionId,
     model: `${outer.provider}/${outer.model}`,
@@ -868,7 +1042,12 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     queryLLM,
     store,
     board: sessionState.board,
-    ingest: { cwd: process.cwd(), onIngest: persistIngested },
+    ingest: { cwd: workspace, onIngest: persistIngested },
+    documentTools: {
+      maxReadLines: 120,
+      maxReadTokens: 4000,
+      maxGrepMatches: 60,
+    },
     maxDepth: settings.depth,
     agent: { temperature: 0 },
     llmQuery: {
@@ -881,28 +1060,14 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     extraTools,
     signal: outer.signal,
     onEvent: turn.emit,
-    toolNamePrefix: 'raf_',
   });
   turn.engine = engine;
-  turn.tools = new Map(engine.toolsFor(0).map((tool) => [tool.name, tool]));
-  const promptPaths =
-    typeof raf.extractPromptPaths === 'function' ? raf.extractPromptPaths(effectiveQuestion, process.cwd()) : [];
-  for (const promptPath of promptPaths) {
-    if (sessionState.sources.has(promptPath)) continue;
-    try {
-      const res = await store.addPath(promptPath, { cwd: process.cwd(), signal: outer.signal });
-      persistIngested(res);
-      sessionState.sources.add(promptPath);
-      sessionState.board.record({
-        agent: 'root',
-        kind: 'tool',
-        scope: res.sourceId,
-        key: `add_document:${res.sourceId}`,
-        summary: `Loaded ${res.files.length} document(s) (~${res.totalTokens.toLocaleString('en-US')} tokens) under prefix "${res.sourceId}" from ${res.resolvedPath}`,
-      });
-    } catch (error) {
-      console.error('RAF: cannot auto-ingest prompt path', promptPath, error);
-    }
+  turn.rootLLM = rootLLM;
+  turn.tools = new Map();
+  for (const tool of engine.toolsFor(0)) {
+    turn.tools.set(tool.name, tool);
+    turn.tools.set(`raf_${tool.name}`, tool);
+    turn.tools.set(`ref_${tool.name}`, tool);
   }
   engine.begin(effectiveQuestion);
   activeTurns.set(outer.sessionId, turn);
@@ -917,42 +1082,6 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     activeTurns.delete(oldest);
   }
   return turn;
-}
-
-function* toolStepChunks(step, callId) {
-  let index = 0;
-  const reasoning = (typeof step.reasoning === 'string' ? step.reasoning : '').trim() || step.motivation;
-  if (reasoning !== '') {
-    yield { type: 'block-start', index, blockType: 'reasoning' };
-    yield { type: 'reasoning-delta', index, text: reasoning };
-    yield { type: 'block-end', index, block: { type: 'reasoning', text: reasoning } };
-    index += 1;
-  }
-  const args = JSON.stringify(step.action.arguments ?? {});
-  yield { type: 'block-start', index, blockType: 'tool-call' };
-  yield { type: 'tool-call-delta', index, id: callId, name: step.action.name, argumentsDelta: args };
-  yield { type: 'block-end', index, block: { type: 'tool-call', id: callId, name: step.action.name, arguments: args } };
-  yield stepUsageChunk(step.usage);
-  yield { type: 'finish', reason: { kind: 'stop' } };
-}
-
-function* answerStepChunks(step) {
-  let index = 0;
-  const reasoning = typeof step.reasoning === 'string' ? step.reasoning.trim() : '';
-  if (reasoning !== '') {
-    yield { type: 'block-start', index, blockType: 'reasoning' };
-    yield { type: 'reasoning-delta', index, text: reasoning };
-    yield { type: 'block-end', index, block: { type: 'reasoning', text: reasoning } };
-    index += 1;
-  }
-  const text = typeof step.answer === 'string' ? step.answer : '';
-  if (text !== '') {
-    yield { type: 'block-start', index, blockType: 'text' };
-    yield { type: 'text-delta', index, text };
-    yield { type: 'block-end', index, block: { type: 'text', text } };
-  }
-  if (step.usage !== undefined) yield stepUsageChunk(step.usage);
-  yield { type: 'finish', reason: { kind: 'stop' } };
 }
 
 async function* rafStream(ctx, outer, settings, runs) {
@@ -977,28 +1106,115 @@ async function* rafStream(ctx, outer, settings, runs) {
       turn.pendingObservation = undefined;
       turn.pendingAction = undefined;
     }
-    const step = await turn.engine.next();
+    let liveText = '';
+    let liveOpen = false;
+    let stepResult;
+    let stepFailure;
+    let stepDone = false;
+    let wake = null;
+    const pendingDeltas = [];
+    const notify = () => {
+      if (wake !== null) {
+        const resolve = wake;
+        wake = null;
+        resolve();
+      }
+    };
+    turn.rootLLM.onDelta = (text) => {
+      if (typeof text !== 'string' || text === '') return;
+      pendingDeltas.push(text);
+      notify();
+    };
+    const stepPromise = turn.engine
+      .next()
+      .then(
+        (step) => {
+          stepResult = step;
+        },
+        (error) => {
+          stepFailure = error;
+        },
+      )
+      .finally(() => {
+        stepDone = true;
+        turn.rootLLM.onDelta = undefined;
+        notify();
+      });
+    while (!stepDone || pendingDeltas.length > 0) {
+      if (pendingDeltas.length === 0) {
+        await new Promise((resolve) => {
+          wake = resolve;
+        });
+        continue;
+      }
+      const text = pendingDeltas.shift();
+      if (!liveOpen) {
+        yield { type: 'block-start', index: 0, blockType: 'text' };
+        liveOpen = true;
+      }
+      liveText += text;
+      yield { type: 'text-delta', index: 0, text };
+    }
+    await stepPromise;
+    if (stepFailure !== undefined) throw stepFailure;
+    const step = stepResult;
+    if (step === undefined) throw new Error('RAF step produced no result');
     if (turn.pendingToolUsage !== undefined && step.kind !== 'done') {
       step.usage = addUsage(step.usage, turn.pendingToolUsage);
       turn.pendingToolUsage = undefined;
+    }
+    const reasoningFallback = typeof step.reasoning === 'string' ? step.reasoning.trim() : '';
+    const motivation = step.kind === 'tool' && typeof step.motivation === 'string' ? step.motivation.trim() : '';
+    const visible = [
+      liveText.trim() !== '' ? liveText.trim() : reasoningFallback,
+      motivation !== '' ? `→ ${motivation}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+    let index = 0;
+    if (liveOpen) {
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: visible } };
+      index = 1;
+    } else if (visible !== '') {
+      yield { type: 'block-start', index: 0, blockType: 'text' };
+      yield { type: 'text-delta', index: 0, text: visible };
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: visible } };
+      index = 1;
     }
     if (step.kind === 'tool') {
       const callId = randomUUID();
       turn.pendingCallId = callId;
       turn.pendingAction = step.action;
       turn.step = step.step;
-      yield* toolStepChunks(step, callId);
+      const args = JSON.stringify(step.action.arguments ?? {});
+      yield { type: 'block-start', index, blockType: 'tool-call' };
+      yield { type: 'tool-call-delta', index, id: callId, name: step.action.name, argumentsDelta: args };
+      yield { type: 'block-end', index, block: { type: 'tool-call', id: callId, name: step.action.name, arguments: args } };
+      if (step.usage !== undefined) yield stepUsageChunk(step.usage);
+      yield { type: 'finish', reason: { kind: 'stop' } };
       return;
     }
     if (step.kind === 'answer') {
-      yield* answerStepChunks(step);
+      const answer = typeof step.answer === 'string' ? step.answer : '';
+      if (answer !== '') {
+        yield { type: 'block-start', index, blockType: 'text' };
+        yield { type: 'text-delta', index, text: answer };
+        yield { type: 'block-end', index, block: { type: 'text', text: answer } };
+      }
+      if (step.usage !== undefined) yield stepUsageChunk(step.usage);
+      yield { type: 'finish', reason: { kind: 'stop' } };
       finishRun(turn, step.result, outer.signal);
     } else {
       const answer =
         typeof step.result.answer === 'string' && step.result.answer !== ''
           ? step.result.answer
           : (step.result.error ?? 'RAF engine returned no answer.');
-      yield* answerStepChunks({ reasoning: undefined, answer });
+      if (answer !== '') {
+        yield { type: 'block-start', index, blockType: 'text' };
+        yield { type: 'text-delta', index, text: answer };
+        yield { type: 'block-end', index, block: { type: 'text', text: answer } };
+      }
+      yield { type: 'finish', reason: { kind: 'stop' } };
       finishRun(turn, step.result, outer.signal);
     }
     turn.finished = true;
@@ -1062,6 +1278,7 @@ export function apply(ctx) {
 
   ctx.effect(() => () => activeTurns.clear(), 'raf: active turns');
 
+  let syncAgentTools = () => {};
   ctx.effect(() => {
     let dispose = () => {};
     let cancelled = false;
@@ -1070,6 +1287,9 @@ export function apply(ctx) {
         if (cancelled) return;
         try {
           dispose = registerRafTools(ctx, raf, state);
+          if (typeof dispose.syncAllAgents === 'function') {
+            syncAgentTools = dispose.syncAllAgents;
+          }
         } catch (error) {
           console.error('RAF: cannot register native tools', error);
         }
@@ -1079,6 +1299,7 @@ export function apply(ctx) {
       });
     return () => {
       cancelled = true;
+      syncAgentTools = () => {};
       dispose();
     };
   }, 'raf: native tools');
@@ -1146,6 +1367,7 @@ export function apply(ctx) {
                   throw new Error('sessionId is required to switch the engine');
                 }
                 setEngine(state, payload.sessionId, payload.engine);
+                syncAgentTools();
               }
               if (payload.settings !== undefined) {
                 state.settings = sanitizeSettings(payload.settings);

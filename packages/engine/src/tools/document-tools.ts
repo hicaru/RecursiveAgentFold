@@ -1,6 +1,6 @@
-import type { IngestResult } from '../context/ingest.js';
+import { sanitizeDocId, type IngestResult } from '../context/ingest.js';
 import { defaultEstimator, truncateToTokens } from '../tokens.js';
-import { argNumber, argString, argStringList, ToolArgumentError, type Tool } from './types.js';
+import { argNumber, argString, argStringList, ToolArgumentError, type Tool, type ToolContext } from './types.js';
 
 export interface AddDocumentToolOptions {
   readonly cwd?: string;
@@ -13,15 +13,102 @@ export interface DocumentToolOptions {
   readonly maxReadTokens?: number;
   /** Max matching lines listed by grep. Default 25. */
   readonly maxGrepMatches?: number;
+  readonly ingest?: AddDocumentToolOptions;
 }
 
-export const DEFAULT_DOCUMENT_TOOL_OPTIONS: Readonly<Required<DocumentToolOptions>> = Object.freeze({
+export const DEFAULT_DOCUMENT_TOOL_OPTIONS: Readonly<Required<Omit<DocumentToolOptions, 'ingest'>>> = Object.freeze({
   maxReadLines: 80,
   maxReadTokens: 2400,
   maxGrepMatches: 25,
 });
 
-export function createListDocumentsTool(): Tool {
+async function ensureTargetIds(
+  rawTarget: string,
+  ctx: ToolContext,
+  ingest?: AddDocumentToolOptions,
+): Promise<string[]> {
+  const existing = ctx.store.resolveIds(rawTarget);
+  if (existing.length > 0) return existing;
+  try {
+    const res = await ctx.store.addPath(rawTarget, {
+      ...(ingest?.cwd !== undefined ? { cwd: ingest.cwd } : {}),
+      ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
+    });
+    ingest?.onIngest?.(res);
+    const sourceKey = res.sourceId || sanitizeDocId(rawTarget);
+    ctx.board?.record({
+      agent: ctx.agentName,
+      kind: 'tool',
+      scope: sourceKey,
+      key: `add_document:${sourceKey}`,
+      summary: `Loaded ${res.files.length} document(s) (~${res.totalTokens.toLocaleString('en-US')} tokens) under prefix "${sourceKey}" from ${res.resolvedPath}`,
+    });
+    return res.files.map((f) => f.id);
+  } catch {
+    return ctx.store.resolveIds(rawTarget);
+  }
+}
+
+async function ensureTargetsFromArgs(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+  ingest?: AddDocumentToolOptions,
+): Promise<string[] | undefined> {
+  const rawDocs = argStringList(args, 'documents') ?? [];
+  const rawPath =
+    argString(args, 'document', false) ??
+    argString(args, 'path', false) ??
+    argString(args, 'file_path', false);
+  const targets: string[] = [];
+  for (let i = 0; i < rawDocs.length; i++) {
+    const d = rawDocs[i]?.trim();
+    if (d) targets.push(d);
+  }
+  if (rawPath && rawPath.trim() !== '' && !targets.includes(rawPath.trim())) {
+    targets.push(rawPath.trim());
+  }
+  if (targets.length === 0) {
+    if (ingest?.cwd !== undefined && ctx.store.list().every((d) => d.id === 'session')) {
+      try {
+        const res = await ctx.store.addPath(ingest.cwd, {
+          cwd: ingest.cwd,
+          idPrefix: '',
+          maxFiles: 300,
+          skipRichDocuments: true,
+          ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
+        });
+        ingest.onIngest?.(res);
+      } catch {
+        // Ignore if workspace directory has no ingestible files.
+      }
+    }
+    return undefined;
+  }
+  const seen = new Set<string>();
+  const resolved: string[] = [];
+  for (let i = 0; i < targets.length; i++) {
+    const t = targets[i];
+    if (!t) continue;
+    const ids = await ensureTargetIds(t, ctx, ingest);
+    if (ids.length === 0) {
+      if (!seen.has(t)) {
+        seen.add(t);
+        resolved.push(t);
+      }
+    } else {
+      for (let j = 0; j < ids.length; j++) {
+        const id = ids[j];
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          resolved.push(id);
+        }
+      }
+    }
+  }
+  return resolved;
+}
+
+export function createListDocumentsTool(opts: DocumentToolOptions = {}): Tool {
   return {
     name: 'list_documents',
     description: 'List stored documents (id, title, token count, line count), optionally filtered by id prefix.',
@@ -33,6 +120,9 @@ export function createListDocumentsTool(): Tool {
       },
     },
     async execute(args, ctx) {
+      if (opts.ingest?.cwd !== undefined && ctx.store.list().every((d) => d.id === 'session')) {
+        await ensureTargetsFromArgs({}, ctx, opts.ingest);
+      }
       const prefixRaw = argString(args, 'prefix', false)?.trim();
       const limitRaw = argNumber(args, 'limit');
       if (!prefixRaw && limitRaw === undefined) {
@@ -167,6 +257,7 @@ export function createSearchTool(opts: DocumentToolOptions = {}): Tool {
       properties: {
         query: { type: 'string', description: 'Natural-language or keyword query.' },
         documents: { type: 'array', items: { type: 'string' }, description: 'Document ids (default: all).' },
+        path: { type: 'string', description: 'Optional file or directory path/prefix to search (auto-loaded if needed).' },
         k: { type: 'integer', description: 'Number of top windows to return (default 10, max 30).' },
       },
       required: ['query'],
@@ -175,7 +266,7 @@ export function createSearchTool(opts: DocumentToolOptions = {}): Tool {
       const query = (argString(args, 'query') ?? '').trim();
       if (!query) throw new ToolArgumentError('search requires a non-empty "query" string.');
       const k = Math.max(1, Math.min(30, Math.floor(argNumber(args, 'k') ?? 10)));
-      const docIds = argStringList(args, 'documents');
+      const docIds = await ensureTargetsFromArgs(args, ctx, opts.ingest);
       const hits = ctx.store.search(query, {
         ...(docIds !== undefined ? { docIds } : {}),
         k,
@@ -206,29 +297,32 @@ export function createOutlineTool(opts: DocumentToolOptions = {}): Tool {
       type: 'object',
       properties: {
         document: { type: 'string', description: 'Document id (default: all documents).' },
+        path: { type: 'string', description: 'Alias for document: file or directory path to outline.' },
+        file_path: { type: 'string', description: 'Alias for document: file path to outline.' },
         max_entries: { type: 'integer', description: 'Max structural entries to return (default 60, max 200).' },
       },
     },
     async execute(args, ctx) {
-      const docId = argString(args, 'document');
+      const targetIds = await ensureTargetsFromArgs(args, ctx, opts.ingest);
       const maxEntries = Math.max(1, Math.min(200, Math.floor(argNumber(args, 'max_entries') ?? 60)));
       const maxTokens = opts.maxReadTokens ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxReadTokens;
-      if (docId) {
-        const r = ctx.store.outline(docId, { maxEntries });
+      if (targetIds !== undefined && targetIds.length === 1) {
+        const singleId = targetIds[0] ?? '';
+        const r = ctx.store.outline(singleId, { maxEntries });
         const body = r.entries.map((e) => `L${e.line}: ${e.text}`).join('\n');
         return truncateToTokens(
           `outline ${r.docId} (${r.totalLines} lines, ${r.entries.length} entries):\n${body}`,
           maxTokens,
         ).text;
       }
-      const docs = ctx.store.list();
-      if (docs.length === 0) return '(no documents loaded)';
-      const perDocMax = Math.max(15, Math.floor(maxEntries / docs.length));
+      const ids = targetIds ?? ctx.store.list().map((d) => d.id);
+      if (ids.length === 0) return '(no documents loaded)';
+      const perDocMax = Math.max(15, Math.floor(maxEntries / ids.length));
       const sections: string[] = [];
-      for (let i = 0; i < docs.length; i++) {
-        const d = docs[i];
-        if (!d) continue;
-        const r = ctx.store.outline(d.id, { maxEntries: perDocMax });
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i];
+        if (!id) continue;
+        const r = ctx.store.outline(id, { maxEntries: perDocMax });
         const body = r.entries.map((e) => `  L${e.line}: ${e.text}`).join('\n');
         sections.push(`outline ${r.docId} (${r.totalLines} lines, ${r.entries.length} entries):\n${body}`);
       }
@@ -247,6 +341,7 @@ export function createGrepTool(opts: DocumentToolOptions = {}): Tool {
       properties: {
         pattern: { type: 'string', description: 'JavaScript regular expression.' },
         documents: { type: 'array', items: { type: 'string' }, description: 'Document ids (default: all).' },
+        path: { type: 'string', description: 'Optional file or directory path/prefix to search (auto-loaded if needed).' },
         case_sensitive: { type: 'boolean', default: false },
         max_matches: { type: 'integer', description: `Max matching lines to list (default ${opts.maxGrepMatches ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxGrepMatches}, max 100).` },
       },
@@ -260,8 +355,9 @@ export function createGrepTool(opts: DocumentToolOptions = {}): Tool {
         throw new ToolArgumentError(`Invalid regex: ${(e as Error).message}`);
       }
       const max = Math.min(100, argNumber(args, 'max_matches') ?? opts.maxGrepMatches ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxGrepMatches);
+      const docIds = await ensureTargetsFromArgs(args, ctx, opts.ingest);
       const r = ctx.store.grep(pattern, {
-        docIds: argStringList(args, 'documents'),
+        docIds,
         ignoreCase: args.case_sensitive !== true,
         maxMatches: max,
       });
@@ -275,7 +371,7 @@ export function createGrepTool(opts: DocumentToolOptions = {}): Tool {
   };
 }
 
-export function createTallyTool(): Tool {
+export function createTallyTool(opts: DocumentToolOptions = {}): Tool {
   return {
     name: 'tally',
     description:
@@ -285,6 +381,7 @@ export function createTallyTool(): Tool {
       properties: {
         pattern: { type: 'string', description: 'JavaScript regex, optionally with one capture group.' },
         documents: { type: 'array', items: { type: 'string' } },
+        path: { type: 'string', description: 'Optional file or directory path/prefix to tally.' },
         case_sensitive: { type: 'boolean', default: false },
         top: { type: 'integer', description: 'Max distinct values to list (default 25, max 200).' },
       },
@@ -298,14 +395,15 @@ export function createTallyTool(): Tool {
         throw new ToolArgumentError(`Invalid regex: ${(e as Error).message}`);
       }
       const top = Math.min(200, argNumber(args, 'top') ?? 25);
-      const r = ctx.store.tally(pattern, { docIds: argStringList(args, 'documents'), ignoreCase: args.case_sensitive !== true });
+      const docIds = await ensureTargetsFromArgs(args, ctx, opts.ingest);
+      const r = ctx.store.tally(pattern, { docIds, ignoreCase: args.case_sensitive !== true });
       if (ctx.board) {
         const topCounts: Record<string, number> = {};
         for (const [k, n] of r.counts.slice(0, 10)) topCounts[k] = n;
         ctx.board.record({
           agent: ctx.agentName,
           kind: 'tally',
-          scope: (argStringList(args, 'documents') ?? ['all']).join(','),
+          scope: (docIds ?? ['all']).join(','),
           key: pattern,
           summary: `/${pattern}/ → ${r.totalMatches} matches, ${r.distinct} distinct: ` +
             r.counts.slice(0, 5).map(([k, n]) => `${k}=${n}`).join(', '),
@@ -339,25 +437,55 @@ export function createTallyTool(): Tool {
 
 export function createReadTool(opts: DocumentToolOptions = {}): Tool {
   const maxLines = opts.maxReadLines ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxReadLines;
+  const maxTokens = opts.maxReadTokens ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxReadTokens;
   return {
     name: 'read',
-    description: `Read an exact line range from a stored document (up to ${maxLines} lines per call). Use to verify regions located by grep or llm_query.`,
+    description:
+      `Read a line range from a document or workspace file (up to ${maxLines} lines and ~${maxTokens} tokens per call). ` +
+      'Accepts "document" or "file_path"/"path" (auto-loads workspace files into ContextStore if needed), with "start_line"/"end_line" or "offset"/"limit".',
     parameters: {
       type: 'object',
       properties: {
-        document: { type: 'string' },
-        start_line: { type: 'integer', description: '1-based inclusive start line.' },
-        end_line: { type: 'integer', description: '1-based inclusive end line.' },
+        document: { type: 'string', description: 'Document ID or workspace file path to read.' },
+        file_path: { type: 'string', description: 'Alias for document: workspace file path to read.' },
+        path: { type: 'string', description: 'Alias for document: workspace file path to read.' },
+        start_line: { type: 'integer', description: '1-based inclusive start line (default 1).' },
+        end_line: { type: 'integer', description: `1-based inclusive end line (default start_line + 39, max ${maxLines} lines per call).` },
+        offset: { type: 'integer', description: 'Alias for start_line: 1-based first line to read.' },
+        limit: { type: 'integer', description: `Alias for line count: number of lines to read (capped at ${maxLines}).` },
       },
-      required: ['document', 'start_line', 'end_line'],
+      required: [],
     },
     async execute(args, ctx) {
-      const doc = argString(args, 'document') ?? '';
-      const s = Math.max(1, Math.floor(argNumber(args, 'start_line') ?? 1));
-      const requestedEnd = Math.floor(argNumber(args, 'end_line') ?? s + maxLines - 1);
+      const rawDoc = (
+        argString(args, 'document', false) ??
+        argString(args, 'file_path', false) ??
+        argString(args, 'path', false)
+      )?.trim();
+      if (!rawDoc) {
+        throw new ToolArgumentError('Missing or invalid string argument "document" (or "file_path" / "path")');
+      }
+      const s = Math.max(1, Math.floor(argNumber(args, 'start_line') ?? argNumber(args, 'offset') ?? 1));
+      const limit = argNumber(args, 'limit');
+      const defaultWindow = Math.min(40, maxLines);
+      const requestedEnd = Math.floor(
+        argNumber(args, 'end_line') ??
+          (limit !== undefined ? s + Math.max(1, limit) - 1 : s + defaultWindow - 1),
+      );
       const cappedEnd = Math.min(requestedEnd, s + maxLines - 1);
-      const r = ctx.store.read(doc, s, cappedEnd);
-      const maxTokens = opts.maxReadTokens ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxReadTokens;
+      let docId = ctx.store.resolveId(rawDoc);
+      if (docId === undefined) {
+        const ids = await ensureTargetIds(rawDoc, ctx, opts.ingest);
+        if (ids.length === 1) {
+          docId = ids[0];
+        } else if (ids.length > 1) {
+          return `Loaded ${ids.length} documents from directory "${rawDoc}": ${ids.slice(0, 20).join(', ')}${ids.length > 20 ? ` ... (+${ids.length - 20} more)` : ''}. Call outline, search, grep, or read on a specific document ID.`;
+        } else {
+          docId = rawDoc;
+        }
+      }
+      const targetDoc = docId ?? rawDoc;
+      const r = ctx.store.read(targetDoc, s, cappedEnd);
       const rawLines = r.text ? r.text.split('\n') : [];
       const keptLines: string[] = [];
       let usedTokens = 40;
@@ -385,7 +513,7 @@ export function createReadTool(opts: DocumentToolOptions = {}): Tool {
         notes.push(`capped to ${maxLines} lines`);
       }
       const noteStr = notes.length > 0 ? ` (${notes.join('; ')})` : '';
-      const header = `${doc} lines ${r.startLine}-${actualEnd} of ${r.totalLines}${noteStr}`;
+      const header = `${targetDoc} lines ${r.startLine}-${actualEnd} of ${r.totalLines}${noteStr}`;
       return keptLines.length > 0 ? `${header}\n${keptLines.join('\n')}` : header;
     },
   };

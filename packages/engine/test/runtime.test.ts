@@ -1537,4 +1537,204 @@ describe('externally driven step API', () => {
     expect(branchTool?.childAgentIds.length).toBe(1);
     expect(branchTool?.childAgentIds[0]).toBe(sub?.id);
   });
+
+  it('read overrides accept standard DSH parameters (file_path, offset, limit) and auto-ingest missing workspace files on the fly', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'raf-auto-ingest-read-'));
+    try {
+      await mkdir(join(tmpDir, 'src'), { recursive: true });
+      await writeFile(
+        join(tmpDir, 'src/service.ts'),
+        [
+          'export const EXPORT_TOKEN = "ORION-9000";',
+          'export function getToken(): string {',
+          '  return EXPORT_TOKEN;',
+          '}',
+          'export const VERSION = 42;',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const store = new ContextStore();
+      const llm = new ScriptedLLM((_req, idx) =>
+        idx === 0
+          ? '<motivation>Read src/service.ts using standard DSH read arguments</motivation><tool_call>{"name":"read","arguments":{"file_path":"src/service.ts","offset":1,"limit":3}}</tool_call>'
+          : '<folding>{"range":[0,0],"summary":"src/service.ts defines EXPORT_TOKEN = ORION-9000"}</folding><motivation>Done</motivation><answer>ORION-9000</answer>',
+      );
+      const raf = new RecursiveAgentFold({
+        rootLLM: llm,
+        store,
+        ingest: { cwd: tmpDir },
+        maxDepth: 0,
+      });
+
+      const res = await raf.run('What is EXPORT_TOKEN in src/service.ts?');
+      expect(res.answer).toBe('ORION-9000');
+      expect(store.has('src/service.ts')).toBe(true);
+      const readTool = raf.toolsFor(0).find((t) => t.name === 'read');
+      const out = await readTool?.execute(
+        { file_path: 'src/service.ts', offset: 1, limit: 2 },
+        { store, usage: raf.usage, depth: 0, agentName: 'root', step: 0, emit: () => {}, board: raf.board },
+      );
+      expect(out).toContain('src/service.ts lines 1-2 of 5');
+      expect(out).toContain('1| export const EXPORT_TOKEN = "ORION-9000";');
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('grep, outline, search, and tally accept path parameter and auto-ingest workspace files/directories', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'raf-auto-ingest-dir-'));
+    try {
+      await mkdir(join(tmpDir, 'src'), { recursive: true });
+      await writeFile(
+        join(tmpDir, 'src/service.ts'),
+        [
+          'export const EXPORT_TOKEN = "ORION-9000";',
+          'export function computeAlpha(): number {',
+          '  return 77;',
+          '}',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const store = new ContextStore();
+      const llm = new ScriptedLLM(() => '<answer>ok</answer>');
+      const raf = new RecursiveAgentFold({
+        rootLLM: llm,
+        store,
+        ingest: { cwd: tmpDir },
+        maxDepth: 0,
+      });
+      const ctx = { store, usage: raf.usage, depth: 0, agentName: 'root', step: 0, emit: () => {}, board: raf.board };
+      const tools = new Map(raf.toolsFor(0).map((t) => [t.name, t]));
+
+      const grepOut = await tools.get('grep')?.execute({ pattern: 'EXPORT_TOKEN', path: 'src' }, ctx);
+      expect(grepOut).toContain('src/service.ts:1| export const EXPORT_TOKEN = "ORION-9000";');
+
+      const outlineOut = await tools.get('outline')?.execute({ path: 'src/service.ts' }, ctx);
+      expect(outlineOut).toContain('L2: export function computeAlpha(): number {');
+
+      const searchOut = await tools.get('search')?.execute({ query: 'computeAlpha', path: 'src/service.ts' }, ctx);
+      expect(searchOut).toContain('src/service.ts:L1-4');
+
+      const tallyOut = await tools.get('tally')?.execute({ pattern: 'export (const|function)', path: 'src' }, ctx);
+      expect(tallyOut).toContain('1\tconst');
+      expect(tallyOut).toContain('1\tfunction');
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('AgentFoldAgent resolves accidental raf_/ref_ prefixes and subagent/task aliases to unprefixed RAF tools', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'raf-prefix-resolve-'));
+    try {
+      await writeFile(join(tmpDir, 'notes.md'), '# Notes\nSECRET_KEY = 31415\n', 'utf8');
+      const store = new ContextStore();
+      const root = new ScriptedLLM((req) => {
+        const user = req.messages[1]?.content ?? '';
+        const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+        if (step === 0) {
+          return `<motivation>Load notes.md via accidental ref_add_document prefix</motivation><tool_call>${JSON.stringify({
+            name: 'ref_add_document',
+            arguments: { path: 'notes.md' },
+          })}</tool_call>`;
+        }
+        if (step === 1) {
+          return `<motivation>Read notes.md via accidental raf_read prefix</motivation><tool_call>${JSON.stringify({
+            name: 'raf_read',
+            arguments: { file_path: 'notes.md', offset: 1, limit: 5 },
+          })}</tool_call>`;
+        }
+        if (step === 2) {
+          return `<folding>{"range":[0,1],"summary":"Loaded and read notes.md"}</folding><motivation>Delegate via subagent alias</motivation><tool_call>${JSON.stringify({
+            name: 'subagent',
+            arguments: { scope: 'notes.md', prompt: 'Verify SECRET_KEY in notes.md' },
+          })}</tool_call>`;
+        }
+        return '<folding>{"range":[2,2],"summary":"Verified SECRET_KEY = 31415"}</folding><motivation>Done</motivation><answer>31415</answer>';
+      });
+      const branch = new ScriptedLLM(() => '<motivation>Return verified key</motivation><answer>SECRET_KEY = 31415</answer>');
+      const events: AgentEvent[] = [];
+      const raf = new RecursiveAgentFold({
+        rootLLM: root,
+        branchLLM: branch,
+        store,
+        ingest: { cwd: tmpDir },
+        onEvent: (ev) => events.push(ev),
+      });
+
+      const res = await raf.run('Find SECRET_KEY');
+      expect(res.answer).toBe('31415');
+      const calledNames = events
+        .filter((e): e is Extract<AgentEvent, { type: 'tool_call' }> => e.type === 'tool_call' && e.agent === 'root')
+        .map((e) => e.action.name);
+      expect(calledNames).toEqual(['add_document', 'read', 'branch']);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('buildRunModel in client.js links child specialist agents to unprefixed branch tool calls', async () => {
+    const store = new ContextStore();
+    store.add('NOVA_KEY = 88', { id: 'pkg/nova.ts' });
+
+    const root = new ScriptedLLM((req) => {
+      const user = req.messages[1]?.content ?? '';
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+      if (step === 0) {
+        return `<motivation>Delegate pkg/nova.ts to a specialist</motivation><tool_call>${JSON.stringify({
+          name: 'branch',
+          arguments: { scope: 'pkg/nova.ts', task: 'Read NOVA_KEY in pkg/nova.ts' },
+        })}</tool_call>`;
+      }
+      return '<folding>{"range":[0,0],"summary":"NOVA_KEY = 88."}</folding><motivation>Done</motivation><answer>NOVA_KEY = 88</answer>';
+    });
+
+    const branch = new ScriptedLLM(() => '<motivation>Answer</motivation><answer>NOVA_KEY = 88</answer>');
+    const rawEvents: Array<{ seq: number; at: number; event: AgentEvent }> = [];
+    const raf = new RecursiveAgentFold({
+      rootLLM: root,
+      branchLLM: branch,
+      store,
+      onEvent: (event) => {
+        rawEvents.push({ seq: rawEvents.length + 1, at: Date.now(), event });
+      },
+    });
+
+    const res = await raf.run('Read NOVA_KEY');
+    expect(res.answer).toBe('NOVA_KEY = 88');
+
+    const buildRunModel = await loadClientBuildRunModel();
+    const model = buildRunModel({
+      id: 'run-unprefixed',
+      status: 'done',
+      startedAt: Date.now() - 1000,
+      endedAt: Date.now(),
+      events: rawEvents,
+    });
+    expect(model.agents.length).toBe(2);
+    const rootAgent = model.agents[0];
+    const sub = model.agents[1];
+    const branchTool = rootAgent?.steps[0]?.tools.find((tool) => tool.name === 'branch');
+    expect(branchTool?.childAgentIds).toEqual([sub?.id]);
+  });
+});
+
+describe('host tool-name prefix', () => {
+  it('prefixes built-in tools at every depth so branch agents cannot shadow native names', () => {
+    const store = new ContextStore();
+    const llm = new ScriptedLLM(() => '<answer>ok</answer>');
+    const raf = new RecursiveAgentFold({
+      rootLLM: llm,
+      store,
+      maxDepth: 2,
+      toolNamePrefix: 'raf_',
+    });
+    const rootNames = raf.toolsFor(0).map((tool) => tool.name);
+    const branchNames = raf.toolsFor(1).map((tool) => tool.name);
+    expect(rootNames).toContain('raf_read');
+    expect(branchNames).toContain('raf_read');
+    expect(branchNames).toContain('raf_branch');
+    expect(branchNames).not.toContain('read');
+  });
 });

@@ -1,6 +1,6 @@
 import { CharRatioEstimator, defaultEstimator, type TokenEstimator } from '../tokens.js';
 import { Bm25DocumentIndex, type SearchOptions, type SearchWindowHit } from './bm25.js';
-import { resolveIngestSource, type IngestOptions, type IngestResult } from './ingest.js';
+import { resolveIngestSource, sanitizeDocId, type IngestOptions, type IngestResult } from './ingest.js';
 
 export const VALID_DOC_ID_RE = /^[A-Za-z0-9_.\-]+(?:\/[A-Za-z0-9_.\-]+)*$/;
 const MAX_MANIFEST_DOCS = 200;
@@ -145,8 +145,44 @@ export class ContextStore {
     return this.docs.has(id);
   }
 
+  /** Resolve a raw document identifier, relative path, or unambiguous suffix to a stored document ID. */
+  resolveId(raw: string): string | undefined {
+    const trimmed = raw.trim().replace(/^\.\/+|^\/+/, '');
+    if (!trimmed) return undefined;
+    if (this.docs.has(trimmed)) return trimmed;
+    const clean = sanitizeDocId(trimmed);
+    if (this.docs.has(clean)) return clean;
+    for (const doc of this.docs.values()) {
+      if (doc.title === trimmed || sanitizeDocId(doc.title) === clean) return doc.id;
+    }
+    const suffixMatches: string[] = [];
+    for (const doc of this.docs.values()) {
+      if (doc.id.endsWith(`/${clean}`) || clean.endsWith(`/${doc.id}`)) {
+        suffixMatches.push(doc.id);
+      }
+    }
+    return suffixMatches.length === 1 ? suffixMatches[0] : undefined;
+  }
+
+  /** Resolve a document ID, path, or directory prefix to one or more stored document IDs. */
+  resolveIds(raw: string): string[] {
+    const single = this.resolveId(raw);
+    if (single !== undefined) return [single];
+    const clean = sanitizeDocId(raw.trim().replace(/^\.\/+|^\/+/, ''));
+    if (!clean) return [];
+    const prefix = `${clean}/`;
+    const matches: string[] = [];
+    for (const doc of this.docs.values()) {
+      if (doc.id.startsWith(prefix)) matches.push(doc.id);
+    }
+    return matches;
+  }
+
   get(id: string): StoredDocument {
-    const d = this.docs.get(id);
+    const direct = this.docs.get(id);
+    if (direct) return direct;
+    const resolvedId = this.resolveId(id);
+    const d = resolvedId !== undefined ? this.docs.get(resolvedId) : undefined;
     if (!d) throw new Error(`Unknown document "${id}". Available: ${[...this.docs.keys()].join(', ') || '(none)'}`);
     return d;
   }

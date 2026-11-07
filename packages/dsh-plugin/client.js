@@ -1233,9 +1233,7 @@ window.__ModuleLoader__.load({
     }
 
     function baseToolName(name) {
-      return typeof name === 'string' && (name.startsWith('raf_') || name.startsWith('dsh_'))
-        ? name.slice(4)
-        : String(name ?? '');
+      return typeof name === 'string' ? name.replace(/^(?:raf|ref|dsh)_/, '') : String(name ?? '');
     }
 
     function toolBadge(name) {
@@ -2366,20 +2364,60 @@ window.__ModuleLoader__.load({
       return text.trim();
     }
 
-    /** Native tool row for raf_branch: lists every branch task and its result. */
+    function runHasBranch(run, args) {
+      if (run === null || typeof run !== 'object' || args === null) return true;
+      const target = JSON.stringify(args);
+      for (const entry of Array.isArray(run.events) ? run.events : []) {
+        const event = entry === null || typeof entry !== 'object' ? undefined : entry.event;
+        if (
+          event !== null &&
+          typeof event === 'object' &&
+          event.type === 'tool_call' &&
+          event.agent === 'root' &&
+          event.action?.name === 'raf_branch' &&
+          JSON.stringify(event.action.arguments ?? null) === target
+        ) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function findBranchAgent(agents, task, index) {
+      const scoped = task.scope === '' ? [] : agents.filter((agent) => agent.scope === task.scope);
+      const pool = scoped.length > 0 ? scoped : agents;
+      const text = task.task;
+      const byText = pool.find((agent) => {
+        if (typeof agent.question !== 'string' || agent.question === '') return false;
+        return (
+          agent.question === text ||
+          agent.question.includes(text.slice(0, 80)) ||
+          text.includes(agent.question.slice(0, 80))
+        );
+      });
+      return byText ?? pool[index];
+    }
+
+    /** Native tool row for raf_branch: per-task disclosure with live child steps. */
     function RafBranchToolView(props) {
       const t = typeof props.t === 'function' ? props.t : (key) => key;
       const [expanded, setExpanded] = React.useState(() => {
         const initial = props.block;
         return !(props.phase === 'result' || (initial !== null && typeof initial === 'object' && 'kind' in initial));
       });
+      const [openTasks, setOpenTasks] = React.useState(() => new Set());
+      const [openSteps, setOpenSteps] = React.useState(() => new Set());
+      const [openTools, setOpenTools] = React.useState(() => new Set());
+      const [run, setRun] = React.useState(null);
       const block = props.block;
       const done = block !== null && typeof block === 'object' && 'kind' in block;
       const phase = props.phase !== undefined ? props.phase : done ? 'result' : block?.phase;
       const argsRaw = done ? block.call?.argsRaw ?? '' : block?.argsRaw ?? '';
-      const tasks = branchTasksOf(parseBranchArgs(argsRaw));
+      const args = parseBranchArgs(argsRaw);
+      const tasks = branchTasksOf(args);
       const result = done ? branchResultText(block) : '';
       const perTask = done ? splitBranchResults(result) : new Map();
+      const sessionId = typeof props.rafSessionId === 'string' ? props.rafSessionId : '';
       const state = done
         ? block.error?.code === 'interrupted'
           ? 'stopped'
@@ -2389,20 +2427,48 @@ window.__ModuleLoader__.load({
         : phase === 'preparing'
           ? 'preparing'
           : 'running';
+
+      React.useEffect(() => {
+        if (sessionId === '') return undefined;
+        let active = true;
+        let timer = 0;
+        let attempts = 0;
+        const load = async () => {
+          attempts += 1;
+          try {
+            const runs = await getRuns(sessionId);
+            if (!active) return;
+            const latest = Array.isArray(runs) ? runs[0] : undefined;
+            if (latest === undefined) {
+              if (attempts < 10) timer = window.setTimeout(load, 3000);
+              return;
+            }
+            const detail = await getRun(latest.id);
+            if (!active) return;
+            setRun(runHasBranch(detail, args) ? detail : null);
+            if (!done && latest.status === 'running') timer = window.setTimeout(load, 800);
+          } catch {
+            if (active && attempts < 10) timer = window.setTimeout(load, done ? 5000 : 2000);
+          }
+        };
+        void load();
+        return () => {
+          active = false;
+          if (timer !== 0) window.clearTimeout(timer);
+        };
+      }, [sessionId, done, argsRaw]);
+
+      const model = React.useMemo(() => (run === null ? null : buildRunModel(run)), [run]);
+      const branchAgents = model === null ? [] : model.agents.filter((agent) => agent.depth === 1);
+      const agentById = React.useMemo(() => new Map((model?.agents ?? []).map((agent) => [agent.id, agent])), [model]);
+
       const scopes = [];
       for (const task of tasks) {
         if (task.scope !== '' && !scopes.includes(task.scope)) scopes.push(task.scope);
       }
-      const countLabel = tasks.length > 0 ? `${t('tool.branch.tasks')}: ${tasks.length}` : '';
-      const stateLabel =
-        state === 'error'
-          ? t('tool.branch.failed')
-          : state === 'stopped'
-            ? t('tool.branch.stopped')
-            : !done
-              ? t('tool.branch.running')
-              : '';
-      const summary = [countLabel, ...scopes, stateLabel].filter(Boolean).join(' · ');
+      const countLabel =
+        tasks.length > 0 ? `${t('tool.branch.tasks')}: ${tasks.length}` : phase === 'preparing' ? t('tool.branch.running') : '';
+      const summary = [countLabel, ...scopes].filter(Boolean).join(' · ');
       const expandable = tasks.length > 0 || result !== '';
       const open = expanded && expandable;
       const toggle = () => {
@@ -2413,6 +2479,30 @@ window.__ModuleLoader__.load({
           event.preventDefault();
           toggle();
         }
+      };
+      const toggleTask = (index) => {
+        setOpenTasks((current) => {
+          const next = new Set(current);
+          if (next.has(index)) next.delete(index);
+          else next.add(index);
+          return next;
+        });
+      };
+      const toggleStep = (key) => {
+        setOpenSteps((current) => {
+          const next = new Set(current);
+          if (next.has(key)) next.delete(key);
+          else next.add(key);
+          return next;
+        });
+      };
+      const toggleTool = (key) => {
+        setOpenTools((current) => {
+          const next = new Set(current);
+          if (next.has(key)) next.delete(key);
+          else next.add(key);
+          return next;
+        });
       };
       return h(
         'div',
@@ -2443,20 +2533,54 @@ window.__ModuleLoader__.load({
               'div',
               { className: 'rafx-branchBody' },
               tasks.map((task, index) => {
+                const agent = findBranchAgent(branchAgents, task, index);
                 const taskResult = perTask.get(index);
                 const cleanedResult = taskResult === undefined ? undefined : cleanBranchResult(taskResult, task.task);
+                const taskOpen = openTasks.has(index);
+                const stage =
+                  agent === undefined
+                    ? ''
+                    : agent.currentStage || (agent.status === 'running' ? t('tool.branch.running') : agent.status === 'done' ? t('tool.branch.done') : '');
                 return h(
                   'div',
                   { className: 'rafx-branchTaskWrap', key: `branch-task:${index}` },
                   h(
-                    'div',
-                    { className: 'rafx-branchTask' },
-                    h('span', { className: 'rafx-branchTaskNo' }, `#${index + 1}`),
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'rafx-branchTaskHead',
+                      'aria-expanded': taskOpen,
+                      onClick: () => toggleTask(index),
+                    },
+                    h('span', { className: 'rafx-branchTaskChevron', 'aria-hidden': true }, taskOpen ? '▾' : '▸'),
+                    h('span', { className: 'rafx-branchTaskNo' }, `#${index}`),
                     task.scope !== '' ? h('span', { className: 'rafx-branchScope' }, task.scope) : null,
                     h('span', { className: 'rafx-branchTaskText' }, task.task),
+                    stage !== '' ? h('span', { className: 'rafx-branchTaskStage' }, stage) : null,
                   ),
-                  cleanedResult !== undefined && cleanedResult !== ''
-                    ? h('div', { className: 'rafx-branchTaskResult' }, cleanedResult)
+                  taskOpen
+                    ? h(
+                        'div',
+                        { className: 'rafx-branchTaskBody' },
+                        agent !== undefined && agent.steps.length > 0
+                          ? agent.steps.map((step) => {
+                              const stepKey = `${agent.id}:${step.index}`;
+                              return h(RunStep, {
+                                key: stepKey,
+                                t,
+                                step,
+                                open: openSteps.has(stepKey) || step === agent.steps[agent.steps.length - 1],
+                                onToggleStep: () => toggleStep(stepKey),
+                                openTools,
+                                onToggleTool: toggleTool,
+                                agentById,
+                                onOpenAgent: () => {},
+                              });
+                            })
+                          : cleanedResult !== undefined && cleanedResult !== ''
+                            ? h('div', { className: 'rafx-branchTaskResult' }, cleanedResult)
+                            : h('div', { className: 'rafx-branchTaskEmpty' }, t('tool.branch.noSteps')),
+                      )
                     : null,
                 );
               }),
@@ -2499,18 +2623,43 @@ window.__ModuleLoader__.load({
       ctx.effect(() => ctx.locale.register(NS, { en: EN, ru: RU }), 'raf: dictionaries');
       const t = ctx.locale.bind(NS);
 
+      ctx.inject(['configForms'], (scope) => {
+        try {
+          const chatSettings = scope.configForms?.get?.('ui-chat');
+          if (chatSettings === undefined || typeof chatSettings.set !== 'function') return;
+          const current = chatSettings.getSnapshot?.().value?.transcriptView;
+          if (current !== 'verbose') void chatSettings.set('transcriptView', 'verbose').catch(() => {});
+        } catch {
+          // Chat settings are optional; the native selector still works.
+        }
+      });
+
       ctx.effect(
         () =>
-          ctx.slots.inject('tool.call.toolview', () =>
-            ctx.slots.register(
+          ctx.slots.inject('tool.call.toolview', () => {
+            const offBranch = ctx.slots.register(
+              {
+                name: 'tool.call.toolview',
+                key: 'branch',
+                locale: NS,
+                inject: (sessionId) => ({ rafSessionId: sessionId }),
+              },
+              RafBranchToolView,
+            );
+            const offLegacy = ctx.slots.register(
               {
                 name: 'tool.call.toolview',
                 key: 'raf_branch',
                 locale: NS,
+                inject: (sessionId) => ({ rafSessionId: sessionId }),
               },
               RafBranchToolView,
-            ),
-          ),
+            );
+            return () => {
+              if (typeof offBranch === 'function') offBranch();
+              if (typeof offLegacy === 'function') offLegacy();
+            };
+          }),
         'raf: branch tool view',
       );
 
