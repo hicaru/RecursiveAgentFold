@@ -21,6 +21,12 @@ export interface AgentFoldConfig {
   readonly minDeepFoldBlocks?: number;
   /** Re-ask the model when its response cannot be parsed. */
   maxFormatRetries?: number;
+  /** Maximum invalid responses before the step fails (default 3). */
+  maxInvalidSteps?: number;
+  /** Wall-clock budget for one engine step. Omit to disable. */
+  maxStepMs?: number;
+  /** Provider-reported reasoning budget for one call. Omit to disable. */
+  maxReasoningTokens?: number;
   /** After maxSteps, ask once more for a final answer instead of failing. */
   forceAnswerOnLimit?: boolean;
   /** Recursion depth (root = 0). */
@@ -151,7 +157,10 @@ export type AgentStep =
       motivation: string;
       reasoning?: string;
       text: string;
+      /** Sum over every attempt in this engine step. */
       usage: LLMUsage;
+      /** Usage of the last completed attempt; use this for context pressure. */
+      lastUsage?: LLMUsage;
     }
   | {
       kind: 'answer';
@@ -159,7 +168,10 @@ export type AgentStep =
       answer: string;
       reasoning?: string;
       text: string;
+      /** Sum over every attempt in this engine step. */
       usage: LLMUsage;
+      /** Usage of the last completed attempt; use this for context pressure. */
+      lastUsage?: LLMUsage;
       result: AgentRunResult;
     }
   | { kind: 'done'; result: AgentRunResult };
@@ -183,15 +195,21 @@ export class AgentFoldAgent {
   private readonly initialBoardRev: number;
   private readonly initialBoardSnapshot: string | undefined;
   private readonly initialManifest: string;
-  private readonly initialDocIds: ReadonlySet<string>;
+  private readonly initialManifestDocIds: ReadonlySet<string>;
   private currentTaskQuestion = '';
   private state: FoldState = new FoldState();
   private startStep = 0;
   private runQuestion = '';
   private formatIssues = 0;
+  private invalidSteps = 0;
   private verificationNudged = false;
   private pending: { step: number; motivation: string; action: ToolAction } | undefined;
   private stepUsage: LLMUsage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
+  private stepLastUsage: LLMUsage | undefined;
+  private stepTimer: ReturnType<typeof setTimeout> | undefined;
+  private stepSignal: AbortSignal | undefined;
+  private stepOuterAbort: (() => void) | undefined;
+  private stepDeadlineStep: number | undefined;
   private started = false;
   private finished = false;
   private inProcessRun = false;
@@ -214,7 +232,13 @@ export class AgentFoldAgent {
           ? cfg.board.renderSettled()
           : undefined;
     this.initialManifest = cfg.initialManifest ?? cfg.store.manifest();
-    this.initialDocIds = new Set(cfg.initialDocIds ?? cfg.store.list().map((d) => d.id));
+    const suppliedDocIds = cfg.initialDocIds === undefined ? undefined : new Set(cfg.initialDocIds);
+    this.initialManifestDocIds = new Set(
+      cfg.store
+        .listManifest()
+        .filter((doc) => suppliedDocIds === undefined || suppliedDocIds.has(doc.id))
+        .map((doc) => doc.id),
+    );
   }
   private emit(e: AgentEvent) {
     this.cfg.onEvent?.(e);
@@ -237,7 +261,48 @@ export class AgentFoldAgent {
     return this.cfg.maxSteps ?? 100;
   }
 
+  private clearStepTimer(): void {
+    if (this.stepTimer !== undefined) {
+      clearTimeout(this.stepTimer);
+      this.stepTimer = undefined;
+    }
+    this.stepDeadlineStep = undefined;
+    this.stepSignal = undefined;
+    this.stepOuterAbort?.();
+    this.stepOuterAbort = undefined;
+  }
+
+  /** Arm one wall-clock budget for the current engine step. */
+  private armStepTimeout(step: number): AbortSignal | undefined {
+    const maxStepMs = this.cfg.maxStepMs;
+    if (maxStepMs === undefined || !Number.isFinite(maxStepMs) || maxStepMs <= 0) return this.cfg.signal;
+    if (this.stepDeadlineStep === step && this.stepSignal !== undefined) return this.stepSignal;
+    this.clearStepTimer();
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort(new Error(`step timeout after ${maxStepMs} ms`));
+    }, maxStepMs);
+    timer.unref();
+    this.stepTimer = timer;
+    this.stepDeadlineStep = step;
+    const outer = this.cfg.signal;
+    if (outer === undefined) {
+      this.stepSignal = controller.signal;
+      return this.stepSignal;
+    }
+    if (outer.aborted) {
+      controller.abort(outer.reason);
+    } else {
+      const onOuterAbort = () => controller.abort(outer.reason);
+      outer.addEventListener('abort', onOuterAbort, { once: true });
+      this.stepOuterAbort = () => outer.removeEventListener('abort', onOuterAbort);
+    }
+    this.stepSignal = controller.signal;
+    return this.stepSignal;
+  }
+
   private addStepUsage(usage: LLMUsage): void {
+    this.stepLastUsage = usage;
     this.stepUsage = {
       promptTokens: this.stepUsage.promptTokens + usage.promptTokens,
       completionTokens: this.stepUsage.completionTokens + usage.completionTokens,
@@ -246,6 +311,11 @@ export class AgentFoldAgent {
         ? { reasoningTokens: (this.stepUsage.reasoningTokens ?? 0) + (usage.reasoningTokens ?? 0) }
         : {}),
     };
+  }
+
+  /** Current fold state snapshot for host-side persistence. */
+  snapshot(): FoldStateSnapshot | undefined {
+    return this.started ? this.state.snapshot() : undefined;
   }
 
   /** Build C_t = (Q, T, S, I). Exposed for tests and cache analysis. */
@@ -273,18 +343,29 @@ export class AgentFoldAgent {
     parts.push(taskBlock, prev.join('\n'));
     const delta = this.cfg.board?.renderSince(this.initialBoardRev, this.cfg.scope);
     if (delta) parts.push(`### New Board Findings\n${delta}`);
-    const allDocs = this.cfg.store.list();
-    if (allDocs.length > this.initialDocIds.size) {
+    const allDocs = this.cfg.store.listManifest();
+    if (allDocs.length > this.initialManifestDocIds.size) {
       const newDocIds: string[] = [];
       for (let i = 0; i < allDocs.length; i++) {
         const doc = allDocs[i];
-        if (doc && !this.initialDocIds.has(doc.id)) {
+        if (doc && !this.initialManifestDocIds.has(doc.id)) {
           newDocIds.push(doc.id);
         }
       }
       if (newDocIds.length > 0) {
         parts.push(`### Newly Added Documents\n${this.cfg.store.manifestFor(newDocIds)}`);
       }
+    }
+    const storedReports = this.cfg.store.list().filter((doc) => !doc.manifest);
+    if (storedReports.length > 0) {
+      const lines = storedReports
+        .slice(0, 50)
+        .map(
+          (doc) =>
+            `- id: \`${doc.id}\` — ${doc.title} — ~${doc.tokens.toLocaleString('en-US')} tokens, ${doc.lines.length.toLocaleString('en-US')} lines`,
+        );
+      if (storedReports.length > 50) lines.push(`... and ${storedReports.length - 50} more stored reports`);
+      parts.push(`### Stored Reports\n${lines.join('\n')}`);
     }
     if (this.cfg.followUpQuestion) {
       parts.push(
@@ -309,6 +390,9 @@ export class AgentFoldAgent {
     this.verificationNudged = false;
     this.pending = undefined;
     this.stepUsage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
+    this.stepLastUsage = undefined;
+    this.invalidSteps = 0;
+    this.clearStepTimer();
     this.finished = false;
     this.started = true;
     this.inProcessRun = false;
@@ -332,6 +416,7 @@ export class AgentFoldAgent {
     if (!this.started) throw new Error('AgentFoldAgent.next() called before begin()');
     if (this.finished && this.runResult !== undefined) return { kind: 'done', result: this.runResult };
     const step = this.state.currentStep;
+    const stepSignal = this.armStepTimeout(step);
     const forcing = step - this.startStep >= this.maxSteps;
     if (forcing && !(this.cfg.forceAnswerOnLimit ?? true)) {
       return {
@@ -346,7 +431,10 @@ export class AgentFoldAgent {
     let stepReasoning: string | undefined;
     let tail: string | undefined = forcing ? FORCE_ANSWER : undefined;
     const maxRetries = this.cfg.maxFormatRetries ?? 2;
-    if (!keepStepUsage) this.stepUsage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
+    if (!keepStepUsage) {
+      this.stepUsage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
+      this.stepLastUsage = undefined;
+    }
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       const messages = this.buildMessages(this.runQuestion, this.state, tail);
       if (attempt === 0) {
@@ -362,8 +450,9 @@ export class AgentFoldAgent {
       let text: string;
       let reasoning: string | undefined;
       let truncatedReasoning = false;
+      let reasoningOverBudget = false;
       try {
-        const res = await this.cfg.llm.complete({ messages, temperature: this.cfg.temperature, signal: this.cfg.signal, purpose: this.role });
+        const res = await this.cfg.llm.complete({ messages, temperature: this.cfg.temperature, signal: stepSignal, purpose: this.role });
         this.usage.record(this.role, res.usage, res.latencyMs);
         this.addStepUsage(res.usage);
         this.emit({
@@ -382,9 +471,12 @@ export class AgentFoldAgent {
         reasoning = res.reasoning;
         if (reasoning !== undefined) stepReasoning = reasoning;
         outputTruncated = res.finishReason === 'length' || res.finishReason === 'max-tokens';
+        const reasoningTokens = res.usage.reasoningTokens ?? 0;
+        reasoningOverBudget =
+          this.cfg.maxReasoningTokens !== undefined && reasoningTokens > this.cfg.maxReasoningTokens;
         truncatedReasoning =
           text.trim() === '' &&
-          (res.finishReason === 'length' || (res.usage.reasoningTokens ?? 0) >= 8000);
+          (outputTruncated || reasoningTokens >= 8000 || reasoningOverBudget);
         if (text.trim() === '' && reasoning && /<\s*(?:answer|tool_call)\b/i.test(reasoning)) {
           const tagMatch = /<\s*(?:folding|folded_output|fold|motivation|tool_call|answer)\b/i.exec(reasoning);
           if (tagMatch) {
@@ -407,6 +499,12 @@ export class AgentFoldAgent {
         };
       }
       const p = parseAgentResponse(text, { expectFolding, reasoning });
+      if (outputTruncated && p.answer === undefined && p.toolCall !== undefined) {
+        p.errors.push('the <tool_call> hit the output token limit; split it into smaller steps');
+      }
+      if (this.cfg.maxReasoningTokens !== undefined && p.answer === undefined && reasoningOverBudget) {
+        p.errors.push(`reasoning budget exceeded; keep internal thinking under ${this.cfg.maxReasoningTokens} tokens`);
+      }
       if (forcing && !p.answer && p.errors.length === 0 && p.toolCall) p.errors.push('a final <answer> is required now');
       if (p.errors.length === 0 && p.answer !== undefined) {
         const answerOpen = /<\s*answer\b/i.test(text);
@@ -463,7 +561,7 @@ export class AgentFoldAgent {
       }
       this.formatIssues++;
       this.emit({ type: 'format_error', agent: this.name, step, errors: p.errors, attempt, raw: text.slice(0, 4000) });
-      tail = [forcing ? FORCE_ANSWER : undefined, FORMAT_REPAIR(p.errors, step, this.state.latest?.step, truncatedReasoning)].filter(Boolean).join('\n\n');
+      tail = [forcing ? FORCE_ANSWER : undefined, FORMAT_REPAIR(p.errors, step, this.state.latest?.step, truncatedReasoning || reasoningOverBudget)].filter(Boolean).join('\n\n');
       parsed = p;
     }
     if (!parsed || parsed.errors.length) {
@@ -480,6 +578,7 @@ export class AgentFoldAgent {
             ...(stepReasoning !== undefined ? { reasoning: stepReasoning } : {}),
             text: lastRawText,
             usage: this.stepUsage,
+            ...(this.stepLastUsage !== undefined ? { lastUsage: this.stepLastUsage } : {}),
             result,
           };
         }
@@ -490,6 +589,19 @@ export class AgentFoldAgent {
             steps: Math.max(0, step - this.startStep),
             terminated: 'max_steps',
             error: parsed?.errors.join('; '),
+          }),
+        };
+      }
+      this.invalidSteps += 1;
+      const maxInvalidSteps = this.cfg.maxInvalidSteps ?? 3;
+      if (this.invalidSteps > maxInvalidSteps) {
+        return {
+          kind: 'done',
+          result: this.finalize({
+            answer: null,
+            steps: Math.max(0, step - this.startStep),
+            terminated: 'error',
+            error: `format failure limit reached: ${this.invalidSteps} invalid responses (max ${maxInvalidSteps})`,
           }),
         };
       }
@@ -558,6 +670,7 @@ export class AgentFoldAgent {
         ...(stepReasoning !== undefined ? { reasoning: stepReasoning } : {}),
         text: lastRawText,
         usage: this.stepUsage,
+        ...(this.stepLastUsage !== undefined ? { lastUsage: this.stepLastUsage } : {}),
         result,
       };
     }
@@ -567,6 +680,7 @@ export class AgentFoldAgent {
     const motivation = parsed.motivation ?? '';
     this.pending = { step, motivation, action };
     this.emit({ type: 'tool_call', agent: this.name, step, action, motivation });
+    this.clearStepTimer();
     return {
       kind: 'tool',
       step,
@@ -575,6 +689,7 @@ export class AgentFoldAgent {
       ...(stepReasoning !== undefined ? { reasoning: stepReasoning } : {}),
       text: lastRawText,
       usage: this.stepUsage,
+      ...(this.stepLastUsage !== undefined ? { lastUsage: this.stepLastUsage } : {}),
     };
   }
 
@@ -615,6 +730,7 @@ export class AgentFoldAgent {
 
   private finalize(r: Omit<AgentRunResult, 'state' | 'usage' | 'formatIssues'>): AgentRunResult {
     if (this.finished && this.runResult !== undefined) return this.runResult;
+    this.clearStepTimer();
     this.emit({ type: 'run_end', agent: this.name, depth: this.depth, steps: r.steps, terminated: r.terminated });
     this.finished = true;
     this.runResult = { ...r, state: this.state.snapshot(), usage: this.usage, formatIssues: this.formatIssues };

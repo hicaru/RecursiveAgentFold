@@ -1,8 +1,70 @@
+import { randomUUID } from 'node:crypto';
 import { isAncestorEcho, normalizeScopeKey, normalizeTaskKey } from '../context/board.js';
 import type { ContextStore } from '../context/store.js';
 import type { FoldStateSnapshot } from '../fold/state.js';
-import { truncateToTokens } from '../tokens.js';
+import { defaultEstimator } from '../tokens.js';
 import { argNumber, argString, ToolArgumentError, type Tool } from './types.js';
+
+/** Prefix for full branch reports stored in ContextStore. Hosts may persist these docs. */
+export const BRANCH_REPORT_ID_PREFIX = 'branch_report_';
+
+/** Store one complete subtask report; the caller gets a compact index entry. */
+function storeReport(
+  store: ContextStore,
+  text: string,
+  scope: string | undefined,
+  task: string,
+): { readonly id: string; readonly tokens: number; readonly lines: number } {
+  const label = (scope !== undefined && scope !== '' ? scope : task).replace(/\s+/g, ' ').trim().slice(0, 120);
+  const doc = store.add(text, {
+    id: `${BRANCH_REPORT_ID_PREFIX}${randomUUID()}`,
+    title: `branch report: ${label}`.slice(0, 160),
+    manifest: false,
+  });
+  return { id: doc.id, tokens: doc.tokens, lines: doc.lines.length };
+}
+
+/** Head-only excerpt. The full report stays in ContextStore. */
+function excerptText(text: string, maxTokens: number): string {
+  const chars = defaultEstimator.chars(Math.max(1, maxTokens));
+  if (text.length <= chars) return text;
+  return `${text.slice(0, chars).trimEnd()}\n…[excerpt truncated; full report is stored]`;
+}
+
+/**
+ * Return a compact index that keeps every subtask header and stores each full
+ * report as a document. The root can read the full text by its doc id.
+ */
+function buildReportIndex(
+  outcomes: readonly BranchSubtaskResult[],
+  specs: readonly SubTaskSpec[],
+  store: ContextStore,
+  maxTokens: number,
+): string {
+  const reports = outcomes.map((outcome, index) => {
+    const spec = specs[index];
+    return {
+      outcome,
+      spec,
+      report: storeReport(store, outcome.text, spec?.scope, spec?.task ?? 'branch task'),
+    };
+  });
+  const headers = reports.map(({ spec, report }, index) => {
+    const label = spec?.scope ? `[scope=${spec.scope}] ${spec.task}` : (spec?.task ?? '');
+    return `[Subtask #${index + 1}] ${label}\nFull report: \`${report.id}\` (${report.lines} lines, ~${report.tokens} tokens)`;
+  });
+  const headerTokens = defaultEstimator.count(headers.join('\n\n'));
+  let bodyBudget = Math.max(32, Math.floor((maxTokens - headerTokens - 16) / Math.max(1, reports.length)));
+  let index = '';
+  for (let attempt = 0; attempt < 6; attempt++) {
+    index = reports
+      .map(({ outcome }, i) => `${headers[i]}\nExcerpt:\n${excerptText(outcome.text, bodyBudget)}`)
+      .join('\n\n');
+    if (defaultEstimator.count(index) <= maxTokens || bodyBudget <= 32) break;
+    bodyBudget = Math.max(32, Math.floor(bodyBudget * 0.8));
+  }
+  return index;
+}
 
 export interface BranchRunnerOptions {
   readonly depth: number;
@@ -318,20 +380,15 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
             .join('; ');
           throw new Error(`branch aborted: ${failures.length} of ${outcomes.length} subtasks failed (${details})`);
         }
-        const summary = outcomes
-          .map((outcome, i) => {
-            const spec = mergedTasks[i];
-            const label = spec?.scope ? `[scope=${spec.scope}] ${spec.task}` : (spec?.task ?? '');
-            return `[Subtask #${i + 1}] ${label}\n${outcome.text}`;
-          })
-          .join('\n\n');
-        return truncateToTokens(summary, opts.maxResultTokens ?? 6000).text;
+        return buildReportIndex(outcomes, mergedTasks, ctx.store, opts.maxResultTokens ?? 6000);
       }
       const single = await runSingle(task ?? '', explicitScope);
       if (single.failed) {
         throw new Error(`branch aborted: ${single.scope}: ${single.error ?? 'incomplete result'}`);
       }
-      return truncateToTokens(single.text, opts.maxResultTokens ?? 3000).text;
+      const maxTokens = opts.maxResultTokens ?? 3000;
+      const report = storeReport(ctx.store, single.text, explicitScope ?? single.scope, task ?? 'branch task');
+      return `${excerptText(single.text, maxTokens)}\n\nFull report: \`${report.id}\` (${report.lines} lines, ~${report.tokens} tokens)`;
     },
   };
 }

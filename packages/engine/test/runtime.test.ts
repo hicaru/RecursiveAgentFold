@@ -12,6 +12,7 @@ import { RecursiveAgentFold } from '../src/runtime.js';
 import { computeChunkTokens, formatMarginNote, LLMQueryEngine } from '../src/tools/llm-query.js';
 import { UsageTracker } from '../src/llm/usage.js';
 import type { AgentEvent } from '../src/agent/events.js';
+import type { LLMClient } from '../src/types.js';
 import { AgentFoldAgent, extractFallbackAnswer } from '../src/agent/agent-fold.js';
 import { FoldState } from '../src/fold/state.js';
 import {
@@ -2052,6 +2053,11 @@ describe('DSH Plugin PTC bypass, multi-turn root continuity, and live file refre
       expect(bashCalls.length).toBe(1);
       expect(bashCalls[0]?.command).toBe('echo ok');
       expect(bashCalls[0]?.description).toBe('Run bash to render output PNGs');
+      const persisted = JSON.parse(
+        await readFile(join(tmpDir, 'raf-engine', 'sessions', 'session-ptc-1.json'), 'utf8'),
+      ) as { rootState?: { blocks?: unknown[] }; initialQuestion?: string };
+      expect(Array.isArray(persisted.rootState?.blocks)).toBe(true);
+      expect(persisted.initialQuestion).toContain('Render the diagrams');
     } finally {
       if (prevProfileDir === undefined) delete process.env.DSH_PROFILE_DIR;
       else process.env.DSH_PROFILE_DIR = prevProfileDir;
@@ -2218,5 +2224,129 @@ describe('DSH Plugin PTC bypass, multi-turn root continuity, and live file refre
     expect(res.terminated).toBe('answer');
     expect(res.steps).toBe(3);
     expect(res.answer).toBe('FINAL_SECRET = 9001');
+  });
+});
+
+describe('step usage, invalid cap, and truncated tool calls', () => {
+  it('reports the last attempt usage separately from the accumulated step usage', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const responses: Array<{ readonly text: string; readonly usage: { readonly promptTokens: number; readonly completionTokens: number; readonly cachedTokens: number } }> = [
+      {
+        text: 'not the protocol',
+        usage: { promptTokens: 100, completionTokens: 10, cachedTokens: 0 },
+      },
+      {
+        text: '<motivation>grep seed</motivation><tool_call>{"name":"grep","arguments":{"pattern":"seed"}}</tool_call>',
+        usage: { promptTokens: 200, completionTokens: 20, cachedTokens: 0 },
+      },
+    ];
+    const llm = new ScriptedLLM((_req, index) => responses[Math.min(index, responses.length - 1)]!);
+    const agent = new AgentFoldAgent({ llm, tools: [createGrepTool()], store, maxFormatRetries: 1 });
+    agent.begin('find seed');
+    const step = await agent.next();
+    expect(step.kind).toBe('tool');
+    if (step.kind !== 'tool') throw new Error(`expected tool step, got ${step.kind}`);
+    expect(step.usage.promptTokens).toBe(300);
+    expect(step.usage.completionTokens).toBe(30);
+    expect(step.lastUsage?.promptTokens).toBe(200);
+    expect(step.lastUsage?.completionTokens).toBe(20);
+  });
+
+  it('terminates after maxInvalidSteps instead of looping forever', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const llm = new ScriptedLLM(() => 'not the protocol');
+    const agent = new AgentFoldAgent({ llm, tools: [], store, maxFormatRetries: 0, maxInvalidSteps: 1 });
+    const res = await agent.run('find seed');
+    expect(res.terminated).toBe('error');
+    expect(res.error).toContain('format failure limit');
+    expect(llm.calls).toHaveLength(2);
+  });
+
+  it('rejects a tool call cut by the output token limit', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const responses: Array<string | { readonly text: string; readonly finishReason: string }> = [
+      {
+        text: '<motivation>grep seed</motivation><tool_call>{"name":"grep","arguments":{"pattern":"seed"}}</tool_call>',
+        finishReason: 'length',
+      },
+      '<answer>seed</answer>',
+    ];
+    const llm = new ScriptedLLM((_req, index) => responses[Math.min(index, responses.length - 1)]!);
+    const events: AgentEvent[] = [];
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [createGrepTool()],
+      store,
+      maxFormatRetries: 1,
+      onEvent: (event) => events.push(event),
+    });
+    const res = await agent.run('find seed');
+    expect(res.answer).toBe('seed');
+    expect(
+      events.some(
+        (event) => event.type === 'format_error' && event.errors.some((error) => error.includes('output token limit')),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('step timeout', () => {
+  it('aborts a stalled LLM call after maxStepMs', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const llm: LLMClient = {
+      profile: { name: 'stalled', contextWindow: 128_000, maxOutputTokens: 1024 },
+      complete(req) {
+        return new Promise((_resolve, reject) => {
+          const signal = req.signal;
+          if (signal === undefined) {
+            reject(new Error('missing signal'));
+            return;
+          }
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      },
+    };
+    const agent = new AgentFoldAgent({ llm, tools: [], store, maxStepMs: 20 });
+    const res = await agent.run('find seed');
+    expect(res.terminated).toBe('error');
+    expect(res.error).toContain('step timeout');
+  });
+});
+
+describe('reasoning budget', () => {
+  it('rejects a tool call that exceeds maxReasoningTokens', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const responses: Array<{ readonly text: string; readonly usage: { readonly promptTokens: number; readonly completionTokens: number; readonly cachedTokens: number; readonly reasoningTokens: number } }> = [
+      {
+        text: '<motivation>grep seed</motivation><tool_call>{"name":"grep","arguments":{"pattern":"seed"}}</tool_call>',
+        usage: { promptTokens: 100, completionTokens: 10, cachedTokens: 0, reasoningTokens: 40_000 },
+      },
+      {
+        text: '<answer>seed</answer>',
+        usage: { promptTokens: 50, completionTokens: 5, cachedTokens: 0, reasoningTokens: 100 },
+      },
+    ];
+    const llm = new ScriptedLLM((_req, index) => responses[Math.min(index, responses.length - 1)]!);
+    const events: AgentEvent[] = [];
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [createGrepTool()],
+      store,
+      maxFormatRetries: 1,
+      maxReasoningTokens: 32_000,
+      onEvent: (event) => events.push(event),
+    });
+    const res = await agent.run('find seed');
+    expect(res.answer).toBe('seed');
+    expect(
+      events.some(
+        (event) => event.type === 'format_error' && event.errors.some((error) => error.includes('reasoning budget')),
+      ),
+    ).toBe(true);
   });
 });

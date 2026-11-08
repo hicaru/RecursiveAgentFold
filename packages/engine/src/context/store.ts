@@ -12,6 +12,8 @@ export interface StoredDocument {
   chars: number;
   tokens: number;
   estimator: TokenEstimator;
+  /** False keeps the document out of the model manifest while tools can still read it. */
+  manifest: boolean;
 }
 
 export interface Chunk {
@@ -33,6 +35,8 @@ export interface AddDocumentOptions {
   title?: string;
   /** Known true token count (calibrates the estimator for this document). */
   tokens?: number;
+  /** False keeps the document out of the model manifest while tools can still read it. */
+  manifest?: boolean;
 }
 
 export interface GrepMatch {
@@ -118,6 +122,7 @@ export class ContextStore {
       chars: text.length,
       tokens: opts.tokens ?? baseCount,
       estimator,
+      manifest: opts.manifest ?? true,
     };
     this.docs.set(id, doc);
     for (const k of [...this.chunkCache.keys()]) if (k.startsWith(`${id}@`)) this.chunkCache.delete(k);
@@ -197,6 +202,11 @@ export class ContextStore {
     return t;
   }
 
+  /** Documents that participate in the model manifest. */
+  listManifest(): StoredDocument[] {
+    return this.list().filter((doc) => doc.manifest);
+  }
+
   /** Stable manifest rendered into the agent prompt (part of the cached prefix). */
   manifest(): string {
     return this.manifestFor();
@@ -213,7 +223,7 @@ export class ContextStore {
         if (d) docs.push(d);
       }
     } else {
-      for (const d of this.docs.values()) docs.push(d);
+      for (const d of this.docs.values()) if (d.manifest) docs.push(d);
     }
     if (docs.length === 0) return '(no documents loaded)';
     const out: string[] = [];

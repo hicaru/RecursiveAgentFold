@@ -61,7 +61,7 @@ export function truncateToTokens(
   return {
     text:
       text.slice(0, head) +
-      `\n…[已截断 ${omitted} 个字符 — 请缩小请求范围（更小的行区间或更精确的查询）]…\n` +
+      `\n…[truncated ${omitted} characters — narrow the request (smaller line range or a more precise query)]…\n` +
       (tail > 0 ? text.slice(text.length - tail) : ''),
     truncated: true,
   };

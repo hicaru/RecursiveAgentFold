@@ -55,13 +55,13 @@ For a RAF Session, the plugin builds a `ContextStore` from the Session transcrip
 
 The engine exposes `begin(question)`, `next()`, and `submit(observation)`. `next()` returns a tool action without executing it, so the native loop executes the tool and the next `next()` receives the observation. `AgentFoldAgent.run()` is the same loop with in-process tool execution, so CLI and benchmark behavior is unchanged.
 
-Root calls always use the Session provider and model through `ctx.llm`; RAF does not override the native root model. Branch and reader routes come from the settings panel: branch has a provider, model, and optional reasoning effort; `llm_query` has a provider and model and never sends a reasoning effort. Deployment can still override `RAF_BRANCH_PROVIDER`/`RAF_BRANCH_MODEL` and `RAF_QUERY_PROVIDER`/`RAF_QUERY_MODEL`; root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 16,384 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. Internal calls are tagged with an `AsyncLocalStorage` guard and a `raf-*` `purpose` value, so the listener does not intercept them again.
+Root calls always use the Session provider and model through `ctx.llm`; RAF does not override the native root model. Branch and reader routes come from the settings panel: branch has a provider, model, and optional reasoning effort; `llm_query` has a provider and model and never sends a reasoning effort. Deployment can still override `RAF_BRANCH_PROVIDER`/`RAF_BRANCH_MODEL` and `RAF_QUERY_PROVIDER`/`RAF_QUERY_MODEL`; root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 16,384 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. The root has a 100-step cap, a 10-minute per-step budget, and a 3-invalid-response cap. A step reports only its last LLM attempt to the DSH token meter, so retries and branch sub-agents do not look like one huge prompt. Internal calls are tagged with an `AsyncLocalStorage` guard and a `raf-*` `purpose` value, so the listener does not intercept them again.
 
 DSH marks internal calls with `purpose` (`session-title`, `compaction`, `auto-review`, `onboarding_use_case`). The listener passes every such call through. RAF therefore never answers a title prompt or a compaction summary.
 
-### Deep-study protocol
+### Deep-study protocol (opt-in)
 
-When the user asks to study, explore, or deeply investigate the project/repository, the Host appends a dynamic study brief to the RAF question. The brief is built from the loaded workspace scopes (`packages/*`, `docs`, `results`, `scripts`) and is only added when at least two scopes exist.
+When `Deep-study protocol` is enabled in the RAF settings, and the user asks to study, explore, or deeply investigate the project/repository, the Host appends a dynamic study brief to the RAF question. The brief is built from the loaded workspace scopes (`packages/*`, `docs`, `results`, `scripts`) and is only added when at least two scopes exist. The setting is off by default.
 
 The brief mirrors the task prompts that drive the benchmarks:
 
@@ -95,6 +95,10 @@ The Host feeds engine `onEvent` records into the RAF run registry. The branch ca
 - Chat, Trajectory, and Statistics read the native session log; the registry never writes session events;
 - a later RAF turn replaces the registry entry for the Session.
 
+### Branch reports and state
+
+`branch(tasks=[...])` stores every full subtask report in `ContextStore` under a `branch_report_*` document. The root receives a compact index with every subtask header and a short excerpt, so it can `read` or `outline` the full report later. These report documents are hidden from the model manifest; they do not change the cached prompt prefix. The Host persists the root fold state, the initial question/manifest/doc IDs, and these branch reports under `~/.dsh/raf-engine/sessions/<sessionId>.json`. A turn that is aborted or a Host that restarts can resume from that state. If no state file exists, the Host adds the latest DSH compaction checkpoint to the next task.
+
 Limits of this integration:
 
 - RAF's context tools operate on the `ContextStore`; DSH tools operate on the workspace. Both appear as native tool rows.
@@ -105,7 +109,7 @@ Limits of this integration:
 
 ## Settings
 
-The settings page writes `{ depth, reserve, concurrency, branchProvider, branchModel, branchReasoningEffort, queryProvider, queryModel }` to `localStorage` and posts them to the Host. The model lists come from `GET /plugins/@raf/dsh-plugin/models`, which reads the DSH provider catalog and each model's advertised reasoning efforts.
+The settings page writes `{ depth, reserve, concurrency, branchProvider, branchModel, branchReasoningEffort, queryProvider, queryModel, deepStudy }` to `localStorage` and posts them to the Host. The model lists come from `GET /plugins/@raf/dsh-plugin/models`, which reads the DSH provider catalog and each model's advertised reasoning efforts.
 
 | Setting | Effect |
 |---|---|
@@ -115,6 +119,7 @@ The settings page writes `{ depth, reserve, concurrency, branchProvider, branchM
 | Branch model | Provider and model for scoped specialist sub-agents. |
 | Reasoning effort | Optional branch-only effort. Model default uses the provider default. |
 | Reader model | Provider and model for `llm_query`. No reasoning effort is sent. |
+| Deep-study protocol | Opt-in branch plan for repository-study requests. Off by default. |
 
 The root model is not configurable here. Root calls use the native DSH Session provider and model.
 

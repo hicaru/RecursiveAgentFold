@@ -225,6 +225,11 @@ export class RecursiveAgentFold {
     return this.rootAgent.next();
   }
 
+  /** Current root fold state for host-side persistence. */
+  snapshot(): FoldStateSnapshot | undefined {
+    return this.rootAgent?.snapshot();
+  }
+
   /** Feed the root tool observation back into the fold state. */
   submit(observation: string, meta?: { error?: string }): void {
     if (this.rootAgent === undefined) throw new Error('RecursiveAgentFold.begin() must run before submit()');

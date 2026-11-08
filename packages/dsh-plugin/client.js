@@ -31,6 +31,7 @@ window.__ModuleLoader__.load({
       branchReasoningEffort: '',
       queryProvider: '',
       queryModel: '',
+      deepStudy: false,
     });
 
     const EN = Object.freeze({
@@ -51,6 +52,8 @@ window.__ModuleLoader__.load({
       'tuning.concurrency.desc': 'Parallel llm_query calls over the context.',
       'tuning.branchModel.title': 'Branch model (sub-agents)',
       'tuning.branchModel.desc': 'Provider and model for scoped specialist sub-agents.',
+      'tuning.deepStudy.title': 'Deep-study protocol',
+      'tuning.deepStudy.desc': 'Add a repository-wide branch plan to study requests. Off by default.',
       'tuning.queryModel.title': 'Reader model (llm_query)',
       'tuning.queryModel.desc': 'Fast reader model for chunk scanning. No reasoning effort is sent.',
       'tuning.effort.title': 'Reasoning effort',
@@ -126,6 +129,8 @@ window.__ModuleLoader__.load({
       'tuning.concurrency.desc': 'Параллельные вызовы llm_query по контексту.',
       'tuning.branchModel.title': 'Модель веток (branch)',
       'tuning.branchModel.desc': 'Провайдер и модель для scoped-субагентов.',
+      'tuning.deepStudy.title': 'Протокол глубокого изучения',
+      'tuning.deepStudy.desc': 'Добавлять branch-план для запросов на изучение репозитория. По умолчанию выключено.',
       'tuning.queryModel.title': 'Модель читателя (llm_query)',
       'tuning.queryModel.desc': 'Быстрая модель чтения чанков. Reasoning effort не передаётся.',
       'tuning.effort.title': 'Reasoning effort',
@@ -454,6 +459,7 @@ window.__ModuleLoader__.load({
         branchReasoningEffort: toEffort(source.branchReasoningEffort),
         queryProvider: query.provider,
         queryModel: query.model,
+        deepStudy: source.deepStudy === true,
       });
     }
 
@@ -516,6 +522,7 @@ window.__ModuleLoader__.load({
             branchReasoningEffort: DEFAULT_SETTINGS.branchReasoningEffort,
             queryProvider: DEFAULT_SETTINGS.queryProvider,
             queryModel: DEFAULT_SETTINGS.queryModel,
+            deepStudy: DEFAULT_SETTINGS.deepStudy,
           });
           persist();
           emit();
@@ -1359,6 +1366,16 @@ window.__ModuleLoader__.load({
                 min: CONCURRENCY_MIN,
                 max: CONCURRENCY_MAX,
                 onChange: (value) => settingsStore.update({ concurrency: value }),
+              }),
+            }),
+            h(SettingRow, {
+              label: t('tuning.deepStudy.title'),
+              hint: t('tuning.deepStudy.desc'),
+              control: h('input', {
+                type: 'checkbox',
+                checked: settings.deepStudy === true,
+                'aria-label': t('tuning.deepStudy.title'),
+                onChange: (event) => settingsStore.update({ deepStudy: event.currentTarget.checked }),
               }),
             }),
             h(SettingRow, {

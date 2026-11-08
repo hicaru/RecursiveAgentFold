@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ResearchBoard } from '../src/context/board.js';
 import { ContextStore } from '../src/context/store.js';
 import { UsageTracker } from '../src/llm/usage.js';
-import { createBranchTool, type BranchRunner, type BranchRunnerResult } from '../src/tools/branch.js';
+import { BRANCH_REPORT_ID_PREFIX, createBranchTool, type BranchRunner, type BranchRunnerResult } from '../src/tools/branch.js';
 import type { ToolContext } from '../src/tools/types.js';
 
 function contextFor(store: ContextStore, board?: ResearchBoard): ToolContext {
@@ -87,5 +87,31 @@ describe('branch all-or-nothing results', () => {
     const text = await tool.execute({ scope: 'alpha', task: 'inspect alpha' }, contextFor(store, board));
     expect(text).toContain('recovered');
     expect(calls).toBe(2);
+  });
+});
+
+describe('branch full reports', () => {
+  it('keeps every subtask header and stores full reports out of the manifest', async () => {
+    const store = new ContextStore();
+    const long = 'y'.repeat(3000);
+    const run: BranchRunner = async (task) => answer(`report:${task}:${long}`);
+    const tool = createBranchTool(run, { maxResultTokens: 1200 });
+    const tasks = Array.from({ length: 5 }, (_, index) => ({
+      scope: `scope_${index + 1}`,
+      task: `inspect scope ${index + 1}`,
+    }));
+    const text = await tool.execute({ tasks }, contextFor(store));
+    for (let index = 1; index <= 5; index += 1) {
+      expect(text).toContain(`[Subtask #${index}]`);
+      expect(text).toContain(`[scope=scope_${index}]`);
+    }
+    expect(text).toContain('Full report:');
+    const reports = store.list().filter((doc) => doc.id.startsWith(BRANCH_REPORT_ID_PREFIX));
+    expect(reports).toHaveLength(5);
+    for (const report of reports) {
+      expect(report.manifest).toBe(false);
+      expect(report.chars).toBeGreaterThan(3000);
+      expect(report.lines.join('\n')).toContain('report:');
+    }
   });
 });

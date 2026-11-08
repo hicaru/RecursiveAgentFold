@@ -248,13 +248,13 @@ export class ResearchBoard {
     return `- [#${e.id}][${e.kind}][${scopeLabel}] ${e.summary.replace(/\s+/g, ' ').trim()}`;
   }
 
-  render(maxTokens = 1200): string {
+  render(maxTokens = 2400): string {
     if (this._entries.length === 0) return '(no shared findings yet)';
     const lines = this._entries.map((e) => this.formatEntry(e));
     return truncateToTokens(lines.join('\n'), maxTokens, defaultEstimator).text;
   }
 
-  renderSettled(maxTokens = 1200): string | undefined {
+  renderSettled(maxTokens = 2400): string | undefined {
     const settled = this._entries.filter((e) => !e.inProgress);
     if (settled.length === 0) return undefined;
     const lines = settled.map((e) => this.formatEntry(e));
@@ -264,7 +264,7 @@ export class ResearchBoard {
   renderSince(
     sinceRev: number,
     excludeScopeOrMaxTokens?: string | number,
-    maxTokens = 1200,
+    maxTokens = 2400,
   ): string | undefined {
     const excludeScope =
       typeof excludeScopeOrMaxTokens === 'string' ? normalizeScopeKey(excludeScopeOrMaxTokens) : undefined;
