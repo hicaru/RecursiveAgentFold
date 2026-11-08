@@ -1,112 +1,140 @@
 # Recursive AgentFold
 
-A pnpm + TypeScript workspace containing the **engine** and **benchmarks** for a recursive version of [AgentFold](docs/AgentFold.pdf) (proactive context folding, Ye et al. 2025). The engine adds three things on top of the paper:
+**Proactive context folding for long-horizon agents.** A TypeScript implementation of the [AgentFold](https://arxiv.org/abs/2510.24699) loop — *AgentFold: Long-Horizon Web Agents with Proactive Context Management* (Ye et al., Tongyi Lab / Alibaba Group, 2025) — extended with an out-of-window document store, a cheap chunk reader, recursive branch specialists, and a cache-preserving prompt layout.
 
-- **`llm_query`**: a non-thinking reader model that scans contexts of up to millions of tokens. It splits them into fixed chunks of `contextWindow × (1 − reserveRatio)` tokens (default reserve 30%, configurable) and runs all chunks in parallel.
-- **`branch`**: recursive AgentFold sub-agents. Each one starts with its own fresh folded context.
-- **A cache-preserving layout**: deterministic chunks placed before the query, append-only summaries, a static system prompt and shared memos. This targets RLM's main weakness, cache misses on its sub-calls.
+![Recursive AgentFold benchmark overview](https://github.com/hicaru/RecursiveAgentFold/blob/master/img/bench-overview.png?raw=true)
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
+Long-horizon tasks fail in a specific way: tool output floods the window, the transcript gets truncated or summarised badly, and quality collapses exactly when the task becomes interesting. RAF treats the context as **a data structure the model edits**, not an append-only log. After each tool result the agent may emit a `folding` directive that replaces a contiguous range of earlier steps with one summary block. The context therefore stays a gap-free partition of the run: the task, a static system prompt, a stack of summaries, and the latest interaction.
 
-```
-packages/
-  engine/       @raf/engine      – AgentFold loop, fold state, parser, llm_query, tools, runtime
-  benchmarks/   @raf/benchmarks  – OOLONG-synth, synthetic needle/count, live prompt checks
-docs/
-  AgentFold.pdf, paper/agentfold.txt (text extraction), ARCHITECTURE.md
-```
+| | |
+|---|---|
+| **Paper** | AgentFold, arXiv:2510.24699v1 (29 October 2025) |
+| **Engine** | `@raf/engine` — dependency-free TypeScript, Node ≥ 22, ESM |
+| **Benchmarks** | `@raf/benchmarks` — seven live-model harnesses over any OpenAI-compatible API |
+| **UI** | `@raf/dsh-plugin` — Cordis plugin for the DeepSeek Harness Web UI |
+| **Tests** | 76 unit tests, clean `pnpm typecheck` |
 
-## Setup
+## What makes it different
 
-```bash
-pnpm install
-cp .env.example .env     # set ZAI_API_KEY (Z.ai GLM coding plan) and model choices
-pnpm typecheck && pnpm test
-pnpm build               # emits packages/engine/dist
-```
+- **The context is folded, not truncated.** The model decides what to compress and when, and writes the summary itself. Granular folds replace one step; deep folds merge many.
+- **The corpus lives outside the context.** `ContextStore` holds the documents; the agent sees only a manifest (id, title, tokens, lines) and reaches into the store with `search`, `outline`, `grep`, `tally`, `read`, `list_documents`.
+- **Reading is delegated.** `llm_query` ships a chunk plus a question to a cheap non-thinking model and returns a compact report, so the expensive root model never ingests raw corpus text.
+- **Recursion is cheap.** `branch` spawns child agents with their own fold state that share the store and the reader memo. Only their final answer comes back.
+- **Cache is a first-class constraint.** Prompt layout, chunk boundaries, and fold policy are all designed so the provider prefix cache keeps hitting — often 80–90 % of prompt tokens.
 
-## Using the engine
+## Results at a glance
 
-```ts
-import { ContextStore, OpenAICompatibleClient, RecursiveAgentFold } from '@raf/engine';
+Seven featured runs, 5–7 November 2026, every number taken from the run's `summary.json`. All use `--method raf`, `glm-5.3` as the root and branch model, `glm-5.3-flash` as the `llm_query` reader, temperature 0.
 
-const store = new ContextStore();
-store.add(hugeText, { id: 'corpus', title: 'My 2M-token corpus' });
+| Benchmark | Context | Tasks | Passed | Score | Avg steps | Wall time | Cost | Cache hit |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Needle in a Haystack | 1,000,000 | 4 | 4 | **1.0000** | 2.25 | 19.4 s | $0.0297 | 88.8 % |
+| RULER | 131,072 | 11 | 11 | **1.0000** | 2.18 | 25.8 s | $0.0778 | 90.4 % |
+| OpenAI-MRCR | 131,072 | 6 | 6 | **1.0000** | 4.00 | 289.5 s | $0.2965 | 82.6 % |
+| LongBench-v2 | long docs | 6 | 4 | **0.6667** | 5.67 | 333.3 s | $0.6041 | 79.8 % |
+| LongBench-Pro | long docs | 20 | 14 | **0.7750** | 4.05 | 189.5 s | $1.3017 | 41.5 % |
+| OOLONG `trec_coarse` | 131,072 | 5 | 5 | **1.0000** | 1.60 | 102.7 s | $0.1116 | 19.7 % |
+| CodeGraph | 120,000 | 6 | 6 | **1.0000** | 3.67 | 284.0 s | $1.2594 | 76.9 % |
+| **Total** | | **58** | **50** | **0.9202** | **3.48** | **1,244.2 s** | **$3.6807** | |
 
-const raf = new RecursiveAgentFold({
-  rootLLM: new OpenAICompatibleClient({ baseUrl, apiKey, model: 'glm-5.1', contextWindow: 200_000, maxOutputTokens: 16_000, thinking: 'enabled' }),
-  queryLLM: new OpenAICompatibleClient({ baseUrl, apiKey, model: 'glm-4.5-air', contextWindow: 128_000, maxOutputTokens: 1024, thinking: 'disabled' }),
-  store,
-  llmQuery: { reserveRatio: 0.3, concurrency: 4 },
-  maxDepth: 1,
-  onEvent: (e) => console.log(e.type),
-});
-const { answer, usage } = await raf.run('…question…');
-console.log(answer, usage.byRole()); // per-role tokens + cache hit rate
-```
+`Score` is the mean per-task score, `Passed` counts tasks scored 1.0, `Avg steps` is the mean agent step count per task, `Cache hit` is cached prompt tokens ÷ total prompt tokens, and `Cost` is the summed model spend at Z.ai list price (input $1.40, cached input $0.26, output $4.40 per 1M tokens). The total row's score is the **mean of the seven benchmark scores**, not a task-weighted accuracy; the total cost is $0.063 per task.
 
-## Results
+## Benchmark cards
 
-Vanilla AgentFold (`--method agentfold`: `grep`, `read`, `calculator` only — no `llm_query`, no `branch`, no `tally`) against GLM-5.3 (`thinking` enabled, temperature 0, 1M context window). The tables below are the **pre-Chinese-prompt baseline**; the bounded re-run with the current prompts is in [Current prompts](#current-prompts-compact-chinese-2026-11-05). `steps` and `wall` are per task.
+### Needle in a Haystack — 1M tokens, 4 tasks
 
-| benchmark | tasks | correct | mean score | score excl. filtered | errors | steps | wall | cache hit | tokens (prompt / cached / completion) | cost |
-|---|---|---|---|---|---|---|---|---|---|---|
-| OOLONG `trec_coarse` @131K | 50 | 31/50 | **0.6305** | 0.7381 (31/42) | 0 | 8.3 | 654.8 s | 46.9% | 2 523 479 / 1 182 976 / 2 315 963 | $12.37 |
-| needle @1M | 4 | 4/4 | **1.0000** | 1.0000 (4/4) | 0 | 2.3 | 21.6 s | 80.3% | 12 997 / 10 432 / 5 648 | $0.03 |
+![Needle in a Haystack](https://github.com/hicaru/RecursiveAgentFold/blob/master/img/bench-needle.png?raw=true)
 
-`cost` is the Z.ai list price (input $1.40, cached input $0.26, output $4.40 per 1M tokens), not the flat-rate Coding Plan quota. `filtered` = the provider's content moderation (Z.ai code 1301) refused the request; those tasks are reported separately and excluded from the accuracy denominator, since no model call can succeed on them.
+A 1,000,000-token haystack with one to three planted needles; tasks are `lookup` (what is the value) and `count` (how many times it appears). 4/4 in 2.25 steps, 88.8 % prompt-cache hit, $0.0074 per task. Run: `results/exp-needle-1m-d2`.
 
-### OOLONG by task type
+### RULER — 131K tokens, 11 subtasks
 
-All 50 tasks share two context windows (131 072 tokens each); the 8 `filtered` tasks all come from one window whose corpus triggers provider moderation.
+![RULER](https://github.com/hicaru/RecursiveAgentFold/blob/master/img/bench-ruler.png?raw=true)
 
-| task type | tasks | mean score | reads |
-|---|---|---|---|
-| `LEAST_FREQ` | 4 | **1.000** | find the rarest label |
-| `RELATIVE_FREQ` | 29 | **0.828** | compare two label frequencies |
-| `MOST_FREQ` | 5 | **0.600** | find the most common label |
-| `NUMERIC_ONE_CLASS` | 12 | **0.044** | count one label exactly |
+Eleven synthetic long-context subtasks: single-key, multi-key, multi-query and multi-value NIAH, variable tracking, and the two word-frequency tasks (`cwe`, `fwe`). 11/11; the word-frequency ones are settled deterministically by `tally` instead of being estimated. 90.4 % cache hit and $0.0071 per task make this the cheapest run in the set. Run: `results/exp-ruler-131k-d2-v3`.
 
-Exact counting is the hard limit of the vanilla setup: the model estimates instead of tallying (gold 571 → answer 456, gold 544 → answer 552). That is what `llm_query` chunk scanning and `tally` exist for in the full RAF method.
+### OpenAI-MRCR — 131K tokens, 6 questions
 
-### Current prompts (compact Chinese, 2026-11-05)
+![OpenAI-MRCR](https://github.com/hicaru/RecursiveAgentFold/blob/master/img/bench-mrcr.png?raw=true)
 
-The table above was measured before the prompts moved to Chinese. This bounded re-run uses the current prompts and the same models. OOLONG is 10 tasks with `--max-steps 10 --concurrency 3`; a full 50-task run takes about 9 h at the observed latency. Needle is the standard 4 tasks at 1M tokens. Two OOLONG tasks were content-filtered (Z.ai 1301), so the score excluding them is 0.750 (6/8); there were 16 format-repair events over 92 root calls.
+Multi-round coreference over a 131,072-token conversation. F1 1.000 (6/6) in four steps and 289 s. The generated template is simpler than the official benchmark (one sentence per instance), so read this as a harness check rather than a leaderboard entry. 82.6 % cache hit, $0.0494 per task. Run: `results/exp-mrcr-131k-d2`.
 
-| benchmark | tasks | correct | mean score | score excl. filtered | errors | steps | wall | cache hit | tokens (prompt / cached / completion) | cost |
-|---|---|---|---|---|---|---|---|---|---|---|
-| OOLONG `trec_coarse` @131K (bounded) | 10 | 6/10 | **0.6000** | 0.7500 (6/8) | 0 | 8.3 | 494.5 s | 52.7% | 321 204 / 169 408 / 354 325 | $1.82 |
-| needle @1M | 4 | 4/4 | **1.0000** | 1.0000 (4/4) | 0 | 2.5 | 17.3 s | 68.2% | 12 474 / 8 512 / 4 278 | $0.03 |
+### LongBench-v2 — 6-task slice
 
-By task type: `LEAST_FREQ` 1/1.000, `RELATIVE_FREQ` 8/0.625, `MOST_FREQ` 1/0.000. Results: `results/2026-11-05-agentfold-cn-oolong-trec10`, `results/2026-11-05-agentfold-cn-needle-1m`.
+![LongBench-v2](https://github.com/hicaru/RecursiveAgentFold/blob/master/img/bench-longbench.png?raw=true)
 
-A post-fix diagnostic on the five problematic tasks (`17000208`–`17000212`) is in `results/2026-11-05-agentfold-cn-fix4-oolong5`: 2/5 correct, 2 provider-filtered, 4 format repairs over 67 calls (6 in the same five tasks before the fix). The answer-language rule fixed `17000212`. `17000208` remains unstable: a keyword-bucket shortcut gives the wrong label, and reading the corpus around lines 605–904 triggers provider moderation (1301). The `MOST_FREQ` accuracy issue is still open.
+Six tasks across Code Repository Understanding and Multi-Document QA: 4/6 = 0.6667 (1.000 on code, 0.500 on multi-document QA). Both failures were answer-format failures, not retrieval failures — the run logged two format repairs. With n = 6 the 95 % interval is roughly [37 %, 90 %], so this is a direction, not a verdict. Run: `results/en-longbench-d2`.
 
-## Benchmarks
+### LongBench-Pro — 20 tasks, nine families
 
-```bash
-pnpm bench --help
-pnpm prompt-check                                           # live: per-tool probes, folding, reader contract, tiny e2e
-pnpm bench fetch-oolong --dataset trec_coarse --context-len 131072   # HTTP range reads from HF parquet → .cache/
-pnpm bench oolong --method raf --limit 10 --max-chunk-tokens 16384
-pnpm bench oolong --method agentfold --limit 10 --max-steps 10 --concurrency 3   # bounded plain AgentFold (grep/read/calculator)
-pnpm bench oolong --method direct --limit 10                # single-call baseline (official OOLONG prompt layout)
-pnpm bench needle --method raf --tokens 1000000 --tasks 4   # synthetic mega-context lookup + count
-pnpm bench oolong --mock --limit 4                          # offline harness dry-run (no network)
-```
+![LongBench-Pro](https://github.com/hicaru/RecursiveAgentFold/blob/master/img/bench-longbench-pro.png?raw=true)
 
-The agent and reader system prompts plus all tool descriptions are Chinese and compact (agent system text 4,076 → 1,181 characters; reader 1,033 → 385). `prompt-check` sends the real root system prompt once per tool (all default tools available) and fails unless the model chooses that tool, passes valid arguments, and the call executes. It also checks folding at step 1, the `llm_query` JSON/counts contract, and one tiny end-to-end run. Use `--only <tool|folding|reader|e2e>` to run a single check.
+14/20 = 0.775 with 61 folds and six format repairs. Strongest families: T6 aggregation 0.9286 (7 tasks), T5 attribution 1.0, T9 version & diff 1.0, T10 rule induction 1.0. Weakest: T3 evidence-grounded QA 0.0 (1 task) and T7 consistency 0.5 (2 tasks). Overall cache hit is only 41.5 % because four `llm_query` reader passes are uncached; the root prompt cache alone is 69.5 %. $0.0651 per task. Run: `results/en-longbench-pro-20-d2`.
 
-`--system-extra "<text>"` appends a static block to the agent system prompt for A/B runs and records it in `config.json`. A bilingual/few-shot frequency hint tested this way still caused read sampling into the moderation-sensitive corpus region around lines 800–900 and did not fix `17000208`.
+### OOLONG `trec_coarse` — 131K tokens, 5 tasks
 
-Each run writes `results/<stamp>-<bench>-<method>/` containing:
+![OOLONG](https://github.com/hicaru/RecursiveAgentFold/blob/master/img/bench-oolong.png?raw=true)
 
-- `config.json`
-- `results.jsonl`: one row per task, with score, steps, folds, and tokens/cache per role
-- `traces/*.jsonl`: every agent event
-- `summary.md` / `summary.json`, including a cost estimate (override with `RAF_PRICE_INPUT`, `RAF_PRICE_CACHED`, `RAF_PRICE_OUTPUT`)
+Five label-frequency questions over a 131,072-token corpus: 5/5 in 1.6 steps and 102.7 s. The counting work is delegated — one `llm_query` invocation (18 underlying chunk calls) classified all 3,182 lines, which is why the overall cache hit drops to 19.7 % while the root prompt cache stays at 85.7 %. $0.0223 per task. Run: `results/rlm-port-oolong-d2`.
 
-OOLONG notes:
+### CodeGraph — 120K tokens, 6 questions
 
-- `trec_coarse` and `spam` exist only in the **validation** split, which is what RLM used. That split is selected automatically.
-- Scoring is a TypeScript port of the official `eval_helpers.py`. Exact match, `0.75^|Δ|` for numeric answers, comparison phrases and dates are handled as in the original. A lenient score (as used in the RLM env) is reported alongside it.
+![CodeGraph](https://github.com/hicaru/RecursiveAgentFold/blob/master/img/bench-codegraph.png?raw=true)
+
+Six questions over a 120,000-token codebase in three families — single-hop symbol (`spec_specialist`), diamond dependency (`diamond_deps`), multi-hop chain (`chain_hop`). 6/6 in 3.67 steps. This is the most branch-heavy run: 93 folds, 22 root model calls against 101 branch calls, 76.9 % cache hit (root 68.2 %, branch 78.6 %). $0.2099 per task. Run: `results/rlm-port-codegraph-d2`.
+
+## How it works
+
+Each step the model sees the same four-part window, `C_t = (Q, T, S_{t-2}, I_{t-1})`:
+
+| Part | Content |
+|---|---|
+| `Q` | the question, under a fixed `### Task` heading |
+| `T` | system prompt and tool schemas, byte-identical across steps and tasks |
+| `S` | multi-scale summaries, rendered as `**[Compressed Step x]**` and `**[Compressed Steps x-y]**` |
+| `I` | the latest interaction: motivation, tool call, observation, board findings |
+
+The agent may fold before it acts. A fold names a range of history blocks and replaces them with one summary, `{range: [k, n], summary: ...}`. `k == n` is a granular fold (one step condensed); `k < n` is a deep fold that merges several blocks into a coarser one, so the summary stack stays a contiguous, gap-free partition of everything that happened.
+
+Folding is deliberately boring at runtime: `packages/engine/src/fold/state.ts` validates and normalizes every request (range end forced to the latest step, start snapped to a real block boundary, empty summary rejected). A missing directive falls back to a granular auto-fold, a malformed response is retried with a repair message appended at the tail (`maxFormatRetries`, default 2), and a step limit forces a final answer instead of a truncated trajectory.
+
+Beyond the paper, four additions carry most of the long-context work:
+
+1. **ContextStore** - documents live outside the window. The prompt carries only a manifest (id, title, token count, line count); tools fetch exactly the lines they need.
+2. **llm_query** - a cheap, non-thinking reader model scans chunks in parallel in two modes: `locate` returns relevant lines, `extract` classifies and counts against an explicit category list. Chunk size follows the reader window and `reserveRatio` (0.3), so locate clamps at 32K tokens and extract at 8K.
+3. **branch** - a child agent with fresh fold state, the same store and tools, depth+1 and its own budget (default `maxDepth = 2`). Only the final answer crosses back.
+4. **Cache-first prompt layout** - see below.
+
+### Recursion without echo chambers
+
+`packages/engine/src/tools/branch.ts` and the research board (`context/board.ts`) keep sub-agents honest: candidates are deduplicated against ancestor results with a Jaccard echo guard (`ECHO_JACCARD = 0.8`), a specialist cap (`maxSpecialists = 12`), and demotion when a branch only repeats what the parent already knows. Root deep folding is suppressed until 16 blocks accumulate (`DEFAULT_ROOT_MIN_DEEP_FOLD_BLOCKS = 16`) while branches fold at 6, because the root prefix is the one that must stay stable across a whole run.
+
+### Why the cache survives
+
+Prompt caching only pays if the prefix is byte-identical across calls, so the layout is built around that:
+
+- chunks are deterministic and line-aligned; the same line range always produces the same bytes
+- the prompt order is system, then chunk, then query - the chunk comes *before* the question, so different questions share the same prefix
+- chunk sizes are quantized to powers of two
+- granular folds append a block after the fixed prefix; only the tail changes
+- deep consolidation is the only operation that invalidates the prefix, and it is rare by construction
+
+Measured hits: 88.8 % on needle, 90.4 % on RULER, 82.6 % on MRCR, 79.8 % on LongBench-v2, 76.9 % on CodeGraph. OOLONG looks low at 19.7 % only because a single `llm_query` fan-out dominates its token count; the agent window itself hits 85.7 %.
+
+## Package layout
+
+| Path | Role |
+|---|---|
+| `packages/engine/src/agent/agent-fold.ts` | the step loop: render, call, fold, parse, act |
+| `packages/engine/src/fold/state.ts` | fold validation, normalization, block bookkeeping |
+| `packages/engine/src/protocol/parser.ts` | tolerant parser for think, folding, motivation, tool call, answer |
+| `packages/engine/src/context/` | `store.ts`, `bm25.ts`, `board.ts`, `ingest.ts`, `walk.ts`, `anydoc.ts`, `md-cache.ts` |
+| `packages/engine/src/tools/` | `llm-query.ts`, `document-tools.ts`, `branch.ts`, `calculator.ts` |
+| `packages/engine/src/prompts/` | `agent.ts` (root and branch prompts), `llm-query.ts` |
+| `packages/engine/src/llm/` | `openai-compatible.ts`, `mock.ts`, `usage.ts` |
+| `packages/engine/src/runtime.ts` | public API, `DEFAULT_MAX_DEPTH = 2`, tool wiring |
+| `packages/benchmarks/src/` | `cli.ts`, `runner.ts`, `config.ts`, `pricing.ts`, `compare.ts`, `prompt-check.ts`, `dsh-host.ts`, one folder per benchmark |
+| `packages/benchmarks/test/scoring.test.ts` | official OOLONG scoring rules ported to TypeScript |
+| `packages/dsh-plugin/` | Cordis plugin: settings page, per-Session Standard / RAF switch, branch tool view |
+| `results/` | one directory per run: `config.json`, `results.jsonl`, `traces/`, `summary.md` |
+| `img/render_cards.py`, `img/render_overview.py` | generate the cards above from `summary.json` |
