@@ -15,7 +15,9 @@ import {
   type UsageBucket,
 } from '@raf/engine';
 
-export type Method = 'direct' | 'agentfold' | 'raf';
+import { DshBenchmarkGroupHost, type DshChecks } from './dsh-host.js';
+
+export type Method = 'direct' | 'agentfold' | 'raf' | 'dsh';
 
 export interface BenchDocument {
   id: string;
@@ -110,7 +112,7 @@ async function runDirect(task: BenchTask, cfg: RunConfig, usage: UsageTracker): 
 /** Tool presets: vanilla AgentFold = search/outline/grep/read/calculator only (no llm_query, branch, tally). */
 export function toolPreset(cfg: Pick<RunConfig, 'method' | 'tools'>): Record<string, boolean> {
   const all = ['llm_query', 'branch', 'search', 'outline', 'grep', 'tally', 'read', 'calculator'];
-  const chosen = cfg.tools ?? (cfg.method === 'raf' ? all : ['search', 'outline', 'grep', 'read', 'calculator']);
+  const chosen = cfg.tools ?? (cfg.method === 'raf' || cfg.method === 'dsh' ? all : ['search', 'outline', 'grep', 'read', 'calculator']);
   return Object.fromEntries(all.map((t) => [t, chosen.includes(t)]));
 }
 
@@ -138,88 +140,121 @@ export async function runTasks(tasks: BenchTask[], cfg: RunConfig): Promise<Task
   let done = 0;
 
   await Promise.all(
-    [...groups.values()].map((group) => {
+    [...groups.values()].map(async (group) => {
       const firstTask = group[0];
-      if (!firstTask) return Promise.resolve();
-      const store = cfg.method === 'direct' ? undefined : buildStore(firstTask.documents);
-      const board = cfg.method === 'direct' ? undefined : new ResearchBoard();
+      if (!firstTask) return;
+      const store = cfg.method === 'direct' || cfg.method === 'dsh' ? undefined : buildStore(firstTask.documents);
+      const board = cfg.method === 'direct' || cfg.method === 'dsh' ? undefined : new ResearchBoard();
       // One llm_query engine + ResearchBoard per document group: memo + chunk cache + specialists shared across its questions.
       const queryEngine =
         toolPreset(cfg).llm_query && cfg.query && store && cfg.shareQueryMemo !== false
           ? new LLMQueryEngine(cfg.query, store, new UsageTracker(), { ...cfg.llmQuery, board })
           : undefined;
-      return Promise.all(
-        group.map((task) =>
-          limit(async () => {
-          const usage = new UsageTracker();
-          const tracePath = join(cfg.outDir, 'traces', `${task.id.replace(/[^\w.-]/g, '_')}.jsonl`);
-          writeFileSync(tracePath, '');
-          const folds = { granular: 0, deep: 0, corrected: 0 };
-          let llmQueryCalls = 0;
-          const onEvent = (e: AgentEvent) => {
-            if (e.type === 'fold') {
-              folds[e.outcome.kind]++;
-              if (e.outcome.corrections.length) folds.corrected++;
-            }
-            if (e.type === 'llm_query') llmQueryCalls++;
-            appendFileSync(tracePath, `${JSON.stringify({ t: Date.now(), ...e })}\n`);
-            if (e.type === 'tool_call') log(`  [${task.id}] ${e.agent} step ${e.step}: ${e.action.name} ${JSON.stringify(e.action.arguments).slice(0, 160)}`);
-            if (e.type === 'format_error') log(`  [${task.id}] ${e.agent} step ${e.step}: format error ${e.errors.join('; ')}`);
-            if (e.type === 'error') log(`  [${task.id}] ${e.agent}: ERROR ${e.message}`);
-          };
-          const started = Date.now();
-          let r: Pick<TaskResult, 'output' | 'steps' | 'terminated' | 'error' | 'formatIssues'>;
-          if (cfg.method === 'direct') r = await runDirect(task, cfg, usage);
-          else {
-            if (!store) throw new Error('ContextStore missing for non-direct run');
-            const raf = new RecursiveAgentFold({
-              rootLLM: cfg.root,
-              branchLLM: cfg.branch ?? cfg.root,
-              queryLLM: toolPreset(cfg).llm_query ? cfg.query : undefined,
-              queryEngine,
-              store,
-              board,
+      const dshHost =
+        cfg.method === 'dsh'
+          ? await DshBenchmarkGroupHost.create(firstTask.documents, {
+              root: cfg.root,
+              branch: cfg.branch,
+              query: cfg.query,
               llmQuery: cfg.llmQuery,
-              maxDepth: toolPreset(cfg).branch ? (cfg.maxDepth ?? DEFAULT_MAX_DEPTH) : 0,
-              rootMaxSteps: cfg.rootMaxSteps ?? 30,
-              branchMaxSteps: cfg.branchMaxSteps ?? 15,
-              agent: { systemPromptExtra: cfg.systemPromptExtra, maxObservationTokens: cfg.maxObservationTokens },
-              documentTools: cfg.documentTools,
-              enable: toolPreset(cfg),
-              usage,
-              onEvent,
-            });
-            const res = await raf.run(task.question);
-            r = { output: res.answer, steps: res.steps, terminated: res.terminated, error: res.error, formatIssues: res.formatIssues };
-          }
-          const s = r.output !== null ? task.score(r.output) : { score: 0 };
-          const result: TaskResult = {
-            id: task.id,
-            group: task.group,
-            method: cfg.method,
-            meta: task.meta,
-            ...r,
-            parsed: s.parsed,
-            score: s.score,
-            extra: s.extra,
-            wallMs: Date.now() - started,
-            usage: usage.byRole(),
-            total: usage.total(),
-            folds,
-            llmQueryCalls,
-          };
-          results.push(result);
-          appendFileSync(resultsPath, `${JSON.stringify(result)}\n`);
-          done++;
-          log(
-            `[${done}/${tasks.length}] ${task.id} score=${result.score.toFixed(3)} out=${JSON.stringify((r.output ?? '').slice(0, 80))} ` +
-              `steps=${r.steps} ${r.terminated} tokens=${result.total.promptTokens}/${result.total.completionTokens} root_cache=${((result.usage.root?.cacheHitRate ?? 0) * 100).toFixed(1)}% cache=${(result.total.cacheHitRate * 100).toFixed(1)}%` +
-              (r.error ? ` error=${r.error.slice(0, 200)}` : ''),
-          );
-        }),
-      ),
-    );
-  }),
+              maxDepth: cfg.maxDepth,
+              rootMaxSteps: cfg.rootMaxSteps,
+              shareQueryMemo: cfg.shareQueryMemo,
+            })
+          : undefined;
+      try {
+        await Promise.all(
+          group.map((task) =>
+            limit(async () => {
+              const usage = new UsageTracker();
+              const tracePath = join(cfg.outDir, 'traces', `${task.id.replace(/[^\w.-]/g, '_')}.jsonl`);
+              writeFileSync(tracePath, '');
+              const folds = { granular: 0, deep: 0, corrected: 0 };
+              let llmQueryCalls = 0;
+              const onEvent = (e: AgentEvent) => {
+                if (e.type === 'fold') {
+                  folds[e.outcome.kind]++;
+                  if (e.outcome.corrections.length) folds.corrected++;
+                }
+                if (e.type === 'llm_query') llmQueryCalls++;
+                appendFileSync(tracePath, `${JSON.stringify({ t: Date.now(), ...e })}\n`);
+                if (e.type === 'tool_call') log(`  [${task.id}] ${e.agent} step ${e.step}: ${e.action.name} ${JSON.stringify(e.action.arguments).slice(0, 160)}`);
+                if (e.type === 'format_error') log(`  [${task.id}] ${e.agent} step ${e.step}: format error ${e.errors.join('; ')}`);
+                if (e.type === 'error') log(`  [${task.id}] ${e.agent}: ERROR ${e.message}`);
+              };
+              const started = Date.now();
+              let r: Pick<TaskResult, 'output' | 'steps' | 'terminated' | 'error' | 'formatIssues'>;
+              let dshChecks: DshChecks | undefined;
+              if (cfg.method === 'direct') {
+                r = await runDirect(task, cfg, usage);
+              } else if (cfg.method === 'dsh') {
+                if (!dshHost) throw new Error('DshBenchmarkGroupHost missing for dsh run');
+                const outcome = await dshHost.runTask(task, {
+                  onEvent,
+                  usage,
+                  rootMaxSteps: cfg.rootMaxSteps,
+                });
+                r = {
+                  output: outcome.output,
+                  steps: outcome.steps,
+                  terminated: outcome.terminated,
+                  error: outcome.error,
+                  formatIssues: outcome.formatIssues,
+                };
+                dshChecks = outcome.dshChecks;
+              } else {
+                if (!store) throw new Error('ContextStore missing for non-direct run');
+                const raf = new RecursiveAgentFold({
+                  rootLLM: cfg.root,
+                  branchLLM: cfg.branch ?? cfg.root,
+                  queryLLM: toolPreset(cfg).llm_query ? cfg.query : undefined,
+                  queryEngine,
+                  store,
+                  board,
+                  llmQuery: cfg.llmQuery,
+                  maxDepth: toolPreset(cfg).branch ? (cfg.maxDepth ?? DEFAULT_MAX_DEPTH) : 0,
+                  rootMaxSteps: cfg.rootMaxSteps ?? 30,
+                  branchMaxSteps: cfg.branchMaxSteps ?? 15,
+                  agent: { systemPromptExtra: cfg.systemPromptExtra, maxObservationTokens: cfg.maxObservationTokens },
+                  documentTools: cfg.documentTools,
+                  enable: toolPreset(cfg),
+                  usage,
+                  onEvent,
+                });
+                const res = await raf.run(task.question);
+                r = { output: res.answer, steps: res.steps, terminated: res.terminated, error: res.error, formatIssues: res.formatIssues };
+              }
+              const s = r.output !== null ? task.score(r.output) : { score: 0 };
+              const result: TaskResult = {
+                id: task.id,
+                group: task.group,
+                method: cfg.method,
+                meta: dshChecks ? { ...task.meta, dshChecks } : task.meta,
+                ...r,
+                parsed: s.parsed,
+                score: s.score,
+                extra: s.extra,
+                wallMs: Date.now() - started,
+                usage: usage.byRole(),
+                total: usage.total(),
+                folds,
+                llmQueryCalls,
+              };
+              results.push(result);
+              appendFileSync(resultsPath, `${JSON.stringify(result)}\n`);
+              done++;
+              log(
+                `[${done}/${tasks.length}] ${task.id} score=${result.score.toFixed(3)} out=${JSON.stringify((r.output ?? '').slice(0, 80))} ` +
+                  `steps=${r.steps} ${r.terminated} tokens=${result.total.promptTokens}/${result.total.completionTokens} root_cache=${((result.usage.root?.cacheHitRate ?? 0) * 100).toFixed(1)}% cache=${(result.total.cacheHitRate * 100).toFixed(1)}%` +
+                  (r.error ? ` error=${r.error.slice(0, 200)}` : ''),
+              );
+            }),
+          ),
+        );
+      } finally {
+        await dshHost?.dispose();
+      }
+    }),
 );
   return results;
 }

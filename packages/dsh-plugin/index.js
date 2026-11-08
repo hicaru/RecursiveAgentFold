@@ -1214,6 +1214,7 @@ function getSessionState(sessionId, raf) {
       initialManifest: undefined,
       initialDocIds: undefined,
     };
+    sessionStates.set(key, state);
   }
   return state;
 }
@@ -1336,6 +1337,7 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
         cwd: workspace,
         idPrefix: '',
         maxFiles: 1200,
+        maxWalkFileBytes: 8 * 1024 * 1024,
         skipRichDocuments: true,
         signal: outer.signal,
       });
@@ -1364,7 +1366,11 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
       console.error('RAF: cannot auto-ingest prompt path', promptPath, error);
     }
   }
-  if (sessionState.rootState === undefined && contextMessages.length > 0) {
+  if (contextMessages.length === 0) {
+    sessionState.rootState = undefined;
+    sessionState.initialQuestion = undefined;
+    sessionState.board = new raf.ResearchBoard();
+  } else if (sessionState.rootState === undefined) {
     const recovered = extractPriorTurnBlocks(contextMessages, raf);
     if (recovered !== undefined) {
       sessionState.initialQuestion ??= recovered.initialQuestion;

@@ -1,0 +1,76 @@
+{
+  "bench": "codegraph",
+  "method": "dsh",
+  "n": 2,
+  "meanScore": 1,
+  "correct": 2,
+  "meanOfficial": 1,
+  "meanLenient": 1,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 1,
+  "meanSteps": 3,
+  "meanWallSec": 194.375,
+  "formatIssues": 2,
+  "folds": {
+    "granular": 35,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 0,
+  "tokens": {
+    "prompt": 234993,
+    "cached": 197440,
+    "completion": 54482,
+    "rootCacheHitRate": 0.7211041907921505,
+    "branchCacheHitRate": 0.8589355896809527,
+    "cacheHitRate": 0.8401952398582085
+  },
+  "byRole": {
+    "root": {
+      "calls": 6,
+      "promptTokens": 31951,
+      "completionTokens": 6627,
+      "cachedTokens": 23040,
+      "reasoningTokens": 4365,
+      "latencyMs": 85194,
+      "errors": 0,
+      "cacheHitRate": 0.7211041907921505
+    },
+    "branch": {
+      "calls": 42,
+      "promptTokens": 203042,
+      "completionTokens": 47855,
+      "cachedTokens": 174400,
+      "reasoningTokens": 34217,
+      "latencyMs": 627346,
+      "errors": 0,
+      "cacheHitRate": 0.8589355896809527
+    }
+  },
+  "byTask": {
+    "spec_specialist": {
+      "n": 1,
+      "score": 1
+    },
+    "diamond_deps": {
+      "n": 1,
+      "score": 1
+    }
+  },
+  "byAnswerType": {
+    "ANSWER_TYPE.NUMERIC": {
+      "n": 2,
+      "score": 1
+    }
+  },
+  "cost": {
+    "totalUsd": 0.343629,
+    "perTaskUsd": 0.171815,
+    "cacheSavedUsd": 0.225082,
+    "byRoleUsd": {
+      "root": 0.047625,
+      "branch": 0.296005
+    }
+  }
+}

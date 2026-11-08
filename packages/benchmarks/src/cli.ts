@@ -37,7 +37,8 @@ Commands:
   longbench-pro                  Run LongBench-Pro real-world long-context QA
   longbench                      Run LongBench-v2 multi-document & codebase QA
 Common options:
-  --method raf|agentfold|direct  (default raf)  raf = AgentFold + llm_query + branch,
+  --method raf|dsh|agentfold|direct  (default raf)  raf = AgentFold + llm_query + branch,
+                                 dsh = RAF through @raf/dsh-plugin host & tool pipeline,
                                  agentfold = plain AgentFold with grep/read, direct = single call
   --root-model <id>              override RAF_ROOT_MODEL
   --branch-model <id>            override RAF_BRANCH_MODEL (default: root model)
@@ -162,7 +163,7 @@ async function main() {
   const cacheDir = join(root, '.cache');
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const method = values.method as Method;
-  if (!['raf', 'agentfold', 'direct'].includes(method)) throw new Error(`unknown --method ${method}`);
+  if (!['raf', 'dsh', 'agentfold', 'direct'].includes(method)) throw new Error(`unknown --method ${method}`);
   // --out is relative to where the user invoked pnpm (INIT_CWD), not the package dir
   const outDir = values.out ? resolve(process.env.INIT_CWD ?? process.cwd(), values.out) : join(root, 'results', `${stamp}-${cmd}-${method}`);
   const modelOverrides = {
@@ -298,7 +299,7 @@ async function main() {
     tasks: tasks.length,
     taskIds: tasks.map((t) => t.id),
     argv: process.argv.slice(2),
-    tools: values.tools ?? (method === 'raf' ? 'all' : method === 'agentfold' ? 'grep,read,calculator' : 'none'),
+    tools: values.tools ?? (method === 'raf' || method === 'dsh' ? 'all' : method === 'agentfold' ? 'grep,read,calculator' : 'none'),
     systemPromptExtra: values['system-extra'],
     models: models.describe(),
   };

@@ -7,6 +7,13 @@ import { buildLongBenchProTasks, parseAnswerItems } from '../src/longbench-pro/t
 import { buildRulerTasks, parseAnswerList } from '../src/ruler/ruler.js';
 import { buildMrcrTasks, parseBullets } from '../src/mrcr/mrcr.js';
 import { priceFor } from '../src/pricing.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createMockModels } from '../src/mock.js';
+import { runTasks } from '../src/runner.js';
+import type { DshChecks } from '../src/dsh-host.js';
+import { ScriptedLLM } from '@raf/engine';
 describe('OOLONG scoring (official port)', () => {
   it('parses gold literals', () => {
     expect(parseGold("['location']").value).toBe('location');
@@ -206,5 +213,97 @@ describe('ruler / mrcr / longbench-pro generators', () => {
 
     // Free model pricing check
     expect(priceFor('qwen/qwen3.8-27b:free')).toEqual({ input: 0, cached: 0, output: 0 });
+  });
+});
+
+describe('DSH plugin benchmark execution (--method dsh)', () => {
+  it('executes needle and codegraph benchmark tasks end-to-end through @raf/dsh-plugin', async () => {
+    const outDir = await mkdtemp(join(tmpdir(), 'raf-bench-dsh-test-'));
+    try {
+      const models = createMockModels();
+      const needleTasks = buildNeedleTasks({ tokens: 4000, tasks: 2, seed: 42 });
+      const codeTasks = buildCodeGraphTasks({ tokens: 8000, tasks: 2, hops: 2, seed: 42 });
+      const results = await runTasks([...needleTasks, ...codeTasks], {
+        method: 'dsh',
+        root: models.root,
+        branch: models.branch,
+        query: models.query,
+        llmQuery: models.llmQuery,
+        outDir,
+        log: () => {},
+      });
+
+      expect(results.length).toBe(4);
+      for (const r of results) {
+        expect(r.method).toBe('dsh');
+        expect(r.terminated).toBe('answer');
+        expect(r.steps).toBeGreaterThan(1);
+        expect(r.folds.granular + r.folds.deep).toBeGreaterThan(0);
+        expect(r.llmQueryCalls).toBeGreaterThan(0);
+        const dshChecks = r.meta.dshChecks as DshChecks | undefined;
+        expect(dshChecks).toBeDefined();
+        expect(dshChecks?.runStatus).toBe('done');
+        expect(dshChecks?.runEventCount).toBeGreaterThan(0);
+        expect(dshChecks?.clientAgentCount).toBeGreaterThanOrEqual(1);
+        expect(dshChecks?.nativeToolCalls).toBeGreaterThanOrEqual(1);
+      }
+    } finally {
+      await rm(outDir, { recursive: true, force: true });
+    }
+  });
+
+  it('ingests >1MB workspace haystacks and routes branch specialists to branchLLM with multi-agent client tree', async () => {
+    const outDir = await mkdtemp(join(tmpdir(), 'raf-bench-dsh-branch-'));
+    try {
+      const needleTasks = buildNeedleTasks({ tokens: 300_000, tasks: 1, seed: 7 });
+      const root = new ScriptedLLM(
+        (req) => {
+          const user = req.messages[req.messages.length - 1]?.content ?? '';
+          const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+          if (step === 0) {
+            return '<motivation>Delegate haystack lookup to a specialist branch.</motivation>\n<tool_call>{"name":"branch","arguments":{"task":"Find the personnel note in haystack","scope":"haystack"}}</tool_call>';
+          }
+          return '<folding>{"range":[0,0],"summary":"Branch specialist verified haystack."}</folding>\n<answer>Answer: 1234</answer>';
+        },
+        { name: 'mock-root-tier', contextWindow: 200_000, maxOutputTokens: 4096 },
+      );
+      const branch = new ScriptedLLM(
+        (req) => {
+          const user = req.messages[req.messages.length - 1]?.content ?? '';
+          const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+          if (step === 0) {
+            return '<motivation>Grep the >1MB haystack document.</motivation>\n<tool_call>{"name":"grep","arguments":{"pattern":"Personnel note","documents":["haystack"],"max_matches":3}}</tool_call>';
+          }
+          return '<folding>{"range":[0,0],"summary":"Found personnel note lines in haystack."}</folding>\n<answer>Found badge 1234 in haystack</answer>';
+        },
+        { name: 'mock-branch-tier', contextWindow: 200_000, maxOutputTokens: 4096 },
+      );
+      const query = new ScriptedLLM(
+        () => '{"relevant":false,"answer":"","evidence":[]}',
+        { name: 'mock-query-tier', contextWindow: 128_000, maxOutputTokens: 1024 },
+      );
+
+      const results = await runTasks(needleTasks, {
+        method: 'dsh',
+        root,
+        branch,
+        query,
+        maxDepth: 2,
+        outDir,
+        log: () => {},
+      });
+
+      expect(results.length).toBe(1);
+      const r = results[0];
+      expect(r?.terminated).toBe('answer');
+      expect(r?.output).toBe('Answer: 1234');
+      expect(r?.usage.root?.calls).toBe(2);
+      expect(r?.usage.branch?.calls).toBe(2);
+      const dshChecks = r?.meta.dshChecks as DshChecks | undefined;
+      expect(dshChecks?.runStatus).toBe('done');
+      expect(dshChecks?.clientAgentCount).toBe(2);
+    } finally {
+      await rm(outDir, { recursive: true, force: true });
+    }
   });
 });

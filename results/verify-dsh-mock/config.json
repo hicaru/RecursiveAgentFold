@@ -1,0 +1,29 @@
+{
+  "bench": "needle",
+  "method": "dsh",
+  "startedAt": "2026-11-08T18:37:16.467Z",
+  "tasks": 2,
+  "taskIds": [
+    "needle-16000-lookup-0",
+    "needle-16000-count-1"
+  ],
+  "argv": [
+    "needle",
+    "--method",
+    "dsh",
+    "--mock",
+    "--tokens",
+    "16000",
+    "--tasks",
+    "2",
+    "--out",
+    "results/verify-dsh-mock"
+  ],
+  "tools": "all",
+  "models": {
+    "mock": true,
+    "llmQuery": {
+      "reserveRatio": 0.3
+    }
+  }
+}
