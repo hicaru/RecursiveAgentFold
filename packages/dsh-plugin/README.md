@@ -55,7 +55,7 @@ For a RAF Session, the plugin builds a `ContextStore` from the Session transcrip
 
 The engine exposes `begin(question)`, `next()`, and `submit(observation)`. `next()` returns a tool action without executing it, so the native loop executes the tool and the next `next()` receives the observation. `AgentFoldAgent.run()` is the same loop with in-process tool execution, so CLI and benchmark behavior is unchanged.
 
-Internal model calls use the Session provider and model through `ctx.llm` by default, with optional 3-tier environment overrides (`RAF_ROOT_PROVIDER`/`RAF_ROOT_MODEL`, `RAF_BRANCH_PROVIDER`/`RAF_BRANCH_MODEL`, `RAF_QUERY_PROVIDER`/`RAF_QUERY_MODEL`). Root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 16,384 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. Internal calls are tagged with an `AsyncLocalStorage` guard and a `raf-*` `purpose` value, so the listener does not intercept them again.
+Root calls always use the Session provider and model through `ctx.llm`; RAF does not override the native root model. Branch and reader routes come from the settings panel: branch has a provider, model, and optional reasoning effort; `llm_query` has a provider and model and never sends a reasoning effort. Deployment can still override `RAF_BRANCH_PROVIDER`/`RAF_BRANCH_MODEL` and `RAF_QUERY_PROVIDER`/`RAF_QUERY_MODEL`; root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 16,384 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. Internal calls are tagged with an `AsyncLocalStorage` guard and a `raf-*` `purpose` value, so the listener does not intercept them again.
 
 DSH marks internal calls with `purpose` (`session-title`, `compaction`, `auto-review`, `onboarding_use_case`). The listener passes every such call through. RAF therefore never answers a title prompt or a compaction summary.
 
@@ -81,37 +81,42 @@ RAF does not write display-only session events. The native DSH loop writes them:
 - the native tool pipeline and session log remain the source of truth for tool rows;
 - Trajectory and Statistics read the same native log.
 
-The separate Live Dock and its `conversation.input.dock` panel are gone, and the conversation no longer adds a RAF tab. The sidebar RAF page keeps its **Inspector** tab for the detailed per-agent trace.
+The separate Live Dock and its `conversation.input.dock` panel are gone, and the conversation no longer adds a RAF tab. The sidebar RAF page is settings-only; the Inspector tab and its agent tree were removed.
 
 The client sets the Chat `ui-chat` work-details mode to `verbose` on load, so completed Turns keep their tool rows open. A saved profile value remains the fallback if the Chat settings form is unavailable.
 
-`branch` (and legacy `raf_branch`) has its own native tool row: it lists every branch task (scope + instruction). Each task expands to that branch agent's live steps, tool calls, and results from the RAF run registry; when the registry is unavailable, the matching subtask result from the tool output is shown instead. The sidebar Inspector keeps the full agent tree. Start a new RAF run after a Host reload to populate the in-memory run registry.
+`branch` (and legacy `raf_branch`) has its own native tool row: it lists every branch task (scope + instruction). Each task expands to that branch agent's live steps, reasoning, tool calls, queries, and results from the RAF run registry. A nested `branch` call renders a nested task tree, and an `llm_query` call renders its reader details in the same task. Start a new RAF run after a Host reload to populate the in-memory run registry; without it the card falls back to the matching subtask results.
 
-### Diagnostic trace
+### Run registry
 
-The Host feeds engine `onEvent` records into the RAF run registry. The sidebar **Inspector** reads that registry:
+The Host feeds engine `onEvent` records into the RAF run registry. The branch card reads that registry to render child and nested specialist steps:
 
-- settings, steps, folds, tool calls and results, `llm_query` scans, per-call tokens/cache/latency, and the final answer;
-- Chat, Trajectory, and Statistics read the native session log instead; the inspector never writes session events;
+- steps, folds, tool calls and results, `llm_query` scans, per-call tokens/cache/latency, and the final answer;
+- Chat, Trajectory, and Statistics read the native session log; the registry never writes session events;
 - a later RAF turn replaces the registry entry for the Session.
 
 Limits of this integration:
 
 - RAF's context tools operate on the `ContextStore`; DSH tools operate on the workspace. Both appear as native tool rows.
-- Internal `branch` child steps and `llm_query` reader calls stay inside their parent native tool row. They are visible in the RAF inspector, not as separate Chat rows.
+- Internal `branch` child steps and `llm_query` reader calls stay inside their parent native tool row; the recursive branch card expands them instead of adding separate Chat rows.
 - DSH's synthetic user messages are context, not the question. The latest human message is the question.
 - An answer cut by the output limit or an unclosed `<answer>` is rejected and retried with a shorter complete answer.
-- The reader calls use the same model as the root with its default reasoning effort. The benchmark harness uses a separate non-thinking reader model; set that route before judging benchmark accuracy.
+- `llm_query` uses the configured reader model with no reasoning effort. The benchmark harness may use a separate non-thinking reader model; select it in Reader model before judging benchmark accuracy.
 
 ## Settings
 
-The settings page writes `{ depth, reserve, concurrency }` to `localStorage` and posts them to the Host.
+The settings page writes `{ depth, reserve, concurrency, branchProvider, branchModel, branchReasoningEffort, queryProvider, queryModel }` to `localStorage` and posts them to the Host. The model lists come from `GET /plugins/@raf/dsh-plugin/models`, which reads the DSH provider catalog and each model's advertised reasoning efforts.
 
 | Setting | Effect |
 |---|---|
 | Fold depth | `maxDepth` for recursive `branch` calls. |
 | Reserve | `llmQuery.reserveRatio`. |
 | Readers | `llmQuery.concurrency`. |
+| Branch model | Provider and model for scoped specialist sub-agents. |
+| Reasoning effort | Optional branch-only effort. Model default uses the provider default. |
+| Reader model | Provider and model for `llm_query`. No reasoning effort is sent. |
+
+The root model is not configurable here. Root calls use the native DSH Session provider and model.
 
 ## Slots
 

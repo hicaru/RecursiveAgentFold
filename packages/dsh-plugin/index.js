@@ -9,12 +9,15 @@ const ENGINE_STANDARD = 'standard';
 const ENGINE_RAF = 'raf';
 const ENGINE_ROUTE = '/plugins/@raf/dsh-plugin/engine';
 const RUNS_ROUTE = '/plugins/@raf/dsh-plugin/runs';
+const MODELS_ROUTE = '/plugins/@raf/dsh-plugin/models';
 const DEFAULT_SETTINGS = Object.freeze({
   depth: 2,
   reserve: 0.3,
   concurrency: 4,
-  rootModel: '',
+  branchProvider: '',
   branchModel: '',
+  branchReasoningEffort: '',
+  queryProvider: '',
   queryModel: '',
 });
 const DEPTH_MIN = 1;
@@ -57,15 +60,34 @@ function toModelString(value) {
   return typeof value === 'string' ? value.trim().slice(0, 160) : '';
 }
 
+function splitModelSpec(provider, model) {
+  let nextProvider = toModelString(provider);
+  let nextModel = toModelString(model);
+  if (nextProvider === '' && nextModel.includes('/')) {
+    const slash = nextModel.indexOf('/');
+    nextProvider = nextModel.slice(0, slash).trim();
+    nextModel = nextModel.slice(slash + 1).trim();
+  }
+  return { provider: nextProvider, model: nextModel };
+}
+
+function toEffort(value) {
+  return typeof value === 'string' ? value.trim().slice(0, 80) : '';
+}
+
 function sanitizeSettings(value) {
   const source = value !== null && typeof value === 'object' ? value : {};
+  const branch = splitModelSpec(source.branchProvider, source.branchModel);
+  const query = splitModelSpec(source.queryProvider, source.queryModel);
   return Object.freeze({
     depth: toInteger(source.depth, DEFAULT_SETTINGS.depth, DEPTH_MIN, DEPTH_MAX),
     reserve: toReserve(source.reserve),
     concurrency: toInteger(source.concurrency, DEFAULT_SETTINGS.concurrency, CONCURRENCY_MIN, CONCURRENCY_MAX),
-    rootModel: toModelString(source.rootModel),
-    branchModel: toModelString(source.branchModel),
-    queryModel: toModelString(source.queryModel),
+    branchProvider: branch.provider,
+    branchModel: branch.model,
+    branchReasoningEffort: toEffort(source.branchReasoningEffort),
+    queryProvider: query.provider,
+    queryModel: query.model,
   });
 }
 
@@ -259,16 +281,15 @@ function parseModelSpec(spec, fallback) {
 }
 
 function resolveTierTarget(outer, settings, tier, fallback = { provider: outer.provider, model: outer.model }) {
-  const settingValue =
-    tier === 'ROOT'
-      ? settings?.rootModel
-      : tier === 'BRANCH'
-        ? settings?.branchModel
-        : tier === 'QUERY'
-          ? settings?.queryModel
-          : '';
-  const fromSettings = parseModelSpec(settingValue, fallback);
-  if (fromSettings !== undefined) return fromSettings;
+  if (tier === 'ROOT') return fallback;
+  const settingProvider = tier === 'BRANCH' ? settings?.branchProvider : tier === 'QUERY' ? settings?.queryProvider : '';
+  const settingModel = tier === 'BRANCH' ? settings?.branchModel : tier === 'QUERY' ? settings?.queryModel : '';
+  if ((settingProvider ?? '') !== '' || (settingModel ?? '') !== '') {
+    return {
+      provider: (settingProvider ?? '') || fallback.provider,
+      model: (settingModel ?? '') || fallback.model,
+    };
+  }
   const rawProvider = (process.env[`RAF_${tier}_PROVIDER`] ?? '').trim();
   const rawModel = (process.env[`RAF_${tier}_MODEL`] ?? '').trim();
   if (rawProvider === '' && rawModel === '') return fallback;
@@ -279,6 +300,56 @@ function resolveTierTarget(outer, settings, tier, fallback = { provider: outer.p
     provider: rawProvider || fallback.provider,
     model: rawModel || fallback.model,
   };
+}
+
+async function catalogModels(ctx) {
+  const llm = ctx.llm;
+  if (llm === undefined || typeof llm.listProviders !== 'function') return [];
+  const providers = [];
+  const rawProviders = llm.listProviders();
+  for (const provider of Array.isArray(rawProviders) ? rawProviders : []) {
+    const id = typeof provider?.id === 'string' ? provider.id : '';
+    if (id === '') continue;
+    const name = typeof provider.name === 'string' && provider.name !== '' ? provider.name : id;
+    let rawModels = [];
+    try {
+      rawModels = typeof llm.listModels === 'function' ? await llm.listModels(id) : [];
+    } catch {
+      rawModels = [];
+    }
+    const models = [];
+    for (const model of Array.isArray(rawModels) ? rawModels : []) {
+      const modelId = typeof model?.id === 'string' ? model.id : '';
+      if (modelId === '') continue;
+      let reasoning;
+      try {
+        const info = await llm.resolveModelInfo(id, modelId);
+        reasoning = info?.reasoning;
+      } catch {
+        reasoning = undefined;
+      }
+      const efforts = Array.isArray(reasoning?.efforts)
+        ? reasoning.efforts
+            .filter((effort) => typeof effort?.id === 'string' && effort.id !== '')
+            .map((effort) => ({
+              id: effort.id,
+              name: typeof effort.name === 'string' && effort.name !== '' ? effort.name : effort.id,
+            }))
+        : [];
+      models.push({
+        id: modelId,
+        name: typeof model.name === 'string' && model.name !== '' ? model.name : modelId,
+        ...(efforts.length > 0
+          ? {
+              efforts,
+              ...(typeof reasoning.defaultEffort === 'string' ? { defaultEffort: reasoning.defaultEffort } : {}),
+            }
+          : {}),
+      });
+    }
+    providers.push({ id, name, models });
+  }
+  return providers;
 }
 
 class DshLlmClient {
@@ -999,18 +1070,24 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     }
   }
   const contextWindow = contextWindowOf(ctx, outer.sessionId);
-  const rootTarget = resolveTierTarget(outer, settings, 'ROOT');
+  const rootTarget = { provider: outer.provider, model: outer.model };
   const branchTarget = resolveTierTarget(outer, settings, 'BRANCH', rootTarget);
   const queryTarget = resolveTierTarget(outer, settings, 'QUERY', rootTarget);
+  const branchEffort =
+    typeof settings.branchReasoningEffort === 'string' && settings.branchReasoningEffort !== ''
+      ? settings.branchReasoningEffort
+      : undefined;
+  const branchConfigured =
+    (settings.branchProvider ?? '') !== '' || (settings.branchModel ?? '') !== '' || branchEffort !== undefined;
   const rootProfile = { name: rootTarget.model, contextWindow, maxOutputTokens: RAF_ROOT_MAX_OUTPUT };
   const branchProfile = { name: branchTarget.model, contextWindow, maxOutputTokens: RAF_ROOT_MAX_OUTPUT };
   const queryProfile = { name: queryTarget.model, contextWindow, maxOutputTokens: RAF_QUERY_MAX_OUTPUT };
   const rootLLM = new DshLlmClient(ctx, outer, rootProfile, outer.reasoningEffort, rootTarget);
   const branchLLM =
-    branchTarget.provider !== rootTarget.provider || branchTarget.model !== rootTarget.model
-      ? new DshLlmClient(ctx, outer, branchProfile, outer.reasoningEffort, branchTarget)
+    branchConfigured || branchTarget.provider !== rootTarget.provider || branchTarget.model !== rootTarget.model
+      ? new DshLlmClient(ctx, outer, branchProfile, branchEffort, branchTarget)
       : undefined;
-  const queryLLM = new DshLlmClient(ctx, outer, queryProfile, 'low', queryTarget);
+  const queryLLM = new DshLlmClient(ctx, outer, queryProfile, undefined, queryTarget);
   const persistIngested = (res) => {
     if (!res || !Array.isArray(res.files)) return;
     for (const file of res.files) {
@@ -1483,6 +1560,35 @@ export function apply(ctx) {
           },
         }),
       'raf: runs route',
+    );
+
+    webCtx.effect(
+      () =>
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: MODELS_ROUTE,
+          handler: async (req, res) => {
+            try {
+              const rejection = admissionRejection(webCtx, req);
+              if (rejection !== undefined) {
+                res.writeHead(rejection);
+                res.end(rejection === 401 ? 'unauthorized' : 'forbidden');
+                return;
+              }
+              if (req.method !== 'GET') {
+                res.writeHead(405, { allow: 'GET' });
+                res.end('method not allowed');
+                return;
+              }
+              const providers = await catalogModels(ctx);
+              sendJson(res, 200, { providers });
+            } catch (error) {
+              const status = typeof error?.status === 'number' ? error.status : 400;
+              sendJson(res, status, { error: error instanceof Error ? error.message : String(error) });
+            }
+          },
+        }),
+      'raf: models route',
     );
   });
 

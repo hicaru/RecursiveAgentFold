@@ -10,6 +10,7 @@ window.__ModuleLoader__.load({
     const ENGINES_KEY = 'raf.dsh.engines.v1';
     const ENGINE_API = '/plugins/@raf/dsh-plugin/engine';
     const RUNS_API = '/plugins/@raf/dsh-plugin/runs';
+    const MODELS_API = '/plugins/@raf/dsh-plugin/models';
     const ENGINE_STANDARD = 'standard';
     const ENGINE_RAF = 'raf';
 
@@ -25,8 +26,10 @@ window.__ModuleLoader__.load({
       depth: 2,
       reserve: 0.3,
       concurrency: 4,
-      rootModel: '',
+      branchProvider: '',
       branchModel: '',
+      branchReasoningEffort: '',
+      queryProvider: '',
       queryModel: '',
     });
 
@@ -46,13 +49,19 @@ window.__ModuleLoader__.load({
       'tuning.reserve.desc': 'Share of each reader window kept free for the prompt.',
       'tuning.concurrency.title': 'Readers',
       'tuning.concurrency.desc': 'Parallel llm_query calls over the context.',
-      'tuning.rootModel.title': 'Root model',
-      'tuning.rootModel.desc': 'Orchestrator model (provider/model). Blank uses the Session model.',
       'tuning.branchModel.title': 'Branch model (sub-agents)',
-      'tuning.branchModel.desc': 'Scoped specialist model (e.g. deepseek/deepseek-chat). Blank uses Root.',
+      'tuning.branchModel.desc': 'Provider and model for scoped specialist sub-agents.',
       'tuning.queryModel.title': 'Reader model (llm_query)',
-      'tuning.queryModel.desc': 'Fast chunk reader model (e.g. zai-coding-cn/glm-5.3-flash). Blank uses Root.',
-      'tuning.modelPlaceholder': 'Session default (or provider/model)',
+      'tuning.queryModel.desc': 'Fast reader model for chunk scanning. No reasoning effort is sent.',
+      'tuning.effort.title': 'Reasoning effort',
+      'tuning.effort.desc': 'Reasoning level for branch specialists. Model default uses the provider default.',
+      'tuning.effort.default': 'Model default',
+      'tuning.effort.selectModel': 'Select a branch model to choose reasoning effort.',
+      'tuning.effort.none': 'This model advertises no reasoning efforts.',
+      'tuning.modelPlaceholder': 'Session default (root model)',
+      'tuning.searchModels': 'Search models...',
+      'tuning.noModels': 'No models match this search.',
+      'tuning.modelsUnavailable': 'The model catalog is unavailable. Reload the plugin host and try again.',
       'tuning.decrease': 'Decrease',
       'tuning.increase': 'Increase',
       'menu.head': 'Engine',
@@ -72,7 +81,6 @@ window.__ModuleLoader__.load({
       'view.cache': 'Cache',
       'view.duration': 'Duration',
       'view.model': 'Model',
-      'view.settings': 'Settings',
       'view.question': 'Question',
       'view.answer': 'Answer',
       'view.thinking': 'Response',
@@ -90,7 +98,6 @@ window.__ModuleLoader__.load({
       'view.openAgent': 'Open subagent',
       'view.parent': 'Parent',
       'view.motivation': 'Motivation',
-      'view.inspector': 'Inspector',
       'tool.branch.title': 'Branch',
       'tool.branch.tasks': 'tasks',
       'tool.branch.running': 'running',
@@ -117,13 +124,19 @@ window.__ModuleLoader__.load({
       'tuning.reserve.desc': 'Доля окна читателя, свободная для промпта.',
       'tuning.concurrency.title': 'Читатели',
       'tuning.concurrency.desc': 'Параллельные вызовы llm_query по контексту.',
-      'tuning.rootModel.title': 'Модель корня (root)',
-      'tuning.rootModel.desc': 'Модель оркестратора (provider/model). Пусто — модель сессии.',
       'tuning.branchModel.title': 'Модель веток (branch)',
-      'tuning.branchModel.desc': 'Модель суб-агентов (например deepseek/deepseek-chat). Пусто — корень.',
+      'tuning.branchModel.desc': 'Провайдер и модель для scoped-субагентов.',
       'tuning.queryModel.title': 'Модель читателя (llm_query)',
-      'tuning.queryModel.desc': 'Быстрая модель чтения чанков (например zai-coding-cn/glm-5.3-flash).',
-      'tuning.modelPlaceholder': 'По умолчанию сессии (или provider/model)',
+      'tuning.queryModel.desc': 'Быстрая модель чтения чанков. Reasoning effort не передаётся.',
+      'tuning.effort.title': 'Reasoning effort',
+      'tuning.effort.desc': 'Уровень рассуждений для branch-специалистов. Model default — дефолт провайдера.',
+      'tuning.effort.default': 'Model default',
+      'tuning.effort.selectModel': 'Выберите модель веток, чтобы задать reasoning effort.',
+      'tuning.effort.none': 'Эта модель не объявляет reasoning efforts.',
+      'tuning.modelPlaceholder': 'Модель сессии (root)',
+      'tuning.searchModels': 'Поиск моделей...',
+      'tuning.noModels': 'Ничего не найдено.',
+      'tuning.modelsUnavailable': 'Каталог моделей недоступен. Перезагрузите плагин и попробуйте снова.',
       'tuning.decrease': 'Уменьшить',
       'tuning.increase': 'Увеличить',
       'menu.head': 'Движок',
@@ -143,7 +156,6 @@ window.__ModuleLoader__.load({
       'view.cache': 'Кэш',
       'view.duration': 'Время',
       'view.model': 'Модель',
-      'view.settings': 'Настройки',
       'view.question': 'Вопрос',
       'view.answer': 'Ответ',
       'view.thinking': 'Ответ модели',
@@ -161,7 +173,6 @@ window.__ModuleLoader__.load({
       'view.openAgent': 'Открыть суб-агента',
       'view.parent': 'Родитель',
       'view.motivation': 'Мотивация',
-      'view.inspector': 'Инспектор',
       'tool.branch.title': 'Ветки',
       'tool.branch.tasks': 'задачи',
       'tool.branch.running': 'выполняется',
@@ -234,6 +245,25 @@ window.__ModuleLoader__.load({
 .rafx-value{min-width:38px;text-align:right;font-family:var(--ds-font-family-code,monospace);font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--rafx-ink-2)}
 .rafx-input{box-sizing:border-box;width:240px;max-width:100%;height:30px;padding:0 10px;border:.5px solid var(--rafx-line);border-radius:8px;background:var(--rafx-surface-2);color:var(--rafx-ink);font-family:var(--ds-font-family-code,monospace);font-size:12px}
 .rafx-input::placeholder{color:var(--rafx-ink-3);font-family:inherit}
+.rafx-modelPicker{position:relative;width:260px;max-width:100%}
+.rafx-modelTrigger{display:flex;align-items:center;gap:8px;box-sizing:border-box;width:100%;height:30px;padding:0 10px;border:.5px solid var(--rafx-line);border-radius:8px;background:var(--rafx-surface-2);color:var(--rafx-ink);font:inherit;font-size:12px;text-align:left;cursor:pointer}
+.rafx-modelTrigger:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.rafx-modelTriggerLabel{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rafx-modelChevron{display:inline-flex;flex:none;color:var(--dsw-alias-label-caption)}
+.rafx-modelMenu{position:fixed;z-index:1100;display:flex;flex-direction:column;box-sizing:border-box;max-height:340px;padding:4px;border:.5px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);box-shadow:var(--dsw-elevation-prominent);color:var(--dsw-alias-label-primary);overflow:auto;animation:rafx-pop .13s var(--ds-ease-in-out)}
+.rafx-modelSearch{box-sizing:border-box;width:100%;height:30px;margin-bottom:4px;padding:0 9px;border:.5px solid var(--rafx-line);border-radius:8px;background:var(--rafx-surface-2);color:var(--rafx-ink);font:inherit;font-size:12px;outline:none;flex:none}
+.rafx-modelSearch:focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--rafx-business));outline-offset:1px}
+.rafx-modelGroup{display:flex;flex-direction:column;gap:1px;padding:3px 0}
+.rafx-modelGroupHead{padding:4px 8px 2px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;font-weight:500}
+.rafx-modelOption{display:flex;align-items:center;gap:8px;width:100%;height:30px;padding:0 8px;border:0;border-radius:8px;background:transparent;color:var(--rafx-ink);font:inherit;font-size:12px;line-height:18px;text-align:left;cursor:pointer}
+.rafx-modelOption:hover,.rafx-modelOption:focus-visible{background:var(--dsw-alias-interactive-bg-hover);outline:none}
+.rafx-modelOption[aria-selected=true]{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 9%,transparent)}
+.rafx-modelOptionName{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rafx-modelOptionId{flex:none;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,monospace);font-size:10px}
+.rafx-modelOptionCheck{display:grid;place-items:center;width:16px;height:16px;flex:none;color:var(--dsw-alias-brand-primary)}
+.rafx-modelEmpty{padding:10px 8px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+.rafx-select{box-sizing:border-box;width:180px;max-width:100%;height:30px;padding:0 8px;border:.5px solid var(--rafx-line);border-radius:8px;background:var(--rafx-surface-2);color:var(--rafx-ink);font:inherit;font-size:12px;cursor:pointer}
+.rafx-select:disabled{opacity:.55;cursor:default}
 .rafx-slider{width:100%;height:18px;margin:0;accent-color:var(--rafx-business);cursor:pointer}
 .rafx-seg{display:inline-flex;gap:2px;padding:2px;border-radius:10px;background:var(--rafx-surface-2)}
 .rafx-segBtn{width:30px;height:24px;border:0;border-radius:8px;background:transparent;color:var(--rafx-ink-3);font:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:background .14s,color .14s}
@@ -396,15 +426,34 @@ window.__ModuleLoader__.load({
       return typeof value === 'string' ? value.trim().slice(0, 160) : '';
     }
 
+    function splitModelSpec(provider, model) {
+      let nextProvider = toModelString(provider);
+      let nextModel = toModelString(model);
+      if (nextProvider === '' && nextModel.includes('/')) {
+        const slash = nextModel.indexOf('/');
+        nextProvider = nextModel.slice(0, slash).trim();
+        nextModel = nextModel.slice(slash + 1).trim();
+      }
+      return { provider: nextProvider, model: nextModel };
+    }
+
+    function toEffort(value) {
+      return typeof value === 'string' ? value.trim().slice(0, 80) : '';
+    }
+
     function sanitizeSettings(value) {
       const source = value !== null && typeof value === 'object' ? value : {};
+      const branch = splitModelSpec(source.branchProvider, source.branchModel);
+      const query = splitModelSpec(source.queryProvider, source.queryModel);
       return Object.freeze({
         depth: toInteger(source.depth, DEFAULT_SETTINGS.depth, DEPTH_MIN, DEPTH_MAX),
         reserve: toReserve(source.reserve),
         concurrency: toInteger(source.concurrency, DEFAULT_SETTINGS.concurrency, CONCURRENCY_MIN, CONCURRENCY_MAX),
-        rootModel: toModelString(source.rootModel),
-        branchModel: toModelString(source.branchModel),
-        queryModel: toModelString(source.queryModel),
+        branchProvider: branch.provider,
+        branchModel: branch.model,
+        branchReasoningEffort: toEffort(source.branchReasoningEffort),
+        queryProvider: query.provider,
+        queryModel: query.model,
       });
     }
 
@@ -462,8 +511,10 @@ window.__ModuleLoader__.load({
             depth: DEFAULT_SETTINGS.depth,
             reserve: DEFAULT_SETTINGS.reserve,
             concurrency: DEFAULT_SETTINGS.concurrency,
-            rootModel: DEFAULT_SETTINGS.rootModel,
+            branchProvider: DEFAULT_SETTINGS.branchProvider,
             branchModel: DEFAULT_SETTINGS.branchModel,
+            branchReasoningEffort: DEFAULT_SETTINGS.branchReasoningEffort,
+            queryProvider: DEFAULT_SETTINGS.queryProvider,
             queryModel: DEFAULT_SETTINGS.queryModel,
           });
           persist();
@@ -581,6 +632,12 @@ window.__ModuleLoader__.load({
 
     function getRun(id) {
       return requestHost('GET', undefined, undefined, RUNS_API + '/' + encodeURIComponent(id));
+    }
+
+    function getModels() {
+      return requestHost('GET', undefined, undefined, MODELS_API).then((data) =>
+        Array.isArray(data.providers) ? data.providers : [],
+      );
     }
 
     function getHostEngine(sessionId) {
@@ -1031,9 +1088,164 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function ModelPicker({ t, catalog, provider, model, onSelect }) {
+      const [open, setOpen] = React.useState(false);
+      const [search, setSearch] = React.useState('');
+      const [rect, setRect] = React.useState(null);
+      const triggerRef = React.useRef(null);
+      const menuRef = React.useRef(null);
+      const selectedProvider = catalog.find((entry) => entry.id === provider);
+      const selectedModel = selectedProvider === undefined ? undefined : selectedProvider.models.find((entry) => entry.id === model);
+      const label =
+        selectedModel === undefined
+          ? t('tuning.modelPlaceholder')
+          : `${selectedProvider.name} · ${selectedModel.name}`;
+
+      const close = () => {
+        setOpen(false);
+        setSearch('');
+      };
+      const openMenu = () => {
+        const node = triggerRef.current;
+        if (node === null) return;
+        setRect(node.getBoundingClientRect());
+        setOpen(true);
+      };
+
+      React.useEffect(() => {
+        if (!open) return undefined;
+        const onPointerDown = (event) => {
+          const trigger = triggerRef.current;
+          const menu = menuRef.current;
+          if (trigger !== null && event.target instanceof Node && trigger.contains(event.target)) return;
+          if (menu !== null && event.target instanceof Node && menu.contains(event.target)) return;
+          close();
+        };
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') close();
+        };
+        document.addEventListener('pointerdown', onPointerDown, true);
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+          document.removeEventListener('pointerdown', onPointerDown, true);
+          document.removeEventListener('keydown', onKeyDown);
+        };
+      }, [open]);
+
+      const query = search.trim().toLowerCase();
+      const groups = [];
+      for (const entry of catalog) {
+        const models = entry.models.filter(
+          (candidate) =>
+            query === '' ||
+            `${entry.name} ${entry.id} ${candidate.name} ${candidate.id}`.toLowerCase().includes(query),
+        );
+        if (models.length > 0) groups.push({ provider: entry, models });
+      }
+      const menuTop = rect === null ? 0 : Math.min(rect.bottom + 4, Math.max(12, window.innerHeight - 352));
+      const choose = (nextProvider, nextModel) => {
+        onSelect(nextProvider.id, nextModel.id);
+        close();
+      };
+
+      return h(
+        'div',
+        { className: 'rafx-modelPicker' },
+        h(
+          'button',
+          {
+            ref: triggerRef,
+            type: 'button',
+            className: 'rafx-modelTrigger',
+            'aria-haspopup': 'listbox',
+            'aria-expanded': open,
+            onClick: () => (open ? close() : openMenu()),
+          },
+          h('span', { className: 'rafx-modelTriggerLabel' }, label),
+          h('span', { className: 'rafx-modelChevron', 'aria-hidden': 'true' }, h(ChevronGlyph, { size: 12 })),
+        ),
+        !open
+          ? null
+          : h(
+              'div',
+              {
+                ref: menuRef,
+                className: 'rafx-modelMenu',
+                role: 'listbox',
+                style: {
+                  left: rect === null ? 0 : Math.min(rect.left, Math.max(12, window.innerWidth - 340)),
+                  top: menuTop,
+                  width: Math.max(320, rect === null ? 320 : Math.min(rect.width, 520)),
+                },
+              },
+              h('input', {
+                type: 'search',
+                className: 'rafx-modelSearch',
+                placeholder: t('tuning.searchModels'),
+                value: search,
+                autoFocus: true,
+                onChange: (event) => setSearch(event.target.value),
+              }),
+              groups.length === 0
+                ? h('div', { className: 'rafx-modelEmpty' }, t('tuning.noModels'))
+                : groups.map((group) =>
+                    h(
+                      'div',
+                      { className: 'rafx-modelGroup', key: group.provider.id },
+                      h('div', { className: 'rafx-modelGroupHead' }, group.provider.name),
+                      group.models.map((candidate) => {
+                        const selected = provider === group.provider.id && model === candidate.id;
+                        return h(
+                          'button',
+                          {
+                            type: 'button',
+                            key: candidate.id,
+                            role: 'option',
+                            className: 'rafx-modelOption',
+                            'aria-selected': selected,
+                            onClick: () => choose(group.provider, candidate),
+                          },
+                          h('span', { className: 'rafx-modelOptionName' }, candidate.name),
+                          h('span', { className: 'rafx-modelOptionId' }, candidate.id),
+                          h(
+                            'span',
+                            { className: 'rafx-modelOptionCheck', 'aria-hidden': 'true' },
+                            selected ? h(CheckGlyph, { size: 14 }) : null,
+                          ),
+                        );
+                      }),
+                    ),
+                  ),
+            ),
+      );
+    }
+
+    function EffortSelect({ t, value, efforts, disabled, onChange }) {
+      const options = [
+        { id: '', name: t('tuning.effort.default') },
+        ...efforts.map((effort) => ({ id: effort.id, name: effort.name })),
+      ];
+      if (value !== '' && !options.some((option) => option.id === value)) {
+        options.push({ id: value, name: value });
+      }
+      return h(
+        'select',
+        {
+          className: 'rafx-select',
+          value,
+          disabled,
+          'aria-label': t('tuning.effort.title'),
+          onChange: (event) => onChange(event.target.value),
+        },
+        options.map((option) => h('option', { key: option.id, value: option.id }, option.name)),
+      );
+    }
+
     function RafSettingsContent({ t }) {
       const settings = useStore(settingsStore);
       const [flash, setFlash] = React.useState(false);
+      const [catalog, setCatalog] = React.useState([]);
+      const [catalogError, setCatalogError] = React.useState(false);
       const first = React.useRef(true);
       React.useEffect(() => {
         if (first.current) {
@@ -1044,7 +1256,33 @@ window.__ModuleLoader__.load({
         const timer = window.setTimeout(() => setFlash(false), 1400);
         return () => window.clearTimeout(timer);
       }, [settings]);
+      React.useEffect(() => {
+        let active = true;
+        getModels()
+          .then((providers) => {
+            if (active) {
+              setCatalog(providers);
+              setCatalogError(false);
+            }
+          })
+          .catch(() => {
+            if (active) setCatalogError(true);
+          });
+        return () => {
+          active = false;
+        };
+      }, []);
 
+      const branchProvider = catalog.find((entry) => entry.id === settings.branchProvider);
+      const branchEntry =
+        branchProvider === undefined ? undefined : branchProvider.models.find((entry) => entry.id === settings.branchModel);
+      const branchEfforts = branchEntry === undefined || !Array.isArray(branchEntry.efforts) ? [] : branchEntry.efforts;
+      const effortHint =
+        branchEntry === undefined
+          ? t('tuning.effort.selectModel')
+          : branchEfforts.length === 0
+            ? t('tuning.effort.none')
+            : t('tuning.effort.desc');
       const percent = Math.round(settings.reserve * 100);
       return h(
         'div',
@@ -1124,81 +1362,49 @@ window.__ModuleLoader__.load({
               }),
             }),
             h(SettingRow, {
-              label: t('tuning.rootModel.title'),
-              hint: t('tuning.rootModel.desc'),
-              control: h('input', {
-                type: 'text',
-                className: 'rafx-input',
-                value: settings.rootModel ?? '',
-                placeholder: t('tuning.modelPlaceholder'),
-                'aria-label': t('tuning.rootModel.title'),
-                onChange: (event) => settingsStore.update({ rootModel: event.target.value }),
+              label: t('tuning.branchModel.title'),
+              hint: t('tuning.branchModel.desc'),
+              control: h(ModelPicker, {
+                t,
+                catalog,
+                provider: settings.branchProvider,
+                model: settings.branchModel,
+                onSelect: (provider, model) =>
+                  settingsStore.update({ branchProvider: provider, branchModel: model, branchReasoningEffort: '' }),
               }),
             }),
             h(SettingRow, {
-              label: t('tuning.branchModel.title'),
-              hint: t('tuning.branchModel.desc'),
-              control: h('input', {
-                type: 'text',
-                className: 'rafx-input',
-                value: settings.branchModel ?? '',
-                placeholder: t('tuning.modelPlaceholder'),
-                'aria-label': t('tuning.branchModel.title'),
-                onChange: (event) => settingsStore.update({ branchModel: event.target.value }),
+              label: t('tuning.effort.title'),
+              hint: effortHint,
+              control: h(EffortSelect, {
+                t,
+                value: settings.branchReasoningEffort,
+                efforts: branchEfforts,
+                disabled: branchEntry === undefined || branchEfforts.length === 0,
+                onChange: (value) => settingsStore.update({ branchReasoningEffort: value }),
               }),
             }),
             h(SettingRow, {
               label: t('tuning.queryModel.title'),
               hint: t('tuning.queryModel.desc'),
-              control: h('input', {
-                type: 'text',
-                className: 'rafx-input',
-                value: settings.queryModel ?? '',
-                placeholder: t('tuning.modelPlaceholder'),
-                'aria-label': t('tuning.queryModel.title'),
-                onChange: (event) => settingsStore.update({ queryModel: event.target.value }),
+              control: h(ModelPicker, {
+                t,
+                catalog,
+                provider: settings.queryProvider,
+                model: settings.queryModel,
+                onSelect: (provider, model) => settingsStore.update({ queryProvider: provider, queryModel: model }),
               }),
             }),
+            catalogError
+              ? h('div', { className: 'rafx-hint' }, t('tuning.modelsUnavailable'))
+              : null,
           ),
         ),
       );
     }
 
-    function RafPanel({ t, sessionId }) {
-      const [tab, setTab] = React.useState('inspector');
-      return h(
-        'section',
-        { className: 'rafx-page', 'aria-label': t('panel.title') },
-        h(
-          'div',
-          { className: 'rafx-panelTabs', role: 'tablist', 'aria-label': t('panel.title') },
-          h(
-            'button',
-            {
-              type: 'button',
-              role: 'tab',
-              className: 'rafx-panelTab',
-              'aria-selected': tab === 'inspector',
-              onClick: () => setTab('inspector'),
-            },
-            t('view.inspector'),
-          ),
-          h(
-            'button',
-            {
-              type: 'button',
-              role: 'tab',
-              className: 'rafx-panelTab',
-              'aria-selected': tab === 'settings',
-              onClick: () => setTab('settings'),
-            },
-            t('view.settings'),
-          ),
-        ),
-        tab === 'inspector'
-          ? h(RafRunsView, { t, sessionId, allowAllSessions: true })
-          : h(RafSettingsContent, { t }),
-      );
+    function RafPanel({ t }) {
+      return h('section', { className: 'rafx-page', 'aria-label': t('panel.title') }, h(RafSettingsContent, { t }));
     }
 
     const TOOL_BADGES = Object.freeze({
@@ -1231,11 +1437,6 @@ window.__ModuleLoader__.load({
       if (number < 1000) return `${Math.round(number)} ms`;
       if (number < 60000) return `${(number / 1000).toFixed(1)} s`;
       return `${Math.floor(number / 60000)}m ${Math.round((number % 60000) / 1000)}s`;
-    }
-
-    function formatClock(value) {
-      const number = typeof value === 'number' && Number.isFinite(value) ? value : Date.now();
-      return new Date(number).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     }
 
     function shortValue(value, limit) {
@@ -1310,61 +1511,6 @@ window.__ModuleLoader__.load({
       }
       usage.cacheHitRate = usage.input > 0 ? usage.cached / usage.input : 0;
       return usage;
-    }
-
-    function usageOfRun(run) {
-      if (run === null || typeof run !== 'object') return { ...usageOfCalls([]), rootCacheHitRate: 0 };
-      let rootInput = 0;
-      let rootCached = 0;
-      for (const entry of Array.isArray(run.events) ? run.events : []) {
-        const event = entry === null || typeof entry !== 'object' ? null : entry.event;
-        if (event !== null && typeof event === 'object' && event.type === 'llm_call' && event.role === 'root' && event.usage !== null && typeof event.usage === 'object') {
-          rootInput += Number(event.usage.promptTokens ?? 0);
-          rootCached += Number(event.usage.cachedTokens ?? 0);
-        }
-      }
-      const computedRootCache = rootInput > 0 ? rootCached / rootInput : 0;
-      if (run.usage !== null && typeof run.usage === 'object') {
-        return {
-          input: Number(run.usage.input ?? 0),
-          output: Number(run.usage.output ?? 0),
-          cached: Number(run.usage.cached ?? 0),
-          calls: Number(run.usage.calls ?? 0),
-          errors: Number(run.usage.errors ?? 0),
-          latencyMs: Number(run.usage.latencyMs ?? 0),
-          cacheHitRate: Number(run.usage.cacheHitRate ?? 0),
-          rootCacheHitRate: Number(run.usage.rootCacheHitRate ?? computedRootCache),
-        };
-      }
-      let usage = { input: 0, output: 0, cached: 0, calls: 0, cacheHitRate: 0, rootCacheHitRate: computedRootCache };
-      for (const entry of Array.isArray(run.events) ? run.events : []) {
-        const event = entry === null || typeof entry !== 'object' ? null : entry.event;
-        if (event === null || typeof event !== 'object') continue;
-        if (event.type === 'llm_call' && event.usage !== null && typeof event.usage === 'object') {
-          const extra = usageOfCalls([event]);
-          usage = mergeUsage(usage, extra);
-        } else if (event.type === 'llm_query') {
-          usage = mergeUsage(usage, usageOfQueries([event]));
-        }
-      }
-      usage.cacheHitRate = usage.input > 0 ? usage.cached / usage.input : 0;
-      usage.rootCacheHitRate = computedRootCache;
-      return usage;
-    }
-
-    function agentStatus(agent) {
-      if (agent === null || typeof agent !== 'object') return 'running';
-      if (agent.endedAt === null) return 'running';
-      if (agent.terminated === 'error' || agent.terminated === 'filtered') return 'error';
-      return 'done';
-    }
-
-    function agentStateLabel(t, agent) {
-      if (agent === null || typeof agent !== 'object') return '';
-      if (agent.endedAt === null) return runStatusLabel(t, 'running');
-      if (agent.terminated === 'answer' || agent.terminated === 'forced_answer') return runStatusLabel(t, 'done');
-      if (agent.terminated === 'error' || agent.terminated === 'filtered') return runStatusLabel(t, 'error');
-      return String(agent.terminated ?? '');
     }
 
     function summarizeEventActivity(event) {
@@ -1985,328 +2131,6 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function RafRunsView({ t, sessionId, allowAllSessions = false }) {
-      const [runs, setRuns] = React.useState([]);
-      const [selectedRunId, setSelectedRunId] = React.useState(null);
-      const [run, setRun] = React.useState(null);
-      const [selectedAgentId, setSelectedAgentId] = React.useState(null);
-      const [openSteps, setOpenSteps] = React.useState(() => new Set());
-      const [openTools, setOpenTools] = React.useState(() => new Set());
-      const [error, setError] = React.useState(null);
-      const manual = React.useRef(false);
-      const runningRef = React.useRef(false);
-
-      React.useEffect(() => {
-        const hasSession = typeof sessionId === 'string' && sessionId.trim() !== '';
-        if (!hasSession && !allowAllSessions) return undefined;
-        let active = true;
-        let timer = 0;
-        const load = async () => {
-          try {
-            const next = await getRuns(hasSession ? sessionId : undefined);
-            if (!active) return;
-            setRuns(next);
-            if (!manual.current && next[0] !== undefined) setSelectedRunId(next[0].id);
-            setError(null);
-          } catch (reason) {
-            if (active) setError(reason instanceof Error ? reason.message : String(reason));
-          } finally {
-            if (active) timer = window.setTimeout(load, 1800);
-          }
-        };
-        void load();
-        return () => {
-          active = false;
-          if (timer !== 0) window.clearTimeout(timer);
-        };
-      }, [sessionId, allowAllSessions]);
-
-      React.useEffect(() => {
-        setSelectedAgentId(null);
-        setOpenSteps(new Set());
-        setOpenTools(new Set());
-        setRun(null);
-      }, [selectedRunId]);
-
-      React.useEffect(() => {
-        if (typeof selectedRunId !== 'string' || !selectedRunId) return undefined;
-        let active = true;
-        let timer = 0;
-        const load = async () => {
-          try {
-            const detail = await getRun(selectedRunId);
-            if (!active) return;
-            setRun(detail);
-            runningRef.current = detail.status === 'running';
-            setError(null);
-          } catch (reason) {
-            if (active) setError(reason instanceof Error ? reason.message : String(reason));
-          } finally {
-            if (active) timer = window.setTimeout(load, runningRef.current ? 600 : 2500);
-          }
-        };
-        void load();
-        return () => {
-          active = false;
-          if (timer !== 0) window.clearTimeout(timer);
-        };
-      }, [selectedRunId]);
-
-      const model = React.useMemo(() => buildRunModel(run), [run]);
-      const agents = model === null ? [] : model.agents;
-      const agentById = new Map(agents.map((candidate) => [candidate.id, candidate]));
-      const agent = agents.find((candidate) => candidate.id === selectedAgentId) ?? agents[0] ?? null;
-      const selectedSummary = runs.find((candidate) => candidate.id === selectedRunId);
-      const usage = run !== null ? usageOfRun(run) : selectedSummary?.usage ?? usageOfCalls([]);
-
-      const toggleStep = (stepKey) => {
-        setOpenSteps((current) => {
-          const next = new Set(current);
-          if (next.has(stepKey)) next.delete(stepKey);
-          else next.add(stepKey);
-          return next;
-        });
-      };
-
-      const toggleTool = (key) => {
-        setOpenTools((current) => {
-          const next = new Set(current);
-          if (next.has(key)) next.delete(key);
-          else next.add(key);
-          return next;
-        });
-      };
-
-      const hasSession = typeof sessionId === 'string' && sessionId.trim() !== '';
-      if (!hasSession && !allowAllSessions) {
-        return h('section', { className: 'rafx-page rafx-runs' }, h(RafRunsEmpty, { t }));
-      }
-      if (runs.length === 0) {
-        return h(
-          'section',
-          { className: 'rafx-page rafx-runs' },
-          error === null ? null : h('div', { className: 'rafx-runsNotice' }, error),
-          h(RafRunsEmpty, { t }),
-        );
-      }
-
-      const status = run === null ? selectedSummary?.status ?? 'running' : run.status;
-      const question = run === null ? selectedSummary?.question ?? '' : run.question;
-      const modelName = run === null ? selectedSummary?.model ?? '' : run.model;
-      const settings = run === null ? selectedSummary?.settings : run.settings;
-      const duration =
-        run !== null
-          ? (run.endedAt ?? Date.now()) - run.startedAt
-          : selectedSummary === undefined
-            ? 0
-            : (selectedSummary.endedAt ?? Date.now()) - selectedSummary.startedAt;
-
-      return h(
-        'section',
-        { className: 'rafx-page rafx-runs' },
-        h(
-          'header',
-          { className: 'rafx-runsTop' },
-          h(
-            'div',
-            { className: 'rafx-runsTopMain' },
-            h(
-              'div',
-              { className: 'rafx-runsTitle' },
-              h('h1', { className: 'rafx-runsHeading' }, 'RAF'),
-              h('p', { className: 'rafx-runsQuestion', title: question }, question),
-              h(
-                'div',
-                { className: 'rafx-runsMeta' },
-                h(
-                  'span',
-                  { className: 'rafx-runsChip', 'data-status': status },
-                  h('span', { className: 'rafx-runsDot', 'aria-hidden': true }),
-                  runStatusLabel(t, status),
-                ),
-                modelName === '' ? null : h('span', { className: 'rafx-runsChip' }, modelName),
-                settings === null || settings === undefined
-                  ? null
-                  : h(
-                      'span',
-                      { className: 'rafx-runsChip' },
-                      `depth ${settings.depth} · reserve ${Math.round(settings.reserve * 100)}% · readers ${settings.concurrency}`,
-                    ),
-              ),
-            ),
-            h(
-              'div',
-              { className: 'rafx-runsActions' },
-              h(
-                'label',
-                { className: 'rafx-runsSelectWrap' },
-                h('span', null, t('view.selectRun')),
-                h(
-                  'select',
-                  {
-                    className: 'rafx-runsSelect',
-                    value: selectedRunId ?? '',
-                    onChange: (event) => {
-                      manual.current = true;
-                      setSelectedRunId(event.target.value);
-                    },
-                  },
-                  runs.map((candidate) =>
-                    h(
-                      'option',
-                      { key: candidate.id, value: candidate.id },
-                      `${formatClock(candidate.startedAt)} · ${runStatusLabel(t, candidate.status)} · ${candidate.question.slice(0, 58)}`,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-          h(
-            'div',
-            { className: 'rafx-runsStats' },
-            h(RafStat, { label: t('view.steps'), value: String(run?.stepCount ?? selectedSummary?.stepCount ?? 0) }),
-            h(RafStat, { label: t('view.agents'), value: String(agents.length || (run?.agentCount ?? selectedSummary?.agentCount ?? 0)) }),
-            h(RafStat, { label: t('view.tokens'), value: `${formatTokens(usage.input)} / ${formatTokens(usage.output)}` }),
-            h(RafStat, { label: t('view.rootCache'), value: formatPercent(usage.rootCacheHitRate ?? usage.cacheHitRate) }),
-            h(RafStat, { label: t('view.cache'), value: formatPercent(usage.cacheHitRate) }),
-            h(RafStat, { label: t('view.duration'), value: formatDuration(duration) }),
-          ),
-          error === null ? null : h('div', { className: 'rafx-runsNotice' }, error),
-        ),
-        h(
-          'div',
-          { className: 'rafx-runsBody' },
-          h(
-            'aside',
-            { className: 'rafx-agents' },
-            h(
-              'div',
-              { className: 'rafx-agentsHead' },
-              h('span', null, t('view.agents')),
-              h('span', { className: 'rafx-agentsCount' }, String(agents.length)),
-            ),
-            h(
-              'div',
-              { className: 'rafx-agentList' },
-              agents.map((candidate) =>
-                h(
-                  'button',
-                  {
-                    key: candidate.id,
-                    type: 'button',
-                    className: 'rafx-agent',
-                    'data-selected': agent !== null && candidate.id === agent.id ? 'true' : undefined,
-                    'data-depth': candidate.depth,
-                    style: { paddingLeft: `${8 + candidate.depth * 12}px` },
-                    onClick: () => {
-                      setSelectedAgentId(candidate.id);
-                    },
-                  },
-                  h('span', { className: 'rafx-agentDot', 'data-status': agentStatus(candidate), 'aria-hidden': true }),
-                  h(
-                    'span',
-                    { className: 'rafx-agentBody' },
-                    h('span', { className: 'rafx-agentName' }, candidate.depth === 0 ? t('view.root') : candidate.name),
-                    h(
-                      'span',
-                      { className: 'rafx-agentMeta' },
-                      `${candidate.steps.length} ${t('view.steps').toLowerCase()} · ${formatTokens(candidate.usage.input)} in · ${candidate.currentStage}`,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-          h(
-            'div',
-            { className: 'rafx-timeline' },
-            agent === null
-              ? h(
-                  'div',
-                  { className: 'rafx-timelineEmpty' },
-                  h('p', null, run?.error ?? t('view.noEvents')),
-                )
-              : h(
-                  React.Fragment,
-                  null,
-                  h(
-                    'div',
-                    { className: 'rafx-agentHead' },
-                    h(
-                      'div',
-                      { className: 'rafx-agentHeadTitle' },
-                      agent.parentId === null
-                        ? null
-                        : h(
-                            'button',
-                            { type: 'button', className: 'rafx-linkButton', onClick: () => setSelectedAgentId(agent.parentId) },
-                            `← ${t('view.parent')} (${agent.parentName ?? 'root'})`,
-                          ),
-                      h('h2', null, agent.depth === 0 ? t('view.root') : agent.name),
-                      h('span', { className: 'rafx-agentDepth' }, `d${agent.depth}`),
-                      agent.scope ? h('span', { className: 'rafx-agentDepth' }, `scope=${agent.scope}`) : null,
-                      h('span', { className: 'rafx-agentState', 'data-status': agentStatus(agent) }, agentStateLabel(t, agent)),
-                    ),
-                    agent.question
-                      ? h('div', { className: 'rafx-treeTask' }, agent.question)
-                      : null,
-                    h(
-                      'div',
-                      { className: 'rafx-agentHeadMeta' },
-                      `${agent.steps.length} ${t('view.steps').toLowerCase()} · ${formatTokens(agent.usage.input)} in / ${formatTokens(agent.usage.output)} out · cache ${formatPercent(agent.usage.cacheHitRate)}`,
-                    ),
-                  ),
-                  agent.steps.length === 0
-                    ? h('div', { className: 'rafx-timelineEmpty' }, h('p', null, t('view.noSteps')))
-                    : agent.steps.map((step) => {
-                        const stepKey = `${agent.id}:${step.index}`;
-                        const isStepOpen = !openSteps.has(`closed:${stepKey}`);
-                        return h(RunStep, {
-                          key: stepKey,
-                          t,
-                          step,
-                          open: isStepOpen,
-                          onToggleStep: () => toggleStep(`closed:${stepKey}`),
-                          openTools,
-                          onToggleTool: toggleTool,
-                          agentById,
-                          onOpenAgent: (id) => setSelectedAgentId(id),
-                        });
-                      }),
-                  agent.errors.length === 0
-                    ? null
-                    : h(
-                        'div',
-                        { className: 'rafx-agentErrors' },
-                        agent.errors.map((item, index) =>
-                          h('div', { className: 'rafx-error', key: `${agent.id}:error:${index}` }, String(item.message ?? item.type)),
-                        ),
-                      ),
-                ),
-          ),
-        ),
-      );
-    }
-
-    function RafRunsEmpty({ t }) {
-      return h(
-        'div',
-        { className: 'rafx-runsEmpty' },
-        h('h2', null, t('view.emptyTitle')),
-        h('p', null, t('view.emptyHint')),
-      );
-    }
-
-    function RafStat({ label, value }) {
-      return h(
-        'div',
-        { className: 'rafx-runsStat' },
-        h('span', { className: 'rafx-runsStatValue' }, value),
-        h('span', { className: 'rafx-runsStatLabel' }, label),
-      );
-    }
-
     function parseBranchArgs(raw) {
       if (typeof raw !== 'string' || raw.trim() === '') return null;
       try {
@@ -2686,20 +2510,6 @@ window.__ModuleLoader__.load({
                 openTools,
                 toggleTool,
               }),
-              typeof props.inspect === 'function'
-                ? h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'rafx-branchInspect',
-                      onClick: (event) => {
-                        event.stopPropagation();
-                        props.inspect();
-                      },
-                    },
-                    t('view.inspector'),
-                  )
-                : null,
             )
           : null,
       );
