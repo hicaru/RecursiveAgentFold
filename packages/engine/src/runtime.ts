@@ -2,6 +2,7 @@ import { AgentFoldAgent, type AgentFoldConfig, type AgentRunResult, type AgentSt
 import type { EventSink } from './agent/events.js';
 import type { ContextStore } from './context/store.js';
 import { ResearchBoard } from './context/board.js';
+import type { FoldStateSnapshot } from './fold/state.js';
 import { UsageTracker } from './llm/usage.js';
 import { createBranchTool, type BranchRunnerOptions } from './tools/branch.js';
 import { createCalculatorTool } from './tools/calculator.js';
@@ -67,6 +68,15 @@ export interface RecursiveAgentFoldOptions {
   usage?: UsageTracker;
   signal?: AbortSignal;
   board?: ResearchBoard;
+}
+
+export interface RootBeginOptions {
+  readonly initialState?: FoldStateSnapshot;
+  readonly followUpQuestion?: string;
+  readonly initialBoardCount?: number;
+  readonly initialBoardSnapshot?: string;
+  readonly initialManifest?: string;
+  readonly initialDocIds?: Iterable<string>;
 }
 
 /**
@@ -140,7 +150,12 @@ export class RecursiveAgentFold {
     return tools;
   }
 
-  private createAgent(opts: BranchRunnerOptions): AgentFoldAgent {
+  private createAgent(
+    opts: BranchRunnerOptions & {
+      readonly initialManifest?: string;
+      readonly initialDocIds?: Iterable<string>;
+    },
+  ): AgentFoldAgent {
     const {
       depth,
       maxSteps,
@@ -150,6 +165,8 @@ export class RecursiveAgentFold {
       followUpQuestion,
       initialBoardCount,
       initialBoardSnapshot,
+      initialManifest,
+      initialDocIds,
       agentName,
       callStack,
       ancestorTasks,
@@ -176,6 +193,8 @@ export class RecursiveAgentFold {
       followUpQuestion,
       initialBoardCount,
       initialBoardSnapshot,
+      ...(initialManifest !== undefined ? { initialManifest } : {}),
+      ...(initialDocIds !== undefined ? { initialDocIds } : {}),
       callStack,
       ancestorTasks,
     });
@@ -187,11 +206,19 @@ export class RecursiveAgentFold {
   }
 
   /** Prepare the root agent for externally driven steps. */
-  begin(question: string): void {
-    this.rootAgent = this.createAgent({ depth: 0, parent: 'user' });
+  begin(question: string, opts?: RootBeginOptions): void {
+    this.rootAgent = this.createAgent({
+      depth: 0,
+      parent: 'user',
+      ...(opts?.initialState !== undefined ? { initialState: opts.initialState } : {}),
+      ...(opts?.followUpQuestion !== undefined ? { followUpQuestion: opts.followUpQuestion } : {}),
+      ...(opts?.initialBoardCount !== undefined ? { initialBoardCount: opts.initialBoardCount } : {}),
+      ...(opts?.initialBoardSnapshot !== undefined ? { initialBoardSnapshot: opts.initialBoardSnapshot } : {}),
+      ...(opts?.initialManifest !== undefined ? { initialManifest: opts.initialManifest } : {}),
+      ...(opts?.initialDocIds !== undefined ? { initialDocIds: opts.initialDocIds } : {}),
+    });
     this.rootAgent.begin(question);
   }
-
   /** Produce one root step; a tool step waits for `submit()`. */
   async next(): Promise<AgentStep> {
     if (this.rootAgent === undefined) throw new Error('RecursiveAgentFold.begin() must run before next()');

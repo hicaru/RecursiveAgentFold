@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 const ENGINE_STANDARD = 'standard';
 const ENGINE_RAF = 'raf';
@@ -30,10 +30,10 @@ const MAX_BODY_BYTES = 8192;
 const MAX_ENGINE_ENTRIES = 2000;
 const MAX_RUNS = 30;
 const MAX_RUN_EVENTS = 5000;
-const RAF_ROOT_MAX_STEPS = 32;
+const RAF_ROOT_MAX_STEPS = Number.POSITIVE_INFINITY;
+const RAF_BRANCH_MAX_STEPS = 20;
 const RAF_ROOT_MAX_OUTPUT = 16000;
 const RAF_QUERY_MAX_OUTPUT = 16384;
-
 export const inject = ['agents', 'llm', 'tools'];
 
 const rafInternal = new AsyncLocalStorage();
@@ -186,13 +186,26 @@ function isHumanUserMessage(message) {
   );
 }
 
+function isSyntheticContextMessage(message) {
+  if (message === null || typeof message !== 'object' || message.role !== 'user') return false;
+  if (isHumanUserMessage(message)) return false;
+  const text = renderContent(message.content).trim();
+  return (
+    text.startsWith('<system-reminder') ||
+    text.startsWith('Current runtime context.') ||
+    text.startsWith('Time sampled while preparing turn')
+  );
+}
+
 function latestUserIndex(messages) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (isHumanUserMessage(messages[index])) return index;
   }
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message !== null && typeof message === 'object' && message.role === 'user') return index;
+    if (message !== null && typeof message === 'object' && message.role === 'user' && !isSyntheticContextMessage(message)) {
+      return index;
+    }
   }
   return -1;
 }
@@ -201,19 +214,84 @@ function hasHumanUserMessage(messages) {
   return messages.some(isHumanUserMessage);
 }
 
+const PTC_LOCKOUT_RE = /only\s+`?run_code`?\s+is\s+callable\s+directly/i;
+
 function renderTranscript(messages) {
   const parts = [];
   for (const message of messages) {
     if (message === null || typeof message !== 'object') continue;
     if (message.role !== 'user' && message.role !== 'assistant' && message.role !== 'tool') continue;
+    if (isSyntheticContextMessage(message)) continue;
     const text = renderContent(message.content);
     if (text === '') continue;
+    if (message.role === 'tool' && PTC_LOCKOUT_RE.test(text)) continue;
     const label = message.role === 'tool' ? 'Tool result' : message.role === 'assistant' ? 'Assistant' : 'User';
     parts.push(`## ${label}\n${text}`);
   }
   return parts.join('\n\n');
 }
 
+function extractPriorTurnBlocks(messages, raf) {
+  if (!Array.isArray(messages) || typeof raf?.FoldState !== 'function') return undefined;
+  const pairs = [];
+  let pendingQuestion;
+  let lastAssistantText = '';
+  for (const message of messages) {
+    if (message === null || typeof message !== 'object') continue;
+    if (message.role === 'user') {
+      if (isSyntheticContextMessage(message)) continue;
+      const text = renderContent(message.content).trim();
+      if (text === '') continue;
+      if (pendingQuestion !== undefined && lastAssistantText !== '') {
+        pairs.push({ question: pendingQuestion, answer: lastAssistantText });
+      }
+      pendingQuestion = text;
+      lastAssistantText = '';
+    } else if (message.role === 'assistant') {
+      const blocks = Array.isArray(message.content) ? message.content : [];
+      const textParts = [];
+      for (const block of blocks) {
+        if (
+          block !== null &&
+          typeof block === 'object' &&
+          block.type === 'text' &&
+          typeof block.text === 'string' &&
+          block.text.trim() !== ''
+        ) {
+          textParts.push(block.text.trim());
+        }
+      }
+      if (textParts.length > 0) {
+        lastAssistantText = textParts.join('\n').trim();
+      }
+    }
+  }
+  if (pendingQuestion !== undefined && lastAssistantText !== '') {
+    pairs.push({ question: pendingQuestion, answer: lastAssistantText });
+  }
+  if (pairs.length === 0) return undefined;
+  const seeded = new raf.FoldState();
+  for (let i = 0; i < pairs.length; i++) {
+    const pair = pairs[i];
+    const step = seeded.currentStep;
+    const shortQuestion = pair.question.replace(/\s+/g, ' ').trim().slice(0, 120);
+    const shortAnswer = pair.answer.replace(/\s+/g, ' ').trim().slice(0, 600);
+    seeded.setLatest({
+      step,
+      motivation: `Turn ${i + 1}: ${shortQuestion}`,
+      action: { name: 'answer', arguments: {} },
+      observation: shortAnswer,
+    });
+    seeded.applyFold({
+      range: [step, step],
+      summary: `Turn ${i + 1} (${shortQuestion}): ${shortAnswer}`,
+    });
+  }
+  return {
+    initialQuestion: pairs[0].question,
+    rootState: seeded.snapshot(),
+  };
+}
 function questionOf(messages, index) {
   if (index < 0) return '';
   return renderContent(messages[index].content);
@@ -537,7 +615,48 @@ function toDocId(prefix, rawLabel, fallbackIndex) {
   return `${prefix}_${cleaned || String(fallbackIndex)}`;
 }
 
-function indexExternalToolResult(toolName, args, text, store, sessionState) {
+function normalizeToolArguments(toolName, rawArgs, motivation, schemaParameters) {
+  const base =
+    rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs) ? { ...rawArgs } : {};
+  const required = Array.isArray(schemaParameters?.required) ? schemaParameters.required : [];
+  const needsDescription =
+    required.includes('description') || toolName === 'bash' || toolName === 'run_code';
+  if (needsDescription && (typeof base.description !== 'string' || base.description.trim() === '')) {
+    const fromMotivation = cleanReasoningText(typeof motivation === 'string' ? motivation : '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 100);
+    const cmdPreview =
+      typeof base.command === 'string' && base.command.trim() !== ''
+        ? `: ${base.command.replace(/\s+/g, ' ').trim().slice(0, 60)}`
+        : '';
+    base.description = fromMotivation !== '' ? fromMotivation : `Run ${toolName}${cmdPreview}`;
+  }
+  return base;
+}
+
+function indexExternalToolResult(toolName, args, text, store, sessionState, workspace, raf) {
+  if ((toolName === 'write' || toolName === 'edit') && !text.startsWith('Tool error:')) {
+    const rawTarget = args?.file_path ?? args?.path ?? args?.filePath;
+    if (typeof rawTarget === 'string' && rawTarget.trim() !== '') {
+      try {
+        const baseDir = typeof workspace === 'string' && workspace !== '' ? workspace : process.cwd();
+        const absPath = isAbsolute(rawTarget) ? resolve(rawTarget) : resolve(baseDir, rawTarget);
+        const fileText = readFileSync(absPath, 'utf8');
+        const rel = relative(baseDir, absPath);
+        const rawDocId = rel !== '' && !rel.startsWith('..') && !isAbsolute(rel) ? rel : rawTarget;
+        const docId =
+          typeof raf?.sanitizeDocId === 'function'
+            ? raf.sanitizeDocId(rawDocId)
+            : toDocId('file', rawDocId, (sessionState?.docs?.size ?? 0) + 1);
+        store.add(fileText, { id: docId, title: String(rawTarget) });
+        sessionState?.docs?.set(docId, { title: String(rawTarget), text: fileText });
+      } catch {
+        // Non-fatal if file cannot be read synchronously after write/edit.
+      }
+    }
+    return text;
+  }
   if (toolName !== 'read' && toolName !== 'web_fetch') return text;
   if (text.startsWith('Tool error:') || text.length < 1200) return text;
   const rawTarget =
@@ -553,7 +672,7 @@ function indexExternalToolResult(toolName, args, text, store, sessionState) {
   }
 }
 
-function createDshTools(ctx, sessionId, signal, sessionState) {
+function createDshTools(ctx, sessionId, signal, sessionState, workspace, raf) {
   const agents = ctx.get('agents');
   const tools = ctx.get('tools');
   if (agents === undefined || tools === undefined) return [];
@@ -581,13 +700,14 @@ function createDshTools(ctx, sessionId, signal, sessionState) {
       parameters: definition.parameters,
       execute: async (args, toolCtx) => {
         try {
+          const normalizedArgs = normalizeToolArguments(definition.name, args, '', definition.parameters);
           const batch = await tools.execute({
             calls: [
               {
                 type: 'tool-call',
                 id: randomUUID(),
                 name: definition.name,
-                arguments: JSON.stringify(args ?? {}),
+                arguments: JSON.stringify(normalizedArgs),
               },
             ],
             signal: toolCtx.signal ?? signal,
@@ -595,7 +715,7 @@ function createDshTools(ctx, sessionId, signal, sessionState) {
           });
           const first = Array.isArray(batch.results) ? batch.results[0] : undefined;
           const text = toolResultText(first);
-          return indexExternalToolResult(definition.name, args, text, toolCtx.store, sessionState);
+          return indexExternalToolResult(definition.name, normalizedArgs, text, toolCtx.store, sessionState, workspace, raf);
         } catch (error) {
           return `Tool ${definition.name} failed: ${error instanceof Error ? error.message : String(error)}`;
         }
@@ -768,6 +888,9 @@ function runUsageOf(result) {
 }
 
 function finishRun(turn, result, signal) {
+  if (result?.state !== undefined && turn.sessionState !== undefined) {
+    turn.sessionState.rootState = result.state;
+  }
   if (turn.run === undefined) return;
   const status = signal?.aborted ? 'aborted' : result.terminated === 'error' ? 'error' : 'done';
   turn.finish({
@@ -794,6 +917,12 @@ function errorStream(message) {
  * Register RAF tool schemas as native DSH tools. The native loop executes the
  * call; the engine receives the observation through the next step's submit().
  */
+function isRafScope(scope, state) {
+  if (scope === null || typeof scope !== 'object') return false;
+  const sessionId = scope.session?.id ?? scope.id;
+  return typeof sessionId === 'string' && (engineOf(state, sessionId) === ENGINE_RAF || activeTurns.has(sessionId));
+}
+
 function registerRafTools(toolsCtx, raf, state) {
   const templateLlm = {
     profile: { name: 'raf-native-tools', contextWindow: 128_000, maxOutputTokens: 1024 },
@@ -811,6 +940,107 @@ function registerRafTools(toolsCtx, raf, state) {
   const perAgentDefinitions = [];
   const agentOverrideDisposers = new WeakMap();
   const trackedAgents = new Set();
+
+  if (typeof toolsCtx.tools?.selectExecutor === 'function') {
+    const originalSelectExecutor = toolsCtx.tools.selectExecutor.bind(toolsCtx.tools);
+    const rafExecutors = new WeakMap();
+    toolsCtx.tools.selectExecutor = (scope) => {
+      const baseExecutor = originalSelectExecutor(scope);
+      if (!isRafScope(scope, state) || baseExecutor === null || typeof baseExecutor !== 'object') {
+        return baseExecutor;
+      }
+      const cached = rafExecutors.get(baseExecutor);
+      if (cached !== undefined) return cached;
+      const PipelineCtor = baseExecutor.pipeline?.constructor;
+      const resolveTool = (name, targetScope, toolSet) =>
+        (typeof toolsCtx.tools.executable === 'function'
+          ? toolsCtx.tools.executable(name, targetScope, toolSet)
+          : undefined) ??
+        (typeof baseExecutor.pipeline?.source?.get === 'function'
+          ? baseExecutor.pipeline.source.get(name, targetScope, toolSet)
+          : typeof baseExecutor.requirePtcTransport === 'function' && name === 'run_code'
+            ? baseExecutor.requirePtcTransport()
+            : undefined);
+      const rafPipeline =
+        typeof PipelineCtor === 'function' && PipelineCtor !== Object
+          ? new PipelineCtor(baseExecutor.ctx ?? toolsCtx.tools.ctx ?? toolsCtx, {
+              get: resolveTool,
+            })
+          : baseExecutor.pipeline;
+      const descriptors = {
+        pipeline: { value: rafPipeline, enumerable: true },
+        sections: { value: [], enumerable: true },
+        describe: {
+          value: (definitions) => ({
+            schemas: (Array.isArray(definitions) ? definitions : []).map((d) => ({
+              ...(d.deferLoading === true ? { deferLoading: true } : {}),
+              name: d.name,
+              description: d.description,
+              parameters: d.parameters,
+            })),
+          }),
+          enumerable: true,
+        },
+      };
+      if (typeof PipelineCtor !== 'function' || PipelineCtor === Object) {
+        descriptors.execute = {
+          value: async (batch) => {
+            if (typeof rafPipeline?.execute === 'function') {
+              return rafPipeline.execute(batch);
+            }
+            const calls = Array.isArray(batch?.calls) ? batch.calls : [];
+            const results = [];
+            for (const call of calls) {
+              const tool = resolveTool(call.name, batch?.agent ?? scope, batch?.toolSet);
+              if (tool && typeof tool.execute === 'function') {
+                try {
+                  const parsedArgs =
+                    typeof call.arguments === 'string'
+                      ? JSON.parse(call.arguments || '{}')
+                      : (call.arguments ?? {});
+                  const value = await tool.execute(parsedArgs, {
+                    agent: batch?.agent ?? scope,
+                    signal: batch?.signal,
+                  });
+                  const content =
+                    typeof tool.output?.render === 'function'
+                      ? tool.output.render(parsedArgs, value)
+                      : [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value ?? '') }];
+                  results.push({
+                    callId: call.id,
+                    name: call.name,
+                    result: { isError: false, content, value },
+                  });
+                } catch (err) {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  results.push({
+                    callId: call.id,
+                    name: call.name,
+                    result: {
+                      isError: true,
+                      content: [{ type: 'text', text: msg }],
+                      error: { message: msg },
+                    },
+                  });
+                }
+              } else if (typeof baseExecutor.execute === 'function') {
+                const sub = await baseExecutor.execute({ ...batch, calls: [call] });
+                if (Array.isArray(sub?.results) && sub.results[0]) results.push(sub.results[0]);
+              }
+            }
+            return { results };
+          },
+          enumerable: true,
+        };
+      }
+      const rafExecutor = Object.create(baseExecutor, descriptors);
+      rafExecutors.set(baseExecutor, rafExecutor);
+      return rafExecutor;
+    };
+    disposers.push(() => {
+      toolsCtx.tools.selectExecutor = originalSelectExecutor;
+    });
+  }
 
   function syncAgentOverrides(agent) {
     if (agent === null || typeof agent !== 'object') return;
@@ -979,8 +1209,11 @@ function getSessionState(sessionId, raf) {
       docs: new Map(),
       sources: new Set(),
       workspaceIngested: false,
+      rootState: undefined,
+      initialQuestion: undefined,
+      initialManifest: undefined,
+      initialDocIds: undefined,
     };
-    sessionStates.set(key, state);
   }
   return state;
 }
@@ -1102,7 +1335,7 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
       const res = await store.addPath(workspace, {
         cwd: workspace,
         idPrefix: '',
-        maxFiles: 300,
+        maxFiles: 1200,
         skipRichDocuments: true,
         signal: outer.signal,
       });
@@ -1131,8 +1364,22 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
       console.error('RAF: cannot auto-ingest prompt path', promptPath, error);
     }
   }
+  if (sessionState.rootState === undefined && contextMessages.length > 0) {
+    const recovered = extractPriorTurnBlocks(contextMessages, raf);
+    if (recovered !== undefined) {
+      sessionState.initialQuestion ??= recovered.initialQuestion;
+      sessionState.rootState = recovered.rootState;
+    }
+  }
   const deepStudyBrief = studyBrief(effectiveQuestion, store);
   if (deepStudyBrief !== '') effectiveQuestion += deepStudyBrief;
+  if (sessionState.initialQuestion === undefined) {
+    sessionState.initialQuestion = effectiveQuestion;
+  }
+  if (sessionState.initialManifest === undefined) {
+    sessionState.initialManifest = store.manifest();
+    sessionState.initialDocIds = new Set(store.list().map((d) => d.id));
+  }
   const run = runs.create({
     sessionId: outer.sessionId,
     model: `${outer.provider}/${outer.model}`,
@@ -1146,6 +1393,8 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     engine: undefined,
     store,
     sessionState,
+    workspace,
+    raf,
     tools: new Map(),
     question: effectiveQuestion,
     userMessageId: human?.id,
@@ -1160,7 +1409,7 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     signal: outer.signal,
     emit: (event) => runs.append(run, event),
   };
-  const extraTools = createDshTools(ctx, outer.sessionId, outer.signal, sessionState);
+  const extraTools = createDshTools(ctx, outer.sessionId, outer.signal, sessionState, workspace, raf);
   const engine = new raf.RecursiveAgentFold({
     rootLLM,
     ...(branchLLM !== undefined ? { branchLLM } : {}),
@@ -1169,12 +1418,12 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     board: sessionState.board,
     ingest: { cwd: workspace, onIngest: persistIngested },
     documentTools: {
-      maxReadLines: 120,
-      maxReadTokens: 4000,
-      maxGrepMatches: 60,
+      maxReadLines: 250,
+      maxReadTokens: 6000,
+      maxGrepMatches: 100,
     },
     maxDepth: settings.depth,
-    agent: { temperature: 0 },
+    agent: { temperature: 0, maxObservationTokens: 6400 },
     llmQuery: {
       reserveRatio: settings.reserve,
       concurrency: settings.concurrency,
@@ -1182,6 +1431,7 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
       cache: { memo: sessionState.memo, chunkCounts: sessionState.chunkCounts },
     },
     rootMaxSteps: RAF_ROOT_MAX_STEPS,
+    branchMaxSteps: RAF_BRANCH_MAX_STEPS,
     extraTools,
     signal: outer.signal,
     onEvent: turn.emit,
@@ -1194,7 +1444,19 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     turn.tools.set(`raf_${tool.name}`, tool);
     turn.tools.set(`ref_${tool.name}`, tool);
   }
-  engine.begin(effectiveQuestion);
+  if (sessionState.rootState !== undefined) {
+    engine.begin(sessionState.initialQuestion ?? effectiveQuestion, {
+      initialState: sessionState.rootState,
+      followUpQuestion: effectiveQuestion,
+      initialManifest: sessionState.initialManifest,
+      initialDocIds: sessionState.initialDocIds,
+    });
+  } else {
+    engine.begin(effectiveQuestion, {
+      initialManifest: sessionState.initialManifest,
+      initialDocIds: sessionState.initialDocIds,
+    });
+  }
   activeTurns.set(outer.sessionId, turn);
   while (activeTurns.size > MAX_ACTIVE_TURNS) {
     const oldest = activeTurns.keys().next().value;
@@ -1220,12 +1482,55 @@ async function* rafStream(ctx, outer, settings, runs) {
   }
   try {
     if (turn.pendingCallId !== undefined) {
-      const result = toolResultFor(outer.messages, turn.pendingCallId);
-      const observation = result?.text || turn.pendingObservation || 'Error: tool result missing';
+      let result = toolResultFor(outer.messages, turn.pendingCallId);
+      if (
+        result?.isError === true &&
+        PTC_LOCKOUT_RE.test(result.text) &&
+        turn.pendingAction !== undefined
+      ) {
+        const fallbackTool = turn.tools.get(turn.pendingAction.name);
+        if (fallbackTool !== undefined && typeof fallbackTool.execute === 'function') {
+          try {
+            const fallbackOut = await fallbackTool.execute(turn.pendingAction.arguments ?? {}, {
+              store: turn.store,
+              usage: turn.engine.usage,
+              depth: 0,
+              agentName: 'root',
+              step: turn.step,
+              emit: turn.emit,
+              signal: outer.signal,
+              board: turn.engine.board,
+              ancestorTasks: [turn.question],
+            });
+            result = { text: String(fallbackOut ?? ''), isError: false };
+          } catch (fallbackErr) {
+            result = {
+              text: `Tool error: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`,
+              isError: true,
+            };
+          }
+        }
+      }
+      const observation =
+        result !== undefined && result.text !== ''
+          ? result.text
+          : turn.pendingObservation !== undefined && turn.pendingObservation !== ''
+            ? turn.pendingObservation
+            : result !== undefined || turn.pendingObservation !== undefined
+              ? '(completed with no output)'
+              : 'Error: tool result missing';
       const indexed =
         result?.isError === true
           ? observation
-          : indexExternalToolResult(turn.pendingAction?.name, turn.pendingAction?.arguments, observation, turn.store, turn.sessionState);
+          : indexExternalToolResult(
+              turn.pendingAction?.name,
+              turn.pendingAction?.arguments,
+              observation,
+              turn.store,
+              turn.sessionState,
+              turn.workspace,
+              turn.raf,
+            );
       turn.engine.submit(indexed, result?.isError === true ? { error: observation } : undefined);
       turn.pendingCallId = undefined;
       turn.pendingObservation = undefined;
@@ -1313,10 +1618,18 @@ async function* rafStream(ctx, outer, settings, runs) {
     }
     if (step.kind === 'tool') {
       const callId = randomUUID();
+      const targetTool = turn.tools.get(step.action.name);
+      const normalizedArgs = normalizeToolArguments(
+        step.action.name,
+        step.action.arguments,
+        step.motivation,
+        targetTool?.parameters,
+      );
+      const normalizedAction = { name: step.action.name, arguments: normalizedArgs };
       turn.pendingCallId = callId;
-      turn.pendingAction = step.action;
+      turn.pendingAction = normalizedAction;
       turn.step = step.step;
-      const args = JSON.stringify(step.action.arguments ?? {});
+      const args = JSON.stringify(normalizedArgs);
       yield { type: 'block-start', index, blockType: 'tool-call' };
       yield { type: 'tool-call-delta', index, id: callId, name: step.action.name, argumentsDelta: args };
       yield { type: 'block-end', index, block: { type: 'tool-call', id: callId, name: step.action.name, arguments: args } };

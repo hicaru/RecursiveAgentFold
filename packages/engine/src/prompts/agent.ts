@@ -62,6 +62,10 @@ export const TOOL_GUIDANCE: Record<string, string> = Object.freeze({
   branch:
     '- **branch**: Delegate deep document/module research to a persistent scoped specialist sub-agent, or ask a follow-up to an existing specialist. Always pass `scope` (target doc id or module name): (1) each specialist inspects ONLY its own `scope` document; (2) pass the same `scope` to ask follow-up questions (reusing its folded state and KV cache); (3) never spawn duplicate scans for the same scope or use `branch` for a single grep/read; (4) each scope must be a loaded document id or a manifest prefix; load a filesystem path with add_document before dispatch if it is absent, otherwise the specialist has no document to inspect.',
   calculator: '- **calculator**: Exact arithmetic evaluation (+ - * / % ^, sum, min, max, avg, round, floor, ceil, abs, sqrt). Never do mental math.',
+  bash: '- **bash**: Execute shell commands, scripts, builds, tests, or renderers directly in the workspace. Always include a short `description` and `command`.',
+  write: '- **write**: Create or overwrite a workspace file at `file_path` with complete `content`.',
+  edit: '- **edit**: Replace an exact string in a workspace file at `file_path` (`old_string` -> `new_string`).',
+  glob: '- **glob**: Match workspace files by glob `pattern` (and optional `path`).',
 });
 
 /** Resolve a tool name to its TOOL_GUIDANCE key; strips a leading prefix (e.g. "raf_"). */
@@ -94,9 +98,9 @@ export function buildAgentSystemPrompt(toolNames: string[]): string {
       '- **Tool Routing Priority (Accuracy & Speed)**:',
       '  1. **0-Token Free Tools First (`search` / `grep` / `outline` / `tally`)**: If the target has literal words, names, numbers, citations, identifiers, or natural-language topics, ALWAYS use `grep`, `search`, `outline`, or `tally` first. NEVER use `llm_query` for literal/regex or BM25-searchable targets.',
       '  2. **Semantic Scan (`llm_query`)**: Use `llm_query` ONLY when no literal keyword/regex or BM25 window search applies (e.g. full-document abstract category classification with mode="extract" and `categories`, or after free search/grep tools return 0 matches).',
-      ...(toolNames.includes('bash') || toolNames.includes('pwsh')
+      ...(toolNames.includes('bash') || toolNames.includes('pwsh') || toolNames.includes('write') || toolNames.includes('edit')
         ? [
-            '  3. **RAF Context Tools Over Shell (`bash`)**: Always use `search`, `outline`, `grep`, `tally`, `read`, `add_document`, `list_documents`, `branch`, and `llm_query` for reading, searching, counting, and multi-file research. Never use `bash` (`cat`, `grep`, `rg`, `find`, `head`, `tail`, `wc`, or scripts) to read or search documents.',
+            '  3. **Workspace & Shell Tools (`bash` / `write` / `edit` / `glob`)**: Use `search`, `outline`, `grep`, `tally`, `read`, `branch`, and `llm_query` first when inspecting or searching documents in ContextStore. Use `bash`, `write`, `edit`, and `glob` directly and without restriction whenever creating or modifying files, running scripts/builds/tests/renderers, or inspecting live filesystem state. Never emit `<answer>` while requested files, artifacts, builds, or verifications are still incomplete — keep executing steps until all deliverables exist and are verified.',
           ]
         : []),
     );

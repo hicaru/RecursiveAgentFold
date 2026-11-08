@@ -1,3 +1,5 @@
+import { stat } from 'node:fs/promises';
+import { isAbsolute, resolve } from 'node:path';
 import { sanitizeDocId, type IngestResult } from '../context/ingest.js';
 import { defaultEstimator, truncateToTokens } from '../tokens.js';
 import { argNumber, argString, argStringList, ToolArgumentError, type Tool, type ToolContext } from './types.js';
@@ -22,11 +24,34 @@ export const DEFAULT_DOCUMENT_TOOL_OPTIONS: Readonly<Required<Omit<DocumentToolO
   maxGrepMatches: 25,
 });
 
+async function refreshLiveFileIfPresent(
+  rawTarget: string,
+  ctx: ToolContext,
+  ingest?: AddDocumentToolOptions,
+): Promise<string | undefined> {
+  if (ingest?.cwd === undefined) return undefined;
+  const candidate = isAbsolute(rawTarget) ? resolve(rawTarget) : resolve(ingest.cwd, rawTarget);
+  const s = await stat(candidate).catch(() => undefined);
+  if (!s || !s.isFile()) return undefined;
+  try {
+    const res = await ctx.store.addPath(rawTarget, {
+      cwd: ingest.cwd,
+      ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
+    });
+    ingest.onIngest?.(res);
+    return res.files[0]?.id;
+  } catch {
+    return ctx.store.resolveId(rawTarget);
+  }
+}
+
 async function ensureTargetIds(
   rawTarget: string,
   ctx: ToolContext,
   ingest?: AddDocumentToolOptions,
 ): Promise<string[]> {
+  const refreshed = await refreshLiveFileIfPresent(rawTarget, ctx, ingest);
+  if (refreshed !== undefined) return [refreshed];
   const existing = ctx.store.resolveIds(rawTarget);
   if (existing.length > 0) return existing;
   try {
@@ -473,7 +498,8 @@ export function createReadTool(opts: DocumentToolOptions = {}): Tool {
           (limit !== undefined ? s + Math.max(1, limit) - 1 : s + defaultWindow - 1),
       );
       const cappedEnd = Math.min(requestedEnd, s + maxLines - 1);
-      let docId = ctx.store.resolveId(rawDoc);
+      const refreshed = await refreshLiveFileIfPresent(rawDoc, ctx, opts.ingest);
+      let docId = refreshed ?? ctx.store.resolveId(rawDoc);
       if (docId === undefined) {
         const ids = await ensureTargetIds(rawDoc, ctx, opts.ingest);
         if (ids.length === 1) {

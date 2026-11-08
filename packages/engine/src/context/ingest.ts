@@ -66,7 +66,9 @@ export function sanitizeDocId(raw: string): string {
   for (let i = 0; i < rawSegments.length; i++) {
     const seg = rawSegments[i];
     if (!seg || seg === '.' || seg === '..') continue;
-    const cleaned = seg.replace(/[^A-Za-z0-9_.\-]+/g, '_').replace(/^_+|_+$/g, '');
+    const cleaned = seg
+      .replace(/^[^A-Za-z0-9_.\-]+|[^A-Za-z0-9_.\-]+$/g, '')
+      .replace(/[^A-Za-z0-9_.\-]+/g, '_');
     if (cleaned.length > 0) cleanSegments.push(cleaned);
   }
   return cleanSegments.length > 0 ? cleanSegments.join('/') : 'doc';

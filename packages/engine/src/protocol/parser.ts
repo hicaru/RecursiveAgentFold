@@ -177,7 +177,11 @@ export function parseAgentResponse(text: string, opts: ParseOptions): ParsedResp
   const warnings: string[] = [];
   // Drop reasoning before looking for protocol tags; models sometimes mention
   // "<tool_call>" inside their thoughts.
-  const thinkRaw = extractTag(text, 'think');
+  const firstFoldOpen = openTagIndex(text, 'folding');
+  const firstThinkOpen = openTagIndex(text, 'think');
+  const hasLeadingThink =
+    firstThinkOpen >= 0 && (firstFoldOpen < 0 || firstThinkOpen < firstFoldOpen);
+  const thinkRaw = hasLeadingThink ? extractTag(text, 'think') : undefined;
   const body = thinkRaw !== undefined ? text.replace(tagRegex('think'), '') : text;
   const out: ParsedResponse = { errors, warnings, think: thinkRaw ?? opts.reasoning };
 
@@ -206,34 +210,41 @@ export function parseAgentResponse(text: string, opts: ParseOptions): ParsedResp
     }
   }
 
-  const motGroupMatch = groupTagRegex(MOTIVATION_TAGS).exec(body);
+  // Strip <folding> block before extracting <motivation>, <tool_call>, or <answer> so
+  // literal protocol tags quoted inside a folding summary are never misparsed as actions.
+  const afterFoldBody = (bareFold ? body.replace(bareFold, '') : body).replace(groupTagRegex(FOLD_TAGS), '');
+
+  const motGroupMatch = groupTagRegex(MOTIVATION_TAGS).exec(afterFoldBody);
   const motivation =
-    motGroupMatch?.[2]?.trim() ?? extractTag(body, 'motivation') ?? extractTag(body, 'explanation') ?? extractTag(body, '动机');
+    motGroupMatch?.[2]?.trim() ??
+    extractTag(afterFoldBody, 'motivation') ??
+    extractTag(afterFoldBody, 'explanation') ??
+    extractTag(afterFoldBody, '动机');
   if (motivation !== undefined) out.motivation = motivation;
-  const answer = extractTag(body, 'answer');
-  const toolRaw = extractTag(body, 'tool_call');
+
+  const actionBody = afterFoldBody.replace(groupTagRegex(MOTIVATION_TAGS), '');
+  const answer = extractTag(actionBody, 'answer');
+  const toolRaw = extractTag(actionBody, 'tool_call');
   if (answer !== undefined) {
     out.answer = answer;
     if (toolRaw !== undefined) warnings.push('both <answer> and <tool_call> present; using <answer>');
   } else if (toolRaw !== undefined) {
-    out.toolCall = parseToolCall(toolRaw, errors, undefined, body);
+    out.toolCall = parseToolCall(toolRaw, errors, undefined, afterFoldBody);
   } else {
     let aliasMatch: { name: string; content: string } | undefined;
     for (const toolName of TOOL_TAG_ALIASES) {
-      const m = tagRegex(toolName).exec(body);
+      const m = tagRegex(toolName).exec(actionBody);
       if (m?.[1] !== undefined) {
         aliasMatch = { name: toolName, content: m[1].trim() };
         break;
       }
     }
     if (aliasMatch) {
-      out.toolCall = parseToolCall(aliasMatch.content, errors, aliasMatch.name, body);
+      out.toolCall = parseToolCall(aliasMatch.content, errors, aliasMatch.name, afterFoldBody);
       warnings.push(`used <${aliasMatch.name}> tag instead of <tool_call>`);
     } else {
       // Last resort: bare JSON tool call without tags (excluding folding/motivation tags).
-      const restBody = (bareFold ? body.replace(bareFold, '') : body)
-        .replace(groupTagRegex(FOLD_TAGS), '')
-        .replace(groupTagRegex(MOTIVATION_TAGS), '');
+      const restBody = actionBody;
       const bare = extractBalanced(restBody) ?? extractBalanced(normalizeQuotes(restBody));
       if (bare) {
         const tempErrors: string[] = [];

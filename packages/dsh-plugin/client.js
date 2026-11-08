@@ -2209,20 +2209,38 @@ window.__ModuleLoader__.load({
     function runHasBranch(run, args) {
       if (run === null || typeof run !== 'object' || args === null) return true;
       const target = JSON.stringify(args);
+      const targetTasks = branchTasksOf(args);
       for (const entry of Array.isArray(run.events) ? run.events : []) {
         const event = entry === null || typeof entry !== 'object' ? undefined : entry.event;
         if (
-          event !== null &&
-          typeof event === 'object' &&
-          event.type === 'tool_call' &&
-          event.agent === 'root' &&
-          event.action?.name === 'raf_branch' &&
-          JSON.stringify(event.action.arguments ?? null) === target
+          event === null ||
+          typeof event !== 'object' ||
+          event.type !== 'tool_call' ||
+          baseToolName(String(event.action?.name ?? '')) !== 'branch'
+        ) {
+          continue;
+        }
+        if (JSON.stringify(event.action?.arguments ?? null) === target) {
+          return true;
+        }
+        const candidateTasks = branchTasksOf(event.action?.arguments ?? null);
+        if (
+          targetTasks.length > 0 &&
+          candidateTasks.length === targetTasks.length &&
+          targetTasks.every(
+            (t, idx) =>
+              candidateTasks[idx]?.scope === t.scope &&
+              candidateTasks[idx]?.task.slice(0, 80) === t.task.slice(0, 80),
+          )
         ) {
           return true;
         }
       }
       return false;
+    }
+
+    if (typeof window !== 'undefined') {
+      window.__RAF_RUN_HAS_BRANCH__ = runHasBranch;
     }
 
     function findBranchAgent(agents, task, index) {
@@ -2237,7 +2255,9 @@ window.__ModuleLoader__.load({
           text.includes(agent.question.slice(0, 80))
         );
       });
-      return byText ?? pool[index];
+      if (byText !== undefined) return byText;
+      if (scoped.length > 0) return scoped[scoped.length - 1];
+      return agents[index];
     }
 
     function branchArgsOfTool(tool) {
@@ -2336,7 +2356,9 @@ window.__ModuleLoader__.load({
                   })
                 : resultText !== undefined && resultText !== ''
                   ? h('div', { className: 'rafx-branchTaskResult' }, resultText)
-                  : h('div', { className: 'rafx-branchTaskEmpty' }, t('tool.branch.noSteps')),
+                  : agent !== undefined && agent.endedAt === null
+                    ? h('div', { className: 'rafx-branchTaskEmpty' }, stage || t('tool.branch.running'))
+                    : h('div', { className: 'rafx-branchTaskEmpty' }, t('tool.branch.noSteps')),
             )
           : null,
       );
@@ -2386,12 +2408,25 @@ window.__ModuleLoader__.load({
       const block = props.block;
       const done = block !== null && typeof block === 'object' && 'kind' in block;
       const phase = props.phase !== undefined ? props.phase : done ? 'result' : block?.phase;
-      const argsRaw = done ? block.call?.argsRaw ?? '' : block?.argsRaw ?? '';
-      const args = parseBranchArgs(argsRaw);
+      const argsRaw = done
+        ? (block.call?.argsRaw ?? (typeof block.call?.arguments === 'string' ? block.call.arguments : ''))
+        : (block?.argsRaw ?? (typeof block?.arguments === 'string' ? block.arguments : ''));
+      const args =
+        parseBranchArgs(argsRaw) ??
+        (done && block.call?.arguments !== null && typeof block.call?.arguments === 'object'
+          ? block.call.arguments
+          : block?.arguments !== null && typeof block?.arguments === 'object'
+            ? block.arguments
+            : null);
       const tasks = branchTasksOf(args);
       const result = done ? branchResultText(block) : '';
       const perTask = done ? splitBranchResults(result) : new Map();
-      const sessionId = typeof props.rafSessionId === 'string' ? props.rafSessionId : '';
+      const sessionId =
+        typeof props.rafSessionId === 'string' && props.rafSessionId !== ''
+          ? props.rafSessionId
+          : typeof props.sessionId === 'string' && props.sessionId !== ''
+            ? props.sessionId
+            : '';
       const state = done
         ? block.error?.code === 'interrupted'
           ? 'stopped'
@@ -2403,24 +2438,38 @@ window.__ModuleLoader__.load({
           : 'running';
 
       React.useEffect(() => {
-        if (sessionId === '') return undefined;
         let active = true;
         let timer = 0;
         let attempts = 0;
         const load = async () => {
           attempts += 1;
           try {
-            const runs = await getRuns(sessionId);
+            const runs = await getRuns(sessionId !== '' ? sessionId : undefined);
             if (!active) return;
-            const latest = Array.isArray(runs) ? runs[0] : undefined;
-            if (latest === undefined) {
-              if (attempts < 10) timer = window.setTimeout(load, 3000);
+            const list = Array.isArray(runs) ? runs : [];
+            if (list.length === 0) {
+              if (attempts < 10) timer = window.setTimeout(load, 2000);
               return;
             }
-            const detail = await getRun(latest.id);
-            if (!active) return;
-            setRun(runHasBranch(detail, args) ? detail : null);
-            if (!done && latest.status === 'running') timer = window.setTimeout(load, 800);
+            let matchedRun = null;
+            let anyRunning = false;
+            for (const item of list.slice(0, 10)) {
+              if (item?.status === 'running') anyRunning = true;
+              const detail = await getRun(item.id);
+              if (!active) return;
+              if (runHasBranch(detail, args)) {
+                matchedRun = detail;
+                break;
+              }
+            }
+            if (matchedRun === null && list[0] !== undefined) {
+              matchedRun = await getRun(list[0].id);
+              if (!active) return;
+            }
+            setRun(matchedRun);
+            if ((!done && anyRunning) || (matchedRun?.status === 'running' && attempts < 120)) {
+              timer = window.setTimeout(load, 800);
+            }
           } catch {
             if (active && attempts < 10) timer = window.setTimeout(load, done ? 5000 : 2000);
           }
@@ -2433,9 +2482,31 @@ window.__ModuleLoader__.load({
       }, [sessionId, done, argsRaw]);
 
       const model = React.useMemo(() => (run === null ? null : buildRunModel(run)), [run]);
-      const branchAgents = model === null ? [] : model.agents.filter((agent) => agent.depth === 1);
       const agentById = React.useMemo(() => new Map((model?.agents ?? []).map((agent) => [agent.id, agent])), [model]);
-
+      const branchAgents = React.useMemo(() => {
+        if (model === null) return [];
+        const rootAgent = model.agents[0];
+        if (rootAgent !== undefined && tasks.length > 0) {
+          for (const step of rootAgent.steps) {
+            for (const tool of step.tools) {
+              if (baseToolName(tool.name) !== 'branch') continue;
+              const toolTasks = branchTasksOf(branchArgsOfTool(tool));
+              if (
+                toolTasks.length === tasks.length &&
+                toolTasks.every(
+                  (t, idx) =>
+                    t.scope === tasks[idx]?.scope &&
+                    t.task.slice(0, 80) === tasks[idx]?.task.slice(0, 80),
+                )
+              ) {
+                const children = (tool.childAgentIds ?? []).map((id) => agentById.get(id)).filter(Boolean);
+                if (children.length > 0) return children;
+              }
+            }
+          }
+        }
+        return model.agents.filter((agent) => agent.depth === 1);
+      }, [model, agentById, argsRaw]);
       const scopes = [];
       for (const task of tasks) {
         if (task.scope !== '' && !scopes.includes(task.scope)) scopes.push(task.scope);

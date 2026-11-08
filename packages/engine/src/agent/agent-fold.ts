@@ -50,6 +50,10 @@ export interface AgentFoldConfig {
   readonly initialBoardRev?: number;
   readonly initialBoardCount?: number;
   readonly initialBoardSnapshot?: string;
+  /** Optional frozen initial manifest string to preserve KV cache across multi-turn continuations. */
+  readonly initialManifest?: string;
+  /** Optional initial document ID set paired with `initialManifest`. */
+  readonly initialDocIds?: Iterable<string>;
 }
 
 export type Termination = 'answer' | 'forced_answer' | 'max_steps' | 'error' | 'filtered';
@@ -101,9 +105,12 @@ const PLACEHOLDER_ANSWER =
 
 function isPlaceholderAnswer(answer: string): boolean {
   const clean = echoText(answer);
-  if (clean === '') return true;
-  if (clean.length > 120) return false;
-  return PLACEHOLDER_ANSWER.test(clean) || /(?:暂无最终答案|继续验证中|尚未确定最终答案|need more steps to verify)/i.test(clean);
+  if (clean === '' || /^[\s.…\-—_]+$/u.test(clean)) return true;
+  if (clean.length > 140) return false;
+  return (
+    PLACEHOLDER_ANSWER.test(clean) ||
+    /(?:暂无最终答案|继续验证中|尚未确定最终答案|need more steps to verify|(?:;\s*|^)(?:proceeding to|continuing to)\s+[a-z])/i.test(clean)
+  );
 }
 
 /** Salvage a final answer from raw model output when the forcing step exhausts format retries. */
@@ -187,6 +194,7 @@ export class AgentFoldAgent {
   private stepUsage: LLMUsage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
   private started = false;
   private finished = false;
+  private inProcessRun = false;
   private runResult: AgentRunResult | undefined;
   constructor(private readonly cfg: AgentFoldConfig) {
     this.depth = cfg.depth ?? 0;
@@ -205,8 +213,8 @@ export class AgentFoldAgent {
         : cfg.board && this.initialBoardRev > 0
           ? cfg.board.renderSettled()
           : undefined;
-    this.initialManifest = cfg.store.manifest();
-    this.initialDocIds = new Set(cfg.store.list().map((d) => d.id));
+    this.initialManifest = cfg.initialManifest ?? cfg.store.manifest();
+    this.initialDocIds = new Set(cfg.initialDocIds ?? cfg.store.list().map((d) => d.id));
   }
   private emit(e: AgentEvent) {
     this.cfg.onEvent?.(e);
@@ -303,12 +311,13 @@ export class AgentFoldAgent {
     this.stepUsage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
     this.finished = false;
     this.started = true;
+    this.inProcessRun = false;
     this.runResult = undefined;
     this.emit({
       type: 'run_start',
       agent: this.name,
       depth: this.depth,
-      question,
+      question: this.cfg.followUpQuestion ?? question,
       ...(this.cfg.parent !== undefined ? { parent: this.cfg.parent } : {}),
       ...(this.cfg.scope !== undefined ? { scope: this.cfg.scope } : {}),
       isFollowUp: this.cfg.followUpQuestion !== undefined,
@@ -523,7 +532,7 @@ export class AgentFoldAgent {
 
     // ANSWER
     if (parsed.answer !== undefined) {
-      if (this.isSpecialist) {
+      if (this.isSpecialist || !this.inProcessRun) {
         const answerStep = this.state.currentStep;
         const queryTag = this.cfg.followUpQuestion
           ? `follow-up "${this.cfg.followUpQuestion.replace(/\s+/g, ' ').slice(0, 60)}"`
@@ -595,6 +604,7 @@ export class AgentFoldAgent {
   /** Run the AgentFold loop to completion, executing tools in-process. */
   async run(question: string): Promise<AgentRunResult> {
     this.begin(question);
+    this.inProcessRun = true;
     for (;;) {
       const step = await this.next();
       if (step.kind !== 'tool') return step.result;

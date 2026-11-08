@@ -1,3 +1,4 @@
+import { EventEmitter, once } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -60,7 +61,8 @@ async function loadClientBuildRunModel() {
   const fakeWindow: {
     __ModuleLoader__: { load: (spec: { factory: (req: (id: string) => unknown) => void }) => void };
     localStorage: { getItem: () => null; setItem: () => void };
-    __RAF_BUILD_RUN_MODEL__?: (run: unknown) => BuiltModel;
+    __RAF_BUILD_RUN_MODEL__?: ((run: unknown) => BuiltModel) & { runHasBranch?: (run: unknown, args: unknown) => boolean };
+    __RAF_RUN_HAS_BRANCH__?: (run: unknown, args: unknown) => boolean;
   } = {
     __ModuleLoader__: {
       load(spec) {
@@ -82,6 +84,7 @@ async function loadClientBuildRunModel() {
   new Function('window', clientCode)(fakeWindow);
   const buildRunModel = fakeWindow.__RAF_BUILD_RUN_MODEL__;
   if (typeof buildRunModel !== 'function') throw new Error('missing buildRunModel');
+  buildRunModel.runHasBranch = fakeWindow.__RAF_RUN_HAS_BRANCH__;
   return buildRunModel;
 }
 
@@ -1705,13 +1708,15 @@ describe('externally driven step API', () => {
     expect(res.answer).toBe('NOVA_KEY = 88');
 
     const buildRunModel = await loadClientBuildRunModel();
-    const model = buildRunModel({
+    const runRecord = {
       id: 'run-unprefixed',
       status: 'done',
       startedAt: Date.now() - 1000,
       endedAt: Date.now(),
       events: rawEvents,
-    });
+    };
+    expect(buildRunModel.runHasBranch?.(runRecord, { scope: 'pkg/nova.ts', task: 'Read NOVA_KEY in pkg/nova.ts' })).toBe(true);
+    const model = buildRunModel(runRecord);
     expect(model.agents.length).toBe(2);
     const rootAgent = model.agents[0];
     const sub = model.agents[1];
@@ -1759,5 +1764,459 @@ describe('answer validation', () => {
     expect(result.formatIssues).toBeGreaterThan(0);
     const formatErrors = events.filter((event): event is Extract<AgentEvent, { type: 'format_error' }> => event.type === 'format_error');
     expect(formatErrors.some((event) => event.errors.some((message) => message.includes('folding directive')))).toBe(true);
+  });
+});
+
+describe('DSH Plugin PTC bypass, multi-turn root continuity, and live file refresh', () => {
+  it('Test 1: bypasses PTC only-run_code restriction via selectExecutor and auto-populates missing bash description from motivation', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'raf-ptc-bypass-'));
+    const prevProfileDir = process.env.DSH_PROFILE_DIR;
+    process.env.DSH_PROFILE_DIR = tmpDir;
+    try {
+      const notePath = join(tmpDir, 'note.txt');
+      await writeFile(notePath, 'RENDER_STATUS = READY\n', 'utf8');
+      await mkdir(join(tmpDir, 'raf-engine'), { recursive: true });
+      await writeFile(
+        join(tmpDir, 'raf-engine', 'state.json'),
+        JSON.stringify({
+          version: 1,
+          defaultEngine: 'raf',
+          engines: { 'session-ptc-1': 'raf' },
+          settings: { depth: 2, reserve: 0.3, concurrency: 4 },
+        }),
+        'utf8',
+      );
+
+      // Dynamic import exercises the untyped @raf/dsh-plugin ESM module boundary outside packages/engine rootDir.
+      const dshPlugin = (await import('../../dsh-plugin/index.js' as string)) as {
+        apply: (ctx: unknown) => void;
+      };
+
+      interface RegisteredTool {
+        name: string;
+        description: string;
+        parameters?: Record<string, unknown>;
+        output?: { render?: (args: unknown, value: unknown) => Array<{ type: string; text: string }> };
+        execute: (args: Record<string, unknown>, exec?: { agent?: unknown; signal?: AbortSignal }) => Promise<unknown>;
+      }
+
+      const registeredTools = new Map<string, RegisteredTool>();
+      const bashCalls: Array<Record<string, unknown>> = [];
+      registeredTools.set('bash', {
+        name: 'bash',
+        description: 'Execute shell command',
+        parameters: {
+          type: 'object',
+          properties: {
+            command: { type: 'string' },
+            description: { type: 'string' },
+          },
+          required: ['command', 'description'],
+        },
+        async execute(args) {
+          if (typeof args.description !== 'string' || args.description.trim() === '') {
+            throw new Error('invalid arguments: missing required property "description"');
+          }
+          bashCalls.push(args);
+          return 'OK_RENDERED';
+        },
+      });
+
+      // Simulated DSH ExecutionPipeline & PtcExecutor that rejects non-run_code tools unless source omits reject
+      class MockExecutionPipeline {
+        readonly ctx: unknown;
+        readonly source: {
+          get: (name: string, scope: unknown, toolSet?: unknown) => RegisteredTool | undefined;
+          reject?: (name: string) => Error;
+        };
+        constructor(
+          ctx: unknown,
+          source: {
+            get: (name: string, scope: unknown, toolSet?: unknown) => RegisteredTool | undefined;
+            reject?: (name: string) => Error;
+          },
+        ) {
+          this.ctx = ctx;
+          this.source = source;
+        }
+        async execute(batch: {
+          calls: Array<{ id: string; name: string; arguments: string }>;
+          agent?: unknown;
+          signal?: AbortSignal;
+        }) {
+          const results = [];
+          for (const call of batch.calls) {
+            const tool = this.source.get(call.name, batch.agent);
+            if (!tool) {
+              const err =
+                this.source.reject?.(call.name) ??
+                new Error(`unknown tool "${call.name}"`);
+              results.push({
+                callId: call.id,
+                name: call.name,
+                result: {
+                  isError: true,
+                  content: [{ type: 'text', text: err.message }],
+                  error: { message: err.message },
+                },
+              });
+              continue;
+            }
+            try {
+              const parsedArgs = JSON.parse(call.arguments || '{}') as Record<string, unknown>;
+              const val = await tool.execute(parsedArgs, { agent: batch.agent, signal: batch.signal });
+              results.push({
+                callId: call.id,
+                name: call.name,
+                result: {
+                  isError: false,
+                  content: [{ type: 'text', text: String(val) }],
+                  value: val,
+                },
+              });
+            } catch (e) {
+              const msg = (e as Error).message;
+              results.push({
+                callId: call.id,
+                name: call.name,
+                result: {
+                  isError: true,
+                  content: [{ type: 'text', text: msg }],
+                  error: { message: msg },
+                },
+              });
+            }
+          }
+          return { results };
+        }
+      }
+
+      const ptcExecutor = {
+        ctx: {},
+        pipeline: new MockExecutionPipeline(
+          {},
+          {
+            get: (name) => (name === 'run_code' ? registeredTools.get('run_code') : undefined),
+            reject: (name) =>
+              new Error(
+                `unknown tool "${name}": only \`run_code\` is callable directly — call \`${name}\` from inside a \`run_code\` program instead`,
+              ),
+          },
+        ),
+        async execute(batch: {
+          calls: Array<{ id: string; name: string; arguments: string }>;
+          agent?: unknown;
+          signal?: AbortSignal;
+        }) {
+          return this.pipeline.execute(batch);
+        },
+      };
+
+      const mockAgent = {
+        id: 'session-ptc-1',
+        session: {
+          id: 'session-ptc-1',
+          header: { cwd: tmpDir },
+          log: [{ type: 'turn/start', data: { turn: 1 } }],
+          append: () => {},
+        },
+      };
+
+      const readyEmitter = new EventEmitter();
+      const toolsReady = once(readyEmitter, 'ready');
+      const mockToolsService = {
+        register(def: RegisteredTool) {
+          registeredTools.set(def.name, def);
+          if (def.name === 'branch') readyEmitter.emit('ready');
+          return () => registeredTools.delete(def.name);
+        },
+        executable(name: string) {
+          return registeredTools.get(name);
+        },
+        definitions() {
+          return [...registeredTools.values()];
+        },
+        selectExecutor(_scope: unknown) {
+          return ptcExecutor;
+        },
+        async execute(batch: {
+          calls: Array<{ id: string; name: string; arguments: string }>;
+          agent?: unknown;
+          signal?: AbortSignal;
+        }) {
+          const exec = this.selectExecutor(batch.agent ?? mockAgent);
+          return exec.execute(batch);
+        },
+      };
+
+      let streamInterceptor: ((options: Record<string, unknown>, next: () => unknown) => AsyncIterable<Record<string, unknown>>) | undefined;
+      let internalCallCount = 0;
+      const mockCtx = {
+        tools: mockToolsService,
+        llm: {
+          async *stream(_opts: Record<string, unknown>) {
+            const stepIdx = internalCallCount++;
+            let text: string;
+            if (stepIdx === 0) {
+              text =
+                '<motivation>Run bash to render output PNGs</motivation>' +
+                '<tool_call>{"name":"bash","arguments":{"command":"echo ok"}}</tool_call>';
+            } else if (stepIdx === 1) {
+              text =
+                '<folding>{"range":[0,0],"summary":"bash echo ok returned OK_RENDERED."}</folding>' +
+                `<motivation>Read note.txt directly</motivation>` +
+                `<tool_call>${JSON.stringify({ name: 'read', arguments: { file_path: notePath } })}</tool_call>`;
+            } else {
+              text =
+                '<folding>{"range":[1,1],"summary":"note.txt confirmed RENDER_STATUS = READY."}</folding>' +
+                '<motivation>All checks complete</motivation>' +
+                '<answer>DONE_WITHOUT_PTC_ERROR</answer>';
+            }
+            yield { type: 'text-delta', text };
+            yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 80 } };
+            yield { type: 'finish', reason: { kind: 'stop' } };
+          },
+        },
+        get(service: string) {
+          if (service === 'tools') return mockToolsService;
+          if (service === 'agents') return { get: () => mockAgent, list: () => [mockAgent] };
+          if (service === 'workingDirectory') return { get: () => tmpDir };
+          return undefined;
+        },
+        effect(fn: () => void) {
+          fn();
+        },
+        on(event: string, handler: (options: Record<string, unknown>, next: () => unknown) => AsyncIterable<Record<string, unknown>>) {
+          if (event === 'llm/stream') streamInterceptor = handler;
+          return () => {};
+        },
+        inject() {},
+      };
+
+      dshPlugin.apply(mockCtx);
+      await toolsReady;
+      if (streamInterceptor === undefined) throw new Error('expected streamInterceptor to be registered');
+      const messages: Array<Record<string, unknown>> = [
+        {
+          id: 'msg-user-1',
+          role: 'user',
+          content: [{ type: 'text', text: 'Render the diagrams and verify note.txt' }],
+          source: { kind: 'user' },
+        },
+      ];
+
+      let finalAnswer = '';
+      for (let loop = 0; loop < 5; loop++) {
+        const stream = streamInterceptor(
+          {
+            sessionId: 'session-ptc-1',
+            provider: 'mock',
+            model: 'mock-root',
+            messages,
+          },
+          () => {
+            throw new Error('should not fall through to default stream');
+          },
+        );
+        let emittedToolCall: { id: string; name: string; arguments: string } | undefined;
+        for await (const chunk of stream) {
+          if (chunk.type === 'block-end') {
+            const block = chunk.block as { type: string; id?: string; name?: string; arguments?: string; text?: string };
+            if (block.type === 'tool-call' && block.id && block.name) {
+              emittedToolCall = { id: block.id, name: block.name, arguments: block.arguments ?? '{}' };
+            } else if (block.type === 'text' && block.text) {
+              finalAnswer = block.text;
+            }
+          }
+        }
+        if (!emittedToolCall) break;
+        // Execute tool call through DSH ToolsService.execute (which calls selectExecutor)
+        const batchRes = await mockToolsService.execute({
+          calls: [emittedToolCall],
+          agent: mockAgent,
+        });
+        const firstRes = batchRes.results[0];
+        expect(firstRes?.result.isError).toBe(false);
+        const toolText = firstRes?.result.content[0]?.text ?? '';
+        expect(toolText).not.toContain('only `run_code` is callable directly');
+        messages.push({
+          id: `msg-tool-${loop}`,
+          role: 'tool',
+          toolCallId: emittedToolCall.id,
+          isError: firstRes?.result.isError ?? false,
+          content: firstRes?.result.content ?? [],
+        });
+      }
+
+      expect(finalAnswer).toBe('DONE_WITHOUT_PTC_ERROR');
+      expect(bashCalls.length).toBe(1);
+      expect(bashCalls[0]?.command).toBe('echo ok');
+      expect(bashCalls[0]?.description).toBe('Run bash to render output PNGs');
+    } finally {
+      if (prevProfileDir === undefined) delete process.env.DSH_PROFILE_DIR;
+      else process.env.DSH_PROFILE_DIR = prevProfileDir;
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Test 2: runs past 32 steps without premature FORCE_ANSWER and preserves FoldState + KV prefix across follow-up turns', async () => {
+    const store = new ContextStore();
+    store.add('MODULE_ALPHA = 42\nMODULE_BETA = 58', { id: 'spec.md', title: 'spec.md' });
+
+    const initialManifest = store.manifest();
+    const initialDocIds = new Set(store.list().map((d) => d.id));
+    const totalToolStepsTurn1 = 35;
+    let turn1Prompts: string[] = [];
+
+    const rootTurn1 = new ScriptedLLM((req) => {
+      const user = req.messages[1]?.content ?? '';
+      turn1Prompts.push(user);
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+      if (step < totalToolStepsTurn1) {
+        const foldTag =
+          step > 0
+            ? `<folding>{"range":[${step - 1},${step - 1}],"summary":"Completed verification step ${step - 1}."}</folding>`
+            : '';
+        return `${foldTag}<motivation>Step ${step} check</motivation><tool_call>{"name":"calculator","arguments":{"expression":"${step} + 1"}}</tool_call>`;
+      }
+      return `<folding>{"range":[0,${totalToolStepsTurn1 - 1}],"summary":"Completed all 35 verification steps; MODULE_ALPHA=42, MODULE_BETA=58, sum=100."}</folding><motivation>All 35 steps verified</motivation><answer>Turn 1 complete: sum = 100</answer>`;
+    });
+
+    const raf1 = new RecursiveAgentFold({
+      rootLLM: rootTurn1,
+      store,
+      rootMaxSteps: Number.POSITIVE_INFINITY,
+      maxDepth: 0,
+    });
+    const initialQuestion = 'Verify all 35 steps and compute MODULE_ALPHA + MODULE_BETA';
+    raf1.begin(initialQuestion, { initialManifest, initialDocIds });
+
+    let turn1Result;
+    for (;;) {
+      const s = await raf1.next();
+      if (s.kind === 'tool') {
+        raf1.submit(String(s.step + 1));
+      } else {
+        turn1Result = s.result;
+        break;
+      }
+    }
+
+    expect(turn1Result.terminated).toBe('answer');
+    expect(turn1Result.steps).toBe(36);
+    expect(turn1Result.answer).toBe('Turn 1 complete: sum = 100');
+    expect(turn1Prompts.every((p) => !p.includes('Step limit reached'))).toBe(true);
+
+    // Add a new document between Turn 1 and Turn 2 to verify static initialManifest preservation
+    store.add('EXTRA_DELTA = 7', { id: 'extra.md', title: 'extra.md' });
+
+    let turn2UserPrompt = '';
+    const rootTurn2 = new ScriptedLLM((req) => {
+      turn2UserPrompt = req.messages[1]?.content ?? '';
+      return '<motivation>Continue from folded Turn 1 state</motivation><answer>Turn 2 complete: 100 + 7 = 107</answer>';
+    });
+
+    const raf2 = new RecursiveAgentFold({
+      rootLLM: rootTurn2,
+      store,
+      rootMaxSteps: Number.POSITIVE_INFINITY,
+      maxDepth: 0,
+    });
+    raf2.begin(initialQuestion, {
+      initialState: turn1Result.state,
+      followUpQuestion: 'продолжи!',
+      initialManifest,
+      initialDocIds,
+    });
+    const turn2Step = await raf2.next();
+    expect(turn2Step.kind).toBe('answer');
+    if (turn2Step.kind === 'answer') {
+      expect(turn2Step.answer).toBe('Turn 2 complete: 100 + 7 = 107');
+    }
+
+    // Verify byte-identical prefix (### Documents + ### Task) between Turn 1 Step 0 and Turn 2
+    const turn1Prefix = turn1Prompts[0]?.split('### Previous Steps')[0] ?? '';
+    const turn2Prefix = turn2UserPrompt.split('### Previous Steps')[0] ?? '';
+    expect(turn2Prefix).toBe(turn1Prefix);
+    // Verify Turn 1 folded blocks are preserved in Turn 2
+    expect(turn2UserPrompt).toContain('**[Compressed Steps 0-34]** Completed all 35 verification steps');
+    expect(turn2UserPrompt).toContain('**[Compressed Step 35]** Completed initial task; result: Turn 1 complete: sum = 100');
+    expect(turn2UserPrompt).toContain('### Newly Added Documents');
+    expect(turn2UserPrompt).toContain('extra.md');
+    expect(turn2UserPrompt).toContain('### Follow-up Question\nпродолжи!');
+  });
+
+  it('Test 3: preserves leading underscores in doc IDs and refreshes live workspace files modified on disk', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'raf-live-refresh-'));
+    try {
+      await mkdir(join(tmpDir, 'img'), { recursive: true });
+      const scriptPath = join(tmpDir, 'img', '_p4.py');
+      await writeFile(scriptPath, 'PANEL_COUNT = 1\nSTATUS = "DRAFT"', 'utf8');
+
+      const store = new ContextStore();
+      const raf = new RecursiveAgentFold({
+        rootLLM: new ScriptedLLM(() => '<answer>ok</answer>'),
+        store,
+        ingest: { cwd: tmpDir },
+        maxDepth: 0,
+      });
+      const readTool = raf.toolsFor(0).find((t) => t.name === 'read');
+      if (readTool === undefined) throw new Error('expected read tool');
+      const toolCtx = {
+        store,
+        usage: raf.usage,
+        depth: 0,
+        agentName: 'root',
+        step: 0,
+        emit: () => {},
+        board: raf.board,
+      };
+
+      const firstRead = await readTool.execute({ file_path: 'img/_p4.py', start_line: 1, end_line: 5 }, toolCtx);
+      expect(firstRead).toContain('img/_p4.py lines 1-2 of 2');
+      expect(firstRead).toContain('STATUS = "DRAFT"');
+      expect(store.has('img/_p4.py')).toBe(true);
+
+      // Modify img/_p4.py on disk (simulating write/edit/bash)
+      await writeFile(scriptPath, 'PANEL_COUNT = 4\nSTATUS = "FINAL_300DPI"\nEXTRA_LINE = True', 'utf8');
+
+      const secondRead = await readTool.execute({ file_path: 'img/_p4.py', start_line: 1, end_line: 5 }, toolCtx);
+      expect(secondRead).toContain('PANEL_COUNT = 4');
+      expect(secondRead).toContain('STATUS = "FINAL_300DPI"');
+      expect(secondRead).not.toContain('STATUS = "DRAFT"');
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Test 4: does not misparse literal <answer> or <think> tags inside <folding> summary as premature termination', async () => {
+    const store = new ContextStore();
+    store.add('Protocol format: optional <think>...</think>, <folding>...</folding>, <motivation>...</motivation>, <answer>...</answer>\nFINAL_SECRET = 9001', {
+      id: 'docs/ARCHITECTURE.md',
+      title: 'docs/ARCHITECTURE.md',
+    });
+
+    const llm = new ScriptedLLM((req) => {
+      const user = req.messages[1]?.content ?? '';
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+      if (step === 0) {
+        return '<motivation>Read line 1 of docs/ARCHITECTURE.md</motivation><tool_call>{"name":"read","arguments":{"document":"docs/ARCHITECTURE.md","start_line":1,"end_line":1}}</tool_call>';
+      }
+      if (step === 1) {
+        // Summary contains literal <think>…</think> and <answer>子代理完成：cat 50，dog 50</answer>
+        return '<folding>{"range":[0,0],"summary":"Step 0 read ARCHITECTURE.md L1: optional <think>…</think>, <tool_call>{}</tool_call>, or <answer>子代理完成：cat 50，dog 50</answer>."}</folding><motivation>Now read line 2 for FINAL_SECRET</motivation><tool_call>{"name":"read","arguments":{"document":"docs/ARCHITECTURE.md","start_line":2,"end_line":2}}</tool_call>';
+      }
+      return '<folding>{"range":[1,1],"summary":"Read line 2: FINAL_SECRET = 9001."}</folding><motivation>Complete</motivation><answer>FINAL_SECRET = 9001</answer>';
+    });
+
+    const raf = new RecursiveAgentFold({
+      rootLLM: llm,
+      store,
+      maxDepth: 0,
+    });
+    const res = await raf.run('Find FINAL_SECRET in docs/ARCHITECTURE.md');
+    expect(res.terminated).toBe('answer');
+    expect(res.steps).toBe(3);
+    expect(res.answer).toBe('FINAL_SECRET = 9001');
   });
 });
