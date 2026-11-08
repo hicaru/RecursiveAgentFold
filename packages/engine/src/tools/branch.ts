@@ -152,7 +152,7 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
   return {
     name: 'branch',
     description:
-      'Delegate deep document/module research to a persistent scoped specialist sub-agent, or ask a follow-up question to an existing specialist [scope=...]. Pass "scope" (e.g. doc id or module name) to reuse specialist state/cache and deduplicate; supports single "task" or parallel "tasks".',
+      'Delegate deep document/module research to a persistent scoped specialist sub-agent, or ask a follow-up question to an existing specialist [scope=...]. Pass "scope" (e.g. doc id or module name) to reuse specialist state/cache and deduplicate; supports single "task" or parallel "tasks". Use a loaded document id or a directory/module prefix present in the manifest; load a filesystem path with add_document first if it is absent, otherwise the specialist has no document to inspect.',
     parameters: {
       type: 'object',
       properties: {

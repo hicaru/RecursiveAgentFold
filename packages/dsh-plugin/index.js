@@ -411,7 +411,17 @@ const RAF_REPLACED_DSH_TOOLS = Object.freeze(
     'team_task_update',
   ]),
 );
+const PROTOCOL_TAG_TEXT = /<\s*\/?\s*(?:tool_call\|answer|tool_call|answer|folding|folded_output|fold|motivation|explanation|think)\b[^>]*>/gi;
+function cleanReasoningText(text) {
+  return text
+    .replace(PROTOCOL_TAG_TEXT, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function contentText(blocks) {
+
 
   if (!Array.isArray(blocks)) return '';
   const parts = [];
@@ -925,7 +935,43 @@ function workspaceOf(ctx, session) {
   return process.cwd();
 }
 
+const STUDY_INTENT =
+  /(?:\b(?:study|explore|investigate|research|deep[- ]?dive|thorough(?:ly)?|deep(?:ly)?)\b|изучи|изуча|исследуй|глубок|досконал|досканал)/iu;
+const PROJECT_INTENT =
+  /(?:\b(?:project|repo(?:sitory)?|codebase|workspace)\b|проект|репозитор|воркспейс)/iu;
+const STUDY_SCOPE_ROOTS = Object.freeze(['docs', 'results', 'scripts']);
+
+function studyScopes(store) {
+  const scopes = new Set();
+  for (const doc of store.list()) {
+    const id = typeof doc?.id === 'string' ? doc.id : '';
+    if (id === '' || id === 'session') continue;
+    const parts = id.split('/');
+    const head = parts[0] ?? '';
+    if (head === 'packages' && parts.length > 2 && typeof parts[1] === 'string') {
+      scopes.add(`packages/${parts[1]}`);
+    } else if (STUDY_SCOPE_ROOTS.includes(head)) {
+      scopes.add(head);
+    }
+  }
+  return [...scopes].sort().slice(0, 6);
+}
+
+function studyBrief(question, store) {
+  if (!STUDY_INTENT.test(question) || !PROJECT_INTENT.test(question)) return '';
+  const scopes = studyScopes(store);
+  if (scopes.length < 2) return '';
+  const tasks = scopes
+    .map(
+      (scope) =>
+        `{"scope":${JSON.stringify(scope)},"task":"Deeply study ${scope}: purpose, key components, exact file paths and line references, tests/benchmarks/results, and risks."}`,
+    )
+    .join(', ');
+  return `\n\n### Deep-study protocol (repository-wide)\nThis is a deep study of the repository, not a docs-only summary. Cover implementation, tests, benchmarks/results, docs, and risks.\nIf the branch tool is available, you MUST delegate each independent scope to a specialist now: branch(tasks=[${tasks}]). Synthesize their reports in the final answer.\nFor each scope, use outline/search/grep/tally for exact code and facts; use llm_query for long documents that need semantic scanning; use read only for targeted verification windows. Do not read every file serially in root.\nFinal answer: purpose, architecture/mechanism, implementation with paths/lines, tests/benchmarks/results, risks.`;
+}
+
 async function ensureTurn(ctx, outer, settings, runs, raf) {
+
   const session = getLiveSession(ctx, outer.sessionId);
   const position = session === undefined ? undefined : sessionPosition(session);
   const workspace = workspaceOf(ctx, session);
@@ -941,7 +987,7 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
 
   const userIndex = latestUserIndex(messages);
   const question = questionOf(messages, userIndex);
-  const effectiveQuestion = question === '' ? 'Answer the latest request.' : question;
+  let effectiveQuestion = question === '' ? 'Answer the latest request.' : question;
   const contextMessages = userIndex < 0 ? messages : messages.filter((_message, index) => index !== userIndex);
   const transcript = renderTranscript(contextMessages);
   const sessionState = getSessionState(outer.sessionId, raf);
@@ -1008,6 +1054,8 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
       console.error('RAF: cannot auto-ingest prompt path', promptPath, error);
     }
   }
+  const deepStudyBrief = studyBrief(effectiveQuestion, store);
+  if (deepStudyBrief !== '') effectiveQuestion += deepStudyBrief;
   const run = runs.create({
     sessionId: outer.sessionId,
     model: `${outer.provider}/${outer.model}`,
@@ -1148,12 +1196,14 @@ async function* rafStream(ctx, outer, settings, runs) {
         continue;
       }
       const text = pendingDeltas.shift();
+      const cleaned = cleanReasoningText(text);
+      if (cleaned === '') continue;
       if (!liveOpen) {
-        yield { type: 'block-start', index: 0, blockType: 'text' };
+        yield { type: 'block-start', index: 0, blockType: 'reasoning' };
         liveOpen = true;
       }
-      liveText += text;
-      yield { type: 'text-delta', index: 0, text };
+      liveText += cleaned;
+      yield { type: 'reasoning-delta', index: 0, text: cleaned };
     }
     await stepPromise;
     if (stepFailure !== undefined) throw stepFailure;
@@ -1164,21 +1214,24 @@ async function* rafStream(ctx, outer, settings, runs) {
       turn.pendingToolUsage = undefined;
     }
     const reasoningFallback = typeof step.reasoning === 'string' ? step.reasoning.trim() : '';
-    const motivation = step.kind === 'tool' && typeof step.motivation === 'string' ? step.motivation.trim() : '';
-    const visible = [
+    const motivation =
+      step.kind === 'tool' && typeof step.motivation === 'string'
+        ? cleanReasoningText(step.motivation).replace(/^[.,;:!?\-\s]+/u, '')
+        : '';
+    const visible = cleanReasoningText([
       liveText.trim() !== '' ? liveText.trim() : reasoningFallback,
       motivation !== '' ? `→ ${motivation}` : '',
     ]
       .filter(Boolean)
-      .join('\n\n');
+      .join('\n\n'));
     let index = 0;
     if (liveOpen) {
-      yield { type: 'block-end', index: 0, block: { type: 'text', text: visible } };
+      yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: visible } };
       index = 1;
     } else if (visible !== '') {
-      yield { type: 'block-start', index: 0, blockType: 'text' };
-      yield { type: 'text-delta', index: 0, text: visible };
-      yield { type: 'block-end', index: 0, block: { type: 'text', text: visible } };
+      yield { type: 'block-start', index: 0, blockType: 'reasoning' };
+      yield { type: 'reasoning-delta', index: 0, text: visible };
+      yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: visible } };
       index = 1;
     }
     if (step.kind === 'tool') {

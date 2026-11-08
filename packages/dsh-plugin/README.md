@@ -59,11 +59,23 @@ Internal model calls use the Session provider and model through `ctx.llm` by def
 
 DSH marks internal calls with `purpose` (`session-title`, `compaction`, `auto-review`, `onboarding_use_case`). The listener passes every such call through. RAF therefore never answers a title prompt or a compaction summary.
 
+### Deep-study protocol
+
+When the user asks to study, explore, or deeply investigate the project/repository, the Host appends a dynamic study brief to the RAF question. The brief is built from the loaded workspace scopes (`packages/*`, `docs`, `results`, `scripts`) and is only added when at least two scopes exist.
+
+The brief mirrors the task prompts that drive the benchmarks:
+
+- the codegraph tasks explicitly say to delegate module research to scoped specialists; the best run (`verify-codegraph-d2`) scored 6/6 with 71 `branch` calls;
+- the oolong aggregate tasks force `llm_query` scanning; the best run (`verify-oolong-d2`) scored 5/5 with 18 reader calls;
+- the prompt-check probes name the required tool for every probe; the best run scored 10/10.
+
+The brief therefore says: this is a repository-wide study, not a docs-only summary; cover implementation, tests, benchmarks/results, docs, and risks; if `branch` is available, delegate each scope with `branch(tasks=[{scope, task}, ...])` and synthesize the reports; use `outline`/`search`/`grep`/`tally` for exact code and facts, `llm_query` for long documents that need semantic scanning, and `read` only for targeted verification windows; do not read every file serially in root. Scopes are discovered from the manifest at run start, so the protocol stays model- and benchmark-agnostic.
+
 ### Native RAF rows
 
 RAF does not write display-only session events. The native DSH loop writes them:
 
-- the plugin streams the RAF model's reasoning deltas into the native assistant **text** as they arrive; the current thinking is visible without opening a reasoning disclosure;
+- the plugin streams the RAF model's reasoning deltas as a native **reasoning block**; protocol tags and placeholders are removed, so reasoning never looks like a tool call or an answer; the actual tool-call blocks stay separate;
 - when the step settles, the same assistant message carries the tool-call block; the native tool pipeline appends `tool/call` and `tool/result`;
 - Chat renders the visible reasoning text and the native tool rows, including the running `Deep diving` status;
 - the native tool pipeline and session log remain the source of truth for tool rows;

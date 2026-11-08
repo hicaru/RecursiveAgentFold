@@ -60,7 +60,7 @@ export const TOOL_GUIDANCE: Record<string, string> = Object.freeze({
   tally:
     '- **tally**: Deterministic exact regex/capture-group frequency counter. Never count regex matches by hand. When a task asks for frequencies of exact given terms (e.g. lowercase words), use the exact-case counts (or set `case_sensitive: true`) rather than adding capitalized sentence-start variants.',
   branch:
-    '- **branch**: Delegate deep document/module research to a persistent scoped specialist sub-agent, or ask a follow-up to an existing specialist. Always pass `scope` (target doc id or module name): (1) each specialist inspects ONLY its own `scope` document; (2) pass the same `scope` to ask follow-up questions (reusing its folded state and KV cache); (3) never spawn duplicate scans for the same scope or use `branch` for a single grep/read.',
+    '- **branch**: Delegate deep document/module research to a persistent scoped specialist sub-agent, or ask a follow-up to an existing specialist. Always pass `scope` (target doc id or module name): (1) each specialist inspects ONLY its own `scope` document; (2) pass the same `scope` to ask follow-up questions (reusing its folded state and KV cache); (3) never spawn duplicate scans for the same scope or use `branch` for a single grep/read; (4) each scope must be a loaded document id or a manifest prefix; load a filesystem path with add_document before dispatch if it is absent, otherwise the specialist has no document to inspect.',
   calculator: '- **calculator**: Exact arithmetic evaluation (+ - * / % ^, sum, min, max, avg, round, floor, ceil, abs, sqrt). Never do mental math.',
 });
 

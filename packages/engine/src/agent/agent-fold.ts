@@ -76,6 +76,18 @@ function isSummaryEcho(answer: string, summary: string | undefined): boolean {
   return a === s || s.endsWith(a) || s.startsWith(a);
 }
 
+/** Detect a serialized folding directive used as the answer text. */
+function isFoldDirectiveAnswer(answer: string): boolean {
+  const text = answer.trim();
+  if (!text.startsWith('{') || !text.endsWith('}')) return false;
+  try {
+    const value = JSON.parse(text);
+    return value !== null && typeof value === 'object' && Array.isArray(value.range) && typeof value.summary === 'string';
+  } catch {
+    return /^\{\s*"range"\s*:/.test(text);
+  }
+}
+
 /** Detect a long answer copied from the raw folding block. */
 function isRawAnswerEcho(raw: string, answer: string): boolean {
   const a = echoText(answer);
@@ -396,6 +408,8 @@ export class AgentFoldAgent {
           p.errors.push('the <answer> is not closed; produce a complete final answer');
         } else if (PROTOCOL_TAG.test(p.answer)) {
           p.errors.push('the <answer> contains a protocol tag; return only the answer text');
+        } else if (isFoldDirectiveAnswer(p.answer)) {
+          p.errors.push('the <answer> contains a folding directive; emit the fold in <folding> and answer with the actual result');
         }
       }
       if (!forcing && p.errors.length === 0 && p.answer !== undefined && isPlaceholderAnswer(p.answer)) {

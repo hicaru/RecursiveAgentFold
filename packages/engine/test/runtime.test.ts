@@ -1738,3 +1738,26 @@ describe('host tool-name prefix', () => {
     expect(branchNames).not.toContain('read');
   });
 });
+
+describe('answer validation', () => {
+  it('rejects a serialized folding directive used as the final answer', async () => {
+    const llm = new ScriptedLLM((_req, index) =>
+      index === 0
+        ? '<answer>{"range":[1,1],"summary":"oops"}</answer>'
+        : '<answer>real answer</answer>',
+    );
+    const events: AgentEvent[] = [];
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [],
+      store: new ContextStore(),
+      maxFormatRetries: 2,
+      onEvent: (event) => events.push(event),
+    });
+    const result = await agent.run('What is the result?');
+    expect(result.answer).toBe('real answer');
+    expect(result.formatIssues).toBeGreaterThan(0);
+    const formatErrors = events.filter((event): event is Extract<AgentEvent, { type: 'format_error' }> => event.type === 'format_error');
+    expect(formatErrors.some((event) => event.errors.some((message) => message.includes('folding directive')))).toBe(true);
+  });
+});
