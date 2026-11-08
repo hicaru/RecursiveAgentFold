@@ -45,6 +45,8 @@ export interface ScopedBranchRunOutput {
   readonly resultText: string;
   readonly answer: string | null;
   readonly state: FoldStateSnapshot;
+  /** A failed run is not cached as a specialist answer. */
+  readonly failed?: boolean;
 }
 
 export function normalizeScopeKey(scope: string): string {
@@ -284,7 +286,7 @@ export class ResearchBoard {
     task: string,
     fn: (input: ScopedBranchRunInput) => Promise<ScopedBranchRunOutput>,
     meta?: { readonly depth?: number; readonly parent?: string },
-  ): Promise<{ result: string; reused: boolean; scope: string }> {
+  ): Promise<{ result: string; reused: boolean; scope: string; failed?: boolean }> {
     const normScope = normalizeScopeKey(scope);
     const normTask = normalizeTaskKey(task);
     const existingSession = this._specialists.get(normScope);
@@ -337,7 +339,7 @@ export class ResearchBoard {
       });
     }
     const targetSession = session;
-    const runTask = async (): Promise<{ result: string; reused: boolean; scope: string }> => {
+    const runTask = async (): Promise<{ result: string; reused: boolean; scope: string; failed?: boolean }> => {
       const cached = targetSession.qaMemo.get(normTask);
       if (cached !== undefined) {
         return { result: cached, reused: true, scope: normScope };
@@ -364,6 +366,18 @@ export class ResearchBoard {
             : {}),
           agentName: targetSession.agentName,
         });
+        if (out.failed === true) {
+          // Never cache a failed run: the next call must retry the specialist instead of reusing the error.
+          this.record({
+            agent: targetSession.agentName,
+            kind: 'branch',
+            scope: normScope,
+            key: normScope,
+            summary: `${targetSession.agentName}: failed — ${out.resultText.slice(0, 200)}`,
+            inProgress: false,
+          });
+          return { result: out.resultText, reused: false, scope: normScope, failed: true };
+        }
         targetSession.state = out.state;
         const cleanAns = (out.answer ?? out.resultText).replace(/\s+/g, ' ').trim().slice(0, 500);
         if (cleanAns && !targetSession.historySummaries.includes(cleanAns)) {

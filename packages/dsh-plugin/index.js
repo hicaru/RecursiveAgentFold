@@ -34,6 +34,11 @@ const RAF_ROOT_MAX_STEPS = Number.POSITIVE_INFINITY;
 const RAF_BRANCH_MAX_STEPS = 20;
 const RAF_ROOT_MAX_OUTPUT = 16000;
 const RAF_QUERY_MAX_OUTPUT = 16384;
+/** Provider failures that a repeated identical request can resolve. */
+const RAF_LLM_RETRY_CODES = Object.freeze(['TRANSPORT', 'TIMEOUT', 'RATE_LIMIT', 'SERVER', 'EMPTY_RESPONSE']);
+const RAF_LLM_RETRY_MAX_ATTEMPTS = 6;
+const RAF_LLM_RETRY_BASE_DELAY_MS = 500;
+const RAF_LLM_RETRY_MAX_DELAY_MS = 10_000;
 export const inject = ['agents', 'llm', 'tools'];
 
 const rafInternal = new AsyncLocalStorage();
@@ -430,6 +435,30 @@ async function catalogModels(ctx) {
   return providers;
 }
 
+/**
+ * Wait before a retry without ignoring an abort. The delay is exponential and capped.
+ */
+function rafRetryDelay(attempt, signal) {
+  const delay = Math.min(RAF_LLM_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RAF_LLM_RETRY_MAX_DELAY_MS);
+  return new Promise((resolve, reject) => {
+    let timer = null;
+    const abort = () => {
+      if (timer !== null) clearTimeout(timer);
+      const reason = signal?.reason;
+      reject(reason instanceof Error ? reason : new Error('aborted'));
+    };
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    timer = setTimeout(() => {
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    }, delay);
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
 class DshLlmClient {
   constructor(ctx, outer, profile, reasoningEffort, target) {
     this.ctx = ctx;
@@ -439,6 +468,8 @@ class DshLlmClient {
     this.provider = target?.provider ?? outer.provider;
     this.model = target?.model ?? outer.model;
     this.onDelta = undefined;
+    /** True when the last completed call needed at least one retry. */
+    this.retried = false;
   }
 
   async complete(request) {
@@ -462,34 +493,56 @@ class DshLlmClient {
       ...(this.reasoningEffort !== undefined ? { reasoningEffort: this.reasoningEffort } : {}),
       ...(signal !== undefined ? { signal } : {}),
     };
-    let text = '';
-    let reasoning = '';
+    this.retried = false;
+    let textParts = [];
+    let reasoningParts = [];
     let usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
     let finishKind;
     let failure;
-    await rafInternal.run(true, async () => {
-      for await (const chunk of this.ctx.llm.stream(options)) {
-        if (chunk === null || typeof chunk !== 'object') continue;
-        if (chunk.type === 'text-delta') text += chunk.text;
-        else if (chunk.type === 'reasoning-delta') {
-          reasoning += chunk.text;
-          if (typeof this.onDelta === 'function') this.onDelta(chunk.text);
-        }
-        else if (chunk.type === 'usage') usage = chunk.usage;
-        else if (chunk.type === 'finish') {
-          finishKind = chunk.reason?.kind;
-          failure = chunk.reason?.failure;
-        }
+    for (let attempt = 0; attempt < RAF_LLM_RETRY_MAX_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) {
+        this.retried = true;
+        await rafRetryDelay(attempt, signal);
       }
-    });
-    if (finishKind === 'error' || finishKind === 'aborted') {
-      const error = new Error(typeof failure?.message === 'string' ? failure.message : 'LLM request failed');
-      if (typeof failure?.code === 'string') error.code = failure.code;
-      throw error;
+      // A retried attempt must not publish reasoning again: the failed attempt already streamed its prefix.
+      const publishReasoning = attempt === 0;
+      textParts = [];
+      reasoningParts = [];
+      usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+      finishKind = undefined;
+      failure = undefined;
+      await rafInternal.run(true, async () => {
+        for await (const chunk of this.ctx.llm.stream(options)) {
+          if (chunk === null || typeof chunk !== 'object') continue;
+          if (chunk.type === 'text-delta') textParts.push(chunk.text);
+          else if (chunk.type === 'reasoning-delta') {
+            reasoningParts.push(chunk.text);
+            if (publishReasoning && typeof this.onDelta === 'function') this.onDelta(chunk.text);
+          }
+          else if (chunk.type === 'usage') usage = chunk.usage;
+          else if (chunk.type === 'finish') {
+            finishKind = chunk.reason?.kind;
+            failure = chunk.reason?.failure;
+          }
+        }
+      });
+      if (finishKind !== 'error' && finishKind !== 'aborted') break;
+      const code = typeof failure?.code === 'string' ? failure.code : undefined;
+      const retryable =
+        attempt < RAF_LLM_RETRY_MAX_ATTEMPTS - 1 &&
+        finishKind !== 'aborted' &&
+        signal?.aborted !== true &&
+        code !== undefined &&
+        RAF_LLM_RETRY_CODES.includes(code);
+      if (!retryable) {
+        const error = new Error(typeof failure?.message === 'string' ? failure.message : 'LLM request failed');
+        if (code !== undefined) error.code = code;
+        throw error;
+      }
     }
     return {
-      text,
-      reasoning,
+      text: textParts.join(''),
+      reasoning: reasoningParts.join(''),
       usage: mapUsage(usage),
       model: this.model,
       latencyMs: Date.now() - started,
@@ -903,13 +956,15 @@ function finishRun(turn, result, signal) {
   turn.run = undefined;
 }
 
+/**
+ * Convert an engine failure into a failed step. A text answer would hide the failure.
+ */
 function errorStream(message) {
-  const text = `RAF engine error: ${message}`;
   return [
-    { type: 'block-start', index: 0, blockType: 'text' },
-    { type: 'text-delta', index: 0, text },
-    { type: 'block-end', index: 0, block: { type: 'text', text } },
-    { type: 'finish', reason: { kind: 'stop' } },
+    {
+      type: 'finish',
+      reason: { kind: 'error', failure: { message: `RAF engine error: ${message}`, code: 'ERROR' } },
+    },
   ];
 }
 
@@ -1602,12 +1657,14 @@ async function* rafStream(ctx, outer, settings, runs) {
       turn.pendingToolUsage = undefined;
     }
     const reasoningFallback = typeof step.reasoning === 'string' ? step.reasoning.trim() : '';
+    // A retried call never re-streams reasoning, so streamed deltas can be a failed prefix.
+    const streamedReasoning = turn.rootLLM.retried === true ? '' : liveText.trim();
     const motivation =
       step.kind === 'tool' && typeof step.motivation === 'string'
         ? cleanReasoningText(step.motivation).replace(/^[.,;:!?\-\s]+/u, '')
         : '';
     const visible = cleanReasoningText([
-      liveText.trim() !== '' ? liveText.trim() : reasoningFallback,
+      streamedReasoning !== '' ? streamedReasoning : reasoningFallback,
       motivation !== '' ? `→ ${motivation}` : '',
     ]
       .filter(Boolean)
@@ -1654,15 +1711,21 @@ async function* rafStream(ctx, outer, settings, runs) {
       yield { type: 'finish', reason: { kind: 'stop' } };
       finishRun(turn, step.result, outer.signal);
     } else {
-      const answer =
-        typeof step.result.answer === 'string' && step.result.answer !== ''
-          ? step.result.answer
-          : (step.result.error ?? 'RAF engine returned no answer.');
-      if (answer !== '') {
-        yield { type: 'block-start', index, blockType: 'text' };
-        yield { type: 'text-delta', index, text: answer };
-        yield { type: 'block-end', index, block: { type: 'text', text: answer } };
+      const answer = typeof step.result.answer === 'string' && step.result.answer !== '' ? step.result.answer : '';
+      const failure =
+        answer === '' && typeof step.result.error === 'string' && step.result.error !== '' ? step.result.error : undefined;
+      if (failure !== undefined) {
+        // A failed engine run must fail the step. Reporting its error as answer text hides the failure.
+        finishRun(turn, step.result, outer.signal);
+        turn.finished = true;
+        activeTurns.delete(outer.sessionId);
+        yield { type: 'finish', reason: { kind: 'error', failure: { message: failure, code: 'ERROR' } } };
+        return;
       }
+      const text = answer !== '' ? answer : 'RAF engine returned no answer.';
+      yield { type: 'block-start', index, blockType: 'text' };
+      yield { type: 'text-delta', index, text };
+      yield { type: 'block-end', index, block: { type: 'text', text } };
       yield { type: 'finish', reason: { kind: 'stop' } };
       finishRun(turn, step.result, outer.signal);
     }
