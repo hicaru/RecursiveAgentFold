@@ -96,6 +96,8 @@ window.__ModuleLoader__.load({
       'tool.branch.running': 'running',
       'tool.branch.failed': 'failed',
       'tool.branch.stopped': 'stopped',
+      'tool.branch.done': 'done',
+      'tool.branch.noSteps': 'No live steps yet',
       'tool.branch.result': 'Result',
     });
 
@@ -165,6 +167,8 @@ window.__ModuleLoader__.load({
       'tool.branch.running': 'выполняется',
       'tool.branch.failed': 'ошибка',
       'tool.branch.stopped': 'остановлено',
+      'tool.branch.done': 'готово',
+      'tool.branch.noSteps': 'Пока нет шагов',
       'tool.branch.result': 'Результат',
     });
 
@@ -192,6 +196,18 @@ window.__ModuleLoader__.load({
 .rafx-branchResultText{margin:0;padding:5px 7px;border-radius:5px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font:var(--dsw-font-markdown-code-block-small);white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}
 .rafx-branchInspect{align-self:flex-start;border:.5px solid var(--dsw-alias-border-l4);border-radius:999px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary);cursor:pointer;padding:2px 8px;font-size:11px;line-height:16px}
 .rafx-branchInspect:hover{background:var(--dsw-alias-interactive-bg-hover-solid);color:var(--dsw-alias-label-primary)}
+.rafx-branchTasks{display:flex;flex-direction:column;gap:4px}
+.rafx-branchTasksNested{margin:3px 0 4px 14px;padding-left:8px;border-left:.5px solid var(--dsw-alias-border-l2)}
+.rafx-branchTaskHead{display:flex;align-items:flex-start;gap:5px;width:100%;min-width:0;background:none;border:0;padding:0;color:var(--dsw-alias-label-secondary);text-align:left;font:inherit;cursor:pointer}
+.rafx-branchTaskHead:hover{color:var(--dsw-alias-label-primary)}
+.rafx-branchTaskChevron{width:12px;flex:none;color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:1.6}
+.rafx-branchTaskBody{display:flex;flex-direction:column;gap:4px;margin:2px 0 4px 14px}
+.rafx-branchTaskStage{flex:none;margin-left:auto;color:var(--dsw-alias-label-tertiary);font-size:10.5px;line-height:1.6}
+.rafx-branchTaskEmpty{margin:2px 0 2px 18px;color:var(--dsw-alias-label-tertiary);font-size:11.5px}
+.rafx-branchNested{display:flex;flex-direction:column;gap:2px;margin-top:3px}
+.rafx-branchNestedHead{display:flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:10.5px;line-height:1.6}
+.rafx-branchNestedTitle{font-weight:500}
+.rafx-branchNestedCount{color:var(--dsw-alias-label-tertiary)}
 .rafx-page{--rafx-ink:var(--dsw-alias-label-primary);--rafx-ink-2:var(--dsw-alias-label-secondary);--rafx-ink-3:var(--dsw-alias-label-tertiary);--rafx-line:var(--dsw-alias-border-l3);--rafx-surface:var(--dsw-alias-bg-layer-1);--rafx-surface-2:var(--dsw-alias-bg-layer-2);--rafx-business:var(--dsw-alias-state-business-primary);display:flex;flex-direction:column;width:100%;height:100%;min-height:0;overflow:hidden;background:var(--dsw-alias-bg-base);color:var(--rafx-ink);font-size:14px;line-height:1.6}
 .rafx-scroll{flex:1;min-height:0;overflow:auto;scrollbar-gutter:stable;--dsh-scrollbar-width:9px;--dsh-scrollbar-thumb-border:2px}
 .rafx-content{max-width:760px;margin:0 auto;padding:0 clamp(24px,4vw,48px) 48px}
@@ -1752,7 +1768,7 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function RunStep({ t, step, open = true, onToggleStep, openTools, onToggleTool, agentById, onOpenAgent }) {
+    function RunStep({ t, step, open = true, onToggleStep, openTools, onToggleTool, agentById, onOpenAgent, hideBranchTools = false }) {
       const duration = (step.endedAt ?? Date.now()) - step.at;
       const stagePills = [];
       if (step.llmCalls.length > 0) stagePills.push(`LLM×${step.llmCalls.length}`);
@@ -1762,6 +1778,8 @@ window.__ModuleLoader__.load({
       if (step.queries.length > 0) stagePills.push(`QUERY×${step.queries.length}`);
       if (step.answer !== null) stagePills.push('ANSWER');
       if (step.errors.length > 0) stagePills.push('ERROR');
+
+      const visibleTools = hideBranchTools ? step.tools.filter((tool) => baseToolName(tool.name) !== 'branch') : step.tools;
 
       const headerContent = h(
         React.Fragment,
@@ -1899,12 +1917,12 @@ window.__ModuleLoader__.load({
                     : null,
                 );
               }),
-              step.tools.length === 0
+              visibleTools.length === 0
                 ? null
                 : h(
                     'div',
                     { className: 'rafx-tools' },
-                    step.tools.map((tool) =>
+                    visibleTools.map((tool) =>
                       h(RunTool, {
                         key: tool.key,
                         t,
@@ -2398,6 +2416,139 @@ window.__ModuleLoader__.load({
       return byText ?? pool[index];
     }
 
+    function branchArgsOfTool(tool) {
+      if (tool === null || typeof tool !== 'object') return null;
+      if (typeof tool.args === 'string') return parseBranchArgs(tool.args);
+      return tool.args !== null && typeof tool.args === 'object' ? tool.args : null;
+    }
+
+    function NestedBranchTasks({ t, tasks, agents, result, perTask, agentById, openSteps, toggleStep, openTools, toggleTool }) {
+      const hasTasks = tasks.length > 0;
+      if (!hasTasks && result === '') return null;
+      return h(
+        'div',
+        { className: 'rafx-branchNested' },
+        h(
+          'div',
+          { className: 'rafx-branchNestedHead' },
+          h('span', { className: 'rafx-branchNestedTitle' }, t('tool.branch.title')),
+          hasTasks ? h('span', { className: 'rafx-branchNestedCount' }, `${t('tool.branch.tasks')}: ${tasks.length}`) : null,
+        ),
+        h(BranchTasks, { t, tasks, agents, result, perTask, agentById, openSteps, toggleStep, openTools, toggleTool, nested: true }),
+      );
+    }
+
+    function BranchTaskNode({ t, task, index, agent, result, agentById, openSteps, toggleStep, openTools, toggleTool }) {
+      const [open, setOpen] = React.useState(false);
+      const resultText = result === undefined ? undefined : cleanBranchResult(result, task.task);
+      const stage =
+        agent === undefined
+          ? ''
+          : agent.currentStage || (agent.endedAt === null ? t('tool.branch.running') : t('tool.branch.done'));
+      return h(
+        'div',
+        { className: 'rafx-branchTaskWrap' },
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'rafx-branchTaskHead',
+            'aria-expanded': open,
+            onClick: () => setOpen((value) => !value),
+          },
+          h('span', { className: 'rafx-branchTaskChevron', 'aria-hidden': true }, open ? '▾' : '▸'),
+          h('span', { className: 'rafx-branchTaskNo' }, `#${index}`),
+          task.scope !== '' ? h('span', { className: 'rafx-branchScope' }, task.scope) : null,
+          h('span', { className: 'rafx-branchTaskText' }, task.task),
+          stage !== '' ? h('span', { className: 'rafx-branchTaskStage' }, stage) : null,
+        ),
+        open
+          ? h(
+              'div',
+              { className: 'rafx-branchTaskBody' },
+              agent !== undefined && agent.steps.length > 0
+                ? agent.steps.map((step) => {
+                    const stepKey = `${agent.id}:${step.index}`;
+                    const nestedBranchTools = step.tools.filter((tool) => baseToolName(tool.name) === 'branch');
+                    return h(
+                      React.Fragment,
+                      { key: stepKey },
+                      h(RunStep, {
+                        t,
+                        step,
+                        open: openSteps.has(stepKey) || step === agent.steps[agent.steps.length - 1],
+                        onToggleStep: () => toggleStep(stepKey),
+                        openTools,
+                        onToggleTool: toggleTool,
+                        agentById,
+                        onOpenAgent: () => {},
+                        hideBranchTools: true,
+                      }),
+                      nestedBranchTools.map((tool, toolIndex) => {
+                        const nestedTasks = branchTasksOf(branchArgsOfTool(tool));
+                        const childIds =
+                          Array.isArray(tool.childAgentIds) && tool.childAgentIds.length > 0
+                            ? tool.childAgentIds
+                            : tool.childAgentId !== null
+                              ? [tool.childAgentId]
+                              : [];
+                        const children = childIds.map((id) => agentById.get(id)).filter(Boolean);
+                        const branchResult = typeof tool.result === 'string' ? tool.result : '';
+                        return h(NestedBranchTasks, {
+                          key: `${stepKey}:branch:${toolIndex}`,
+                          t,
+                          tasks: nestedTasks,
+                          agents: children,
+                          result: branchResult,
+                          perTask: splitBranchResults(branchResult),
+                          agentById,
+                          openSteps,
+                          toggleStep,
+                          openTools,
+                          toggleTool,
+                        });
+                      }),
+                    );
+                  })
+                : resultText !== undefined && resultText !== ''
+                  ? h('div', { className: 'rafx-branchTaskResult' }, resultText)
+                  : h('div', { className: 'rafx-branchTaskEmpty' }, t('tool.branch.noSteps')),
+            )
+          : null,
+      );
+    }
+
+    function BranchTasks({ t, tasks, agents, result, perTask, agentById, openSteps, toggleStep, openTools, toggleTool, nested = false }) {
+      return h(
+        'div',
+        { className: nested ? 'rafx-branchTasks rafx-branchTasksNested' : 'rafx-branchTasks' },
+        tasks.map((task, index) => {
+          const agent = findBranchAgent(agents, task, index);
+          return h(BranchTaskNode, {
+            key: `${nested ? 'nested' : 'root'}:${index}`,
+            t,
+            task,
+            index,
+            agent,
+            result: perTask !== undefined ? perTask.get(index) : undefined,
+            agentById,
+            openSteps,
+            toggleStep,
+            openTools,
+            toggleTool,
+          });
+        }),
+        result !== '' && (perTask === undefined || perTask.size === 0)
+          ? h(
+              'div',
+              { className: 'rafx-branchResult' },
+              h('span', { className: 'rafx-branchResultLabel' }, t('tool.branch.result')),
+              h('pre', { className: 'rafx-branchResultText' }, result),
+            )
+          : null,
+      );
+    }
+
     /** Native tool row for raf_branch: per-task disclosure with live child steps. */
     function RafBranchToolView(props) {
       const t = typeof props.t === 'function' ? props.t : (key) => key;
@@ -2405,7 +2556,6 @@ window.__ModuleLoader__.load({
         const initial = props.block;
         return !(props.phase === 'result' || (initial !== null && typeof initial === 'object' && 'kind' in initial));
       });
-      const [openTasks, setOpenTasks] = React.useState(() => new Set());
       const [openSteps, setOpenSteps] = React.useState(() => new Set());
       const [openTools, setOpenTools] = React.useState(() => new Set());
       const [run, setRun] = React.useState(null);
@@ -2480,14 +2630,6 @@ window.__ModuleLoader__.load({
           toggle();
         }
       };
-      const toggleTask = (index) => {
-        setOpenTasks((current) => {
-          const next = new Set(current);
-          if (next.has(index)) next.delete(index);
-          else next.add(index);
-          return next;
-        });
-      };
       const toggleStep = (key) => {
         setOpenSteps((current) => {
           const next = new Set(current);
@@ -2532,66 +2674,18 @@ window.__ModuleLoader__.load({
           ? h(
               'div',
               { className: 'rafx-branchBody' },
-              tasks.map((task, index) => {
-                const agent = findBranchAgent(branchAgents, task, index);
-                const taskResult = perTask.get(index);
-                const cleanedResult = taskResult === undefined ? undefined : cleanBranchResult(taskResult, task.task);
-                const taskOpen = openTasks.has(index);
-                const stage =
-                  agent === undefined
-                    ? ''
-                    : agent.currentStage || (agent.status === 'running' ? t('tool.branch.running') : agent.status === 'done' ? t('tool.branch.done') : '');
-                return h(
-                  'div',
-                  { className: 'rafx-branchTaskWrap', key: `branch-task:${index}` },
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'rafx-branchTaskHead',
-                      'aria-expanded': taskOpen,
-                      onClick: () => toggleTask(index),
-                    },
-                    h('span', { className: 'rafx-branchTaskChevron', 'aria-hidden': true }, taskOpen ? '▾' : '▸'),
-                    h('span', { className: 'rafx-branchTaskNo' }, `#${index}`),
-                    task.scope !== '' ? h('span', { className: 'rafx-branchScope' }, task.scope) : null,
-                    h('span', { className: 'rafx-branchTaskText' }, task.task),
-                    stage !== '' ? h('span', { className: 'rafx-branchTaskStage' }, stage) : null,
-                  ),
-                  taskOpen
-                    ? h(
-                        'div',
-                        { className: 'rafx-branchTaskBody' },
-                        agent !== undefined && agent.steps.length > 0
-                          ? agent.steps.map((step) => {
-                              const stepKey = `${agent.id}:${step.index}`;
-                              return h(RunStep, {
-                                key: stepKey,
-                                t,
-                                step,
-                                open: openSteps.has(stepKey) || step === agent.steps[agent.steps.length - 1],
-                                onToggleStep: () => toggleStep(stepKey),
-                                openTools,
-                                onToggleTool: toggleTool,
-                                agentById,
-                                onOpenAgent: () => {},
-                              });
-                            })
-                          : cleanedResult !== undefined && cleanedResult !== ''
-                            ? h('div', { className: 'rafx-branchTaskResult' }, cleanedResult)
-                            : h('div', { className: 'rafx-branchTaskEmpty' }, t('tool.branch.noSteps')),
-                      )
-                    : null,
-                );
+              h(BranchTasks, {
+                t,
+                tasks,
+                agents: branchAgents,
+                result,
+                perTask,
+                agentById,
+                openSteps,
+                toggleStep,
+                openTools,
+                toggleTool,
               }),
-              result !== '' && perTask.size === 0
-                ? h(
-                    'div',
-                    { className: 'rafx-branchResult' },
-                    h('span', { className: 'rafx-branchResultLabel' }, t('tool.branch.result')),
-                    h('pre', { className: 'rafx-branchResultText' }, result),
-                  )
-                : null,
               typeof props.inspect === 'function'
                 ? h(
                     'button',
