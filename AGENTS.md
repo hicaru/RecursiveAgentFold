@@ -1,30 +1,30 @@
 # AGENTS.md
 
-## 工作区
-- 包管理器只用 pnpm；禁 npm/yarn。按包操作：`pnpm --filter <pkg> <cmd>`。
-- 提交前必跑：`pnpm typecheck && pnpm test`。
-- 不改生成物（`dist/` 等）；不提交 `.env` / 密钥。
-- 依赖只在 `packages/*` 之间共享，禁止反向引用。
+## Workspace
+- Use pnpm only. Do not use npm or yarn. Run package commands with `pnpm --filter <pkg> <cmd>`.
+- Run `pnpm typecheck && pnpm test` before every commit.
+- Do not modify generated files (`dist/`, etc.). Do not commit `.env` or secrets.
+- Share dependencies only across `packages/*`. Do not introduce reverse dependencies.
 
-## TypeScript（硬性规则）
-- `tsconfig.base.json` 已含 `strict` + `noUncheckedIndexedAccess`：不得放宽。
-- 禁 `any`；未知类型用 `unknown` + 类型收窄。
-- 禁非空断言 `!`；用 `?.`、`??`、类型守卫。
-- 可选属性写 `apiKeyEnv?: string`，不写 `: string | undefined`。
-- DTO / 值对象属性一律 `readonly`；值比较用显式 `equals()`。
-- 不让进程崩溃：关键段 try/catch；优先可辨识联合（discriminated union）返回错误。
+## TypeScript (Hard Rules)
+- `tsconfig.base.json` enables `strict` and `noUncheckedIndexedAccess`. Do not relax these compiler options.
+- Do not use `any`. Use `unknown` and narrow types explicitly.
+- Do not use non-null assertions (`!`). Use `?.`, `??`, or type guards.
+- Declare optional properties as `apiKeyEnv?: string`, not `: string | undefined`.
+- Mark DTO and value-object properties `readonly`. Compare values with explicit `equals()`.
+- Never crash the process. Wrap critical paths in `try/catch` and return errors via discriminated unions where applicable.
 
-## 热路径性能
-- 大文本拼接：`push()` + `join('')`；禁循环内 `+` / `+=`。
-- 已知长度先预分配（`new Array(n)` / `Array.from({length})`）；禁循环 `push` 盲扩。
-- 常量 / 配置对象加 `Object.freeze()`。
+## Hot-Path Performance
+- Concatenate large strings with `push()` + `join('')`. Do not use `+` or `+=` inside loops.
+- Pre-allocate arrays when the length is known (`new Array(n)` or `Array.from({ length })`). Avoid blind `push` growth in hot loops.
+- Freeze constant and configuration objects with `Object.freeze()`.
 
-## 通用性与模型/基准无关性（硬性规则）
-- 严禁针对特定 benchmark、数据集、文档标题或特定模型硬编码逻辑、正则、启发式规则或格式 hack。
-- 所有算法、分块、缓存优化、协议解析与子代理调度必须保持 100% 通用（model-agnostic & benchmark-agnostic）。
+## Generality & Model/Benchmark Agnosticism (Hard Rules)
+- Never hardcode logic, regular expressions, heuristics, or format hacks for specific benchmarks, datasets, document titles, or models.
+- Keep all algorithms, chunking, cache optimizations, protocol parsers, and sub-agent schedulers 100% model-agnostic and benchmark-agnostic.
 
-## 代码卫生
-- DRY 绝对化：写任何函数 / 抽象前先搜既有实现；有类似代码立即复用或合并。
-- 无死代码：未使用的导入、导出、依赖、文件当场删除，不留"以后可能用"。
-- 注释最少；仅用 ASD-STE100 简易英语（短句、主动语态、每个句子一个意思）。
-- 新增第三方依赖前先问。
+## Code Hygiene
+- Enforce strict DRY. Search for existing implementations before writing any function or abstraction; reuse or merge similar code immediately.
+- Leave no dead code. Delete unused imports, exports, dependencies, and files immediately.
+- Keep comments minimal. Write all comments, prompts, and directives in ASD-STE100 Simplified Technical English (short sentences, active voice, one idea per sentence).
+- Ask before adding any third-party dependency.

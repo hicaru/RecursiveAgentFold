@@ -93,7 +93,7 @@ async function ensureTargetsFromArgs(
     targets.push(rawPath.trim());
   }
   if (targets.length === 0) {
-    if (ingest?.cwd !== undefined && ctx.store.list().every((d) => d.id === 'session')) {
+    if (ingest?.cwd !== undefined && ctx.store.listManifest().every((d) => d.id === 'session')) {
       try {
         const res = await ctx.store.addPath(ingest.cwd, {
           cwd: ingest.cwd,
@@ -145,7 +145,7 @@ export function createListDocumentsTool(opts: DocumentToolOptions = {}): Tool {
       },
     },
     async execute(args, ctx) {
-      if (opts.ingest?.cwd !== undefined && ctx.store.list().every((d) => d.id === 'session')) {
+      if (opts.ingest?.cwd !== undefined && ctx.store.listManifest().every((d) => d.id === 'session')) {
         await ensureTargetsFromArgs({}, ctx, opts.ingest);
       }
       const prefixRaw = argString(args, 'prefix', false)?.trim();
@@ -340,7 +340,7 @@ export function createOutlineTool(opts: DocumentToolOptions = {}): Tool {
           maxTokens,
         ).text;
       }
-      const ids = targetIds ?? ctx.store.list().map((d) => d.id);
+      const ids = targetIds ?? ctx.store.listManifest().map((d) => d.id);
       if (ids.length === 0) return '(no documents loaded)';
       const perDocMax = Math.max(15, Math.floor(maxEntries / ids.length));
       const sections: string[] = [];

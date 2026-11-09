@@ -72,7 +72,7 @@ function hashLines(lines: readonly string[], start: number, end: number): string
 }
 
 const OUTLINE_HEADER_RE =
-  /^(?:\s*#{1,6}\s+\S|\s*(?:export\s+)?(?:async\s+)?(?:function|class|interface|type|const|let|enum|def|struct|impl|mod|module|package)\s+[A-Za-z0-9_]+|\s*(?:Chapter|Section|Part|Article|Table|Appendix|Annual Report)\b|\s*第[一二三四五六七八九十百千万零〇0-9]+[章节篇条部分]|\s*[篇章节]\s*[一二三四五六七八九十0-9]+|\s*\d+(?:\.\d+)*\s+[A-Z\p{Script=Han}])/u;
+  /^(?:\s*#{1,6}\s+\S|\s*(?:export\s+)?(?:async\s+)?(?:function|class|interface|type|const|let|enum|def|struct|impl|mod|module|package)\s+[A-Za-z0-9_]+|\s*(?:Chapter|Section|Part|Article|Table|Appendix|Annual Report)\b|\s*\d+(?:\.\d+)*\s+[A-Z\p{Script=Han}])/u;
 /**
  * Holds the (possibly mega-large) contexts outside of every agent window.
  * Agents only see a manifest; content reaches models through llm_query
@@ -202,6 +202,13 @@ export class ContextStore {
     return t;
   }
 
+  /** Token total for documents visible in the manifest (excludes stored reports). */
+  manifestTokens(): number {
+    let t = 0;
+    for (const d of this.docs.values()) if (d.manifest) t += d.tokens;
+    return t;
+  }
+
   /** Documents that participate in the model manifest. */
   listManifest(): StoredDocument[] {
     return this.list().filter((doc) => doc.manifest);
@@ -307,10 +314,14 @@ export class ContextStore {
 
   /** Rank 40-line document windows against a query using Okapi BM25 V2. */
   search(query: string, opts: SearchOptions = {}): SearchWindowHit[] {
+    const docIds = opts.docIds !== undefined && opts.docIds.length > 0
+      ? opts.docIds
+      : this.listManifest().map((d) => d.id);
+    if (docIds.length === 0) return [];
     if (!this.bm25Index) {
       this.bm25Index = new Bm25DocumentIndex(this.list());
     }
-    return this.bm25Index.search(query, opts);
+    return this.bm25Index.search(query, { ...opts, docIds });
   }
 
   /** Extract structural headings, section titles, and definitions with 1-based line numbers. */
@@ -363,7 +374,7 @@ export class ContextStore {
     const perDocMatches: GrepMatch[][] = [];
     const perDoc: Record<string, number> = {};
     let total = 0;
-    const ids = opts.docIds?.length ? opts.docIds : [...this.docs.keys()];
+    const ids = opts.docIds?.length ? opts.docIds : this.listManifest().map((d) => d.id);
     for (const id of ids) {
       const doc = this.get(id);
       perDoc[id] = 0;
@@ -434,7 +445,7 @@ export class ContextStore {
     const counts = new Map<string, number>();
     const folded = new Map<string, { total: number; variants: Record<string, number> }>();
     let totalMatches = 0;
-    const ids = opts.docIds?.length ? opts.docIds : [...this.docs.keys()];
+    const ids = opts.docIds?.length ? opts.docIds : this.listManifest().map((d) => d.id);
     for (const id of ids) {
       for (const line of this.get(id).lines) {
         re.lastIndex = 0;

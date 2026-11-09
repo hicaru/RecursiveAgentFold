@@ -19,10 +19,10 @@
 |---|---|---|---|---|
 | `verify-prompt-check` | H5: новые CN-промпты не ломают протокол | `bench prompt-check` | все пробы PASS, e2e cache 92.2%, fmt=0 | ✅ H5 |
 | `exp-codegraph-d0` | H1: соло-агент на codegraph 120k | `bench codegraph --tokens 120000 --tasks 6 --hops 3 --max-depth 0` | 6/6, 11.5 шагов, cache 84.3%, $0.2825, fmt=2 | 6/6 брут-форсом; делегация не задействована |
-| `exp-codegraph-d1` | H1/H3: depth-1 без leaf-consult | 同 + `--max-depth 1` | 5/6, cache 75.4%, branch 76.0%, $0.6230 | ❌ diamond-4 упал (шорт-лист констант в свёртке) |
-| `exp-codegraph-d2` | H1/H2/H3/H4: scoped specialists + resumption | 同 + `--max-depth 2` | **6/6**, branch 79.2%, $0.6312, 157s/задача; прогрев: −57..76% токенов на повторных задачах | ✅ лучшая |
-| `exp-codegraph-d3` | H1: d3 лучше d2? | 同 + `--max-depth 3` | 6/6, $0.8729 (1.38× d2), 258s | ❌ дороже без прироста |
-| `exp-codegraph-d4` | H1: убыв. отдача d4 | 同 + `--max-depth 4` | 6/6, $0.8772, 4.33 шагов, 273s | ❌ нулевой прирост |
+| `exp-codegraph-d1` | H1/H3: depth-1 без leaf-consult | same + `--max-depth 1` | 5/6, cache 75.4%, branch 76.0%, $0.6230 | ❌ diamond-4 упал (шорт-лист констант в свёртке) |
+| `exp-codegraph-d2` | H1/H2/H3/H4: scoped specialists + resumption | same + `--max-depth 2` | **6/6**, branch 79.2%, $0.6312, 157s/задача; прогрев: −57..76% токенов на повторных задачах | ✅ лучшая |
+| `exp-codegraph-d3` | H1: d3 лучше d2? | same + `--max-depth 3` | 6/6, $0.8729 (1.38× d2), 258s | ❌ дороже без прироста |
+| `exp-codegraph-d4` | H1: убыв. отдача d4 | same + `--max-depth 4` | 6/6, $0.8772, 4.33 шагов, 273s | ❌ нулевой прирост |
 | `exp-longbench-d2` | H2/H4: реальный multi-doc (LongBench-v2) | `bench longbench --limit 6 --max-depth 2` | 4/6; Code Repo 3/3; root cache 82.0%; 2 неудачи на long-doc | база создана; llm_query без кэша — будущая работа |
 | `exp-oolong-d2` | регрессия после multi-agent апгрейда | `bench oolong --limit 5 --max-depth 2` | 5/5, fmt 1→0, cache 21.4→39.9%, cost +32% (1 сэмпл: 2 llm_query) | ✅ точность/fmt/cache; ⚠️ cost-шум |
 | `exp-needle-1m-d2` | регрессия после multi-agent апгрейда | `bench needle --tokens 1000000 --tasks 4 --max-depth 2` | 4/4 (+0.225), count-3 0.1→1.0, cost тот же | ✅ прогресс |
@@ -59,9 +59,9 @@
 
 ## 2026-11-06 (вечер): LongBench-Pro — токен, валидный скоринг, n=20
 
-Валидный HF-токен (пользователь Scouting8946) вписан в `.env`; гейт `TIGER-Lab/LongBench-Pro` (v1.1 MCQ) всё ещё не принят → работаем с публичным зеркалом авторов `caskcsg/LongBench-Pro` (v1.0, open-ended; 1500 строк; схемы: `question_nonthinking/question_thinking`, `answer` = список пунктов за маркером `[答案]/[Answer]`).
+Валидный HF-токен (пользователь Scouting8946) вписан в `.env`; гейт `TIGER-Lab/LongBench-Pro` (v1.1 MCQ) всё ещё не принят → работаем с публичным зеркалом авторов `caskcsg/LongBench-Pro` (v1.0, open-ended; 1500 строк; схемы: `question_nonthinking/question_thinking`, `answer` = список пунктов за маркером `[Answer]`).
 
-Найден и починен баг скоринга: normalizer резал `[^a-z0-9]` → китайские ответы обнулялись; парсер не знал маркер `[答案]` без двоеточия. Новый скоринг: unicode-нормализация пунктов, ordered=1 / set=0.5 / miss=0(+hits).
+Найден и починен баг скоринга: normalizer резал `[^a-z0-9]` → unicode ответы обнулялись; парсер не знал маркер `[Answer]` без двоеточия. Новый скоринг: unicode-нормализация пунктов, ordered=1 / set=0.5 / miss=0(+hits).
 
 | Каталог | Скоринг | Метрики | Публичный ориентир | Вердикт |
 |---|---|---|---|---|
@@ -78,9 +78,9 @@
 
 ## 2026-11-07: кампания исправления 9 багов (B1–B9) и верификация H1–H6 на живой glm-5.3
 
-Модели: root/branch = `glm-5.3`, llm_query = `glm-5.3-flash`. Все фиксы — универсальные (model/benchmark-agnostic; правило зафиксировано в `AGENTS.md`: 严禁针对特定 benchmark、数据集、文档标题或特定模型硬编码逻辑). Покрытие: 40 детерминированных unit-тестов, `pnpm typecheck && pnpm test` PASS.
+Модели: root/branch = `glm-5.3`, llm_query = `glm-5.3-flash`. Все фиксы — универсальные (model/benchmark-agnostic; правило зафиксировано в `AGENTS.md`: never hardcode logic for specific benchmarks, datasets, document titles, or models). Покрытие: 40 детерминированных unit-тестов, `pnpm typecheck && pnpm test` PASS.
 
-Исправления: B1-B3 (board rev-трекинг + in-flight видимость + кумулятивные сводки + `canAnswerFromSummary`), B2/B4 (слияние задач по scope, локальный подсчёт шагов, запрет self-branch), B5/B6 (парсер: порядок нормализации кавычек, экранирование `\`, закрытие незакрытых строк/скобок, алиасы `<折叠>/<folded_output>`, сжатие CoT при обрыве), B7 (CJK-точный CharRatioEstimator 1.4 с/токен), B8 (locate≤32768 / extract≤8192 клампинг + ретрай ридера + branch/query переопределения), B9 (устранение конфликта промпта `[答案]`, разделитель `|`, универсальные разделители документов, общий ResearchBoard на группу).
+Исправления: B1-B3 (board rev-трекинг + in-flight видимость + кумулятивные сводки + `canAnswerFromSummary`), B2/B4 (слияние задач по scope, локальный подсчёт шагов, запрет self-branch), B5/B6 (парсер: порядок нормализации кавычек, экранирование `\`, закрытие незакрытых строк/скобок, алиасы `<fold>/<folded_output>`, сжатие CoT при обрыве), B7 (CJK-точный CharRatioEstimator 1.4 с/токен), B8 (locate≤32768 / extract≤8192 клампинг + ретрай ридера + branch/query переопределения), B9 (устранение конфликта промпта `[Answer]`, разделитель `|`, универсальные разделители документов, общий ResearchBoard на группу).
 
 ### Сравнение: exp-* (до) vs verify-* (после)
 
@@ -101,7 +101,7 @@
 ### Итоги верификации
 
 - H1/H2 (иерархия/atomicity board): chain-h3-2 specialist@d2 сразу grep в своём домене без self-branch; follow-up не затирает найденные константы.
-- H3 (протокол): fmtIssues 8→3 (−62.5%); парсер переживает `“...”`, `\d`, незакрытые строки/скобки, `<折叠>`, переполнение reasoning (авто-сжатие при ретрае).
+- H3 (протокол): fmtIssues 8→3 (−62.5%); парсер переживает `“...”`, `\d`, незакрытые строки/скобки, `<fold>`, переполнение reasoning (авто-сжатие при ретрае).
 - H4 (CJK-токены): root cache на китайских longbench-документах 82.0–85.0%; I_{t-1} в бюджете.
 - H5 (чанкинг llm_query): обрывы 5→0; токены oolong −33.5%; locate 81k-книга = 3 чанка ≤32k вместо одного 644k.
 - H6 (LongBench-Pro/мульти-док): 65.0%→75.0%; cost −23.5%.
@@ -119,7 +119,7 @@
 | `.../llm/jev-route.ts` | `JevRouteClient` (F7): per-call выбор cheap/strong, `profile` = strong |
 | `.../tools/jev-routing.ts` | F4 `createJevScopeResolver`, F5 `createJevBranchGate` |
 | `.../runtime.ts` | `JevOptions` (все фичи off, `acceptAt`/`rejectAt`, `maxGateSteps`, `maxRescans`), валидация порогов, проброс в `LLMQueryEngine`, `AgentFoldAgent`, `branch`-хуки, роутеры |
-| `.../tools/llm-query.ts` | F1 prescreen (пачки ≤4 чанков ≤ `maxStateTokens`, memo `${chunk.key}|${query}`), F6 reader verify (+1 скан вдвое мельче), `预筛跳过 N` в отчёте |
+| `.../tools/llm-query.ts` | F1 prescreen (пачки ≤4 чанков ≤ `maxStateTokens`, memo `${chunk.key}|${query}`), F6 reader verify (+1 скан вдвое мельче), `prescreen skipped N` в отчёте |
 | `.../agent/agent-fold.ts` | F2 answer gate (completeness+grounding, синтетический шаг вместо ответа), F3 hint маршрутизации в блоке задачи |
 | `packages/benchmarks/src/jev.ts` | `--jev key=value` (12 ключей) + env `RAF_JEV_*`, неизвестный ключ/`on` без `OPENROUTER_API_KEY` — ошибка до старта |
 | `config.ts`/`runner.ts`/`compare.ts`/`cli.ts` | `JevClient` при наличии ключа, `jev` в `RunConfig`, `jevDecisions`, `providerUsd`, роль `jev` в сводках и `compare` (`jev=$n`), `--only jev` |
@@ -215,7 +215,7 @@ pnpm bench longbench-pro --offset 11 --limit 2 --jev answer-gate=on --out result
 
 | Задача | База | F2 |
 |---|---|---|
-| `…35ddea1d` (известный не-ответ) | `暂无最终答案，继续验证中`, score 0.00, 5 шагов | **настоящий ответ** `[答案] 篇一句6和篇二句1…`, score 0.00, **7 шагов**, решение гейта **`off_topic/unsupported` (0.4)**, $0.000139 |
+| `…35ddea1d` (известный не-ответ) | `No final answer yet, still verifying`, score 0.00, 5 шагов | **настоящий ответ** `[Answer] Passage 1 sentence 6 and Passage 2 sentence 1…`, score 0.00, **7 шагов**, решение гейта **`off_topic/unsupported` (0.4)**, $0.000139 |
 | `…af5bc2c9` | score 0.00, 3 шага | score **1.00**, 2 шага, гейт `complete/supported` (0.98) — улучшение от шума модели, гейт ответ пропустил |
 | не-ответов в срезе | **1** | **0** |
 | mean score среза | 0.00 | 0.50 |
@@ -293,7 +293,7 @@ pnpm bench oolong --limit 5 --dataset trec_coarse --context-len 131072 --max-dep
 
 - **H1 (Minimalist English Prompts & Protocol Alignment)**: перевод всех системных промптов (`AGENT_SYSTEM_PROMPT_TEMPLATE`, `TOOL_GUIDANCE`, `LLM_QUERY_SYSTEM`), схем инструментов, заголовков состояния (`### Documents`, `### Shared Research Board`, `### Task`, `### Previous Steps`, `### New Board Findings`, `### Follow-up Question`, `### Current Step`) и шаблонов наблюдений на минималистичный английский язык устраняет переключение языка между нативным английским `reasoning_content` моделей `glm-5.3` / `glm-5.3-flash` и китайским протоколом; явная передача `categories` в `renderQueryMessage` для `llm_query` гарантирует канонические ключи в `counts`.
 - **H2 (Accuracy Hardening)**:
-  - **H2a**: фильтр пустых/отложенных ответов (`isPlaceholderAnswer`: `"暂无最终答案，继续验证中"`, `"No final answer yet, still verifying"`, и т.п.) до достижения `maxSteps` предотвращает преждевременное завершение цикла.
+  - **H2a**: фильтр пустых/отложенных ответов (`isPlaceholderAnswer`: `"Pending verification, still verifying"`, `"No final answer yet, still verifying"`, и т.п.) до достижения `maxSteps` предотвращает преждевременное завершение цикла.
   - **H2b**: `ContextStore.grep` центрирует сниппет вокруг совпадения регулярного выражения на длинных строках (`> 300` символов) и распределяет `maxMatches` по документам round-robin при мульти-документном поиске, чтобы первый документ не вытеснял совпадения из остальных документов.
   - **H2c**: `createReadTool` останавливается строго по границе строки при достижении `maxReadTokens` с явным сообщением `(stopped at line X due to token limit; read from X+1 to continue)` вместо `head+tail`-вырезания середины запрошенного диапазона; `parser.ts` восстанавливает bare-JSON `<folding>` перед `<motivation>` и разделённый `summary`.
 - **H3 (KV Prefix Cache Stabilization & Cross-Turn Memoization)**:
@@ -320,7 +320,7 @@ pnpm bench oolong --limit 5 --dataset trec_coarse --context-len 131072 --max-dep
 
 1. **H1**: В `en-oolong-d2` токены генерации ридера (`llm_query`) снизились с `98,774` до `65,708` (**−33.5%**), ошибок обрыва `1 → 0`, среднее время задачи `100.2s → 84.0s` (**−16.2%**). В `en-codegraph-d2` параллельные специалисты на шаге 0 тратят всего 48–52 токенов внутреннего reasoning и попадают в кэш на 87.2–90.5%.
 2. **H2a/H2b/H2c**:
-   - На задаче `35ddea1dc...` (`longbench-pro`), где раньше агент завершался на шаге 2 с `<answer>暂无最终答案，继续验证中</answer>`, агент продолжил чтение всех трёх документов (`doc_1`, `doc_2`, `doc_3`) по последовательным окнам `stopped at line X due to token limit; read from X+1 to continue` без потери средних строк.
+   - На задаче `35ddea1dc...` (`longbench-pro`), где раньше агент завершался на шаге 2 с `<answer>No final answer yet, still verifying</answer>`, агент продолжил чтение всех трёх документов (`doc_1`, `doc_2`, `doc_3`) по последовательным окнам `stopped at line X due to token limit; read from X+1 to continue` без потери средних строк.
    - На задаче `00e65818...` (`longbench-pro` T6 Clustering, 8 статей A–H в 3 файлах) round-robin `grep` по документам сразу показал совпадения из `doc_1` и `doc_2`, что позволило агенту обнаружить склейку 8 статей и решить задачу на **1.000** за 8 шагов (против 10 шагов в baseline).
    - На `en-longbench-d2` точность выросла с **50.0% (3/6)** до **66.7% (4/6)** при сокращении входных prompt-токенов на **−38.9%** и росте общего cache hit rate с **48.6%** до **79.8%**.
 
@@ -342,7 +342,7 @@ pnpm bench oolong --limit 5 --dataset trec_coarse --context-len 131072 --max-dep
 - **H4 (Reader `llm_query` Cue-Guided Shorthand & `<5%` Margin Warning)**:
   - В `packages/engine/src/prompts/llm-query.ts` правило компактного рассуждения обновлено на `"line#:cue->code"` (`"5:year->N 6:city->L 7:poet->H"`), а в `LLMQueryEngine.formatReport` (`packages/engine/src/tools/llm-query.ts`) добавлена диагностика `formatMarginNote`, предупреждающая о смежных категориях с разницей $< 5\%$ от суммы всех элементов или $< 8\%$ от суммы пары.
 - **H5 (Incomplete-Read / Bare Step-0 Verification Guard & Fallback Answer Floor)**:
-  - В `AgentFoldAgent.run()` (`packages/engine/src/agent/agent-fold.ts`) добавлена однократная проверка `verificationNudged` при попытке выдать `<answer>` без `<folding>` сразу после обрезанного по лимиту токенов `read` (`stopped at line X due to token limit`), а также функция `extractFallbackAnswer` для спасения незакрытого `<answer>` или явного блока `[Answer]`/`[答案]` на последнем шаге.
+  - В `AgentFoldAgent.run()` (`packages/engine/src/agent/agent-fold.ts`) добавлена однократная проверка `verificationNudged` при попытке выдать `<answer>` без `<folding>` сразу после обрезанного по лимиту токенов `read` (`stopped at line X due to token limit`), а также функция `extractFallbackAnswer` для спасения незакрытого `<answer>` или явного блока `[Answer]` на последнем шаге.
 - **H6 (Case-Exact vs Case-Insensitive `tally` Disambiguation)**:
   - `ContextStore.tally` и `createTallyTool` возвращают как точные варианты регистра, так и сводку `Case-folded summary (when task is case-insensitive vs exact-case)` при наличии нескольких вариантов регистра одного слова (например, `this=36, This=4`).
 - **H7 (3-Tier Independent Provider Config & Root Cache Telemetry)**:

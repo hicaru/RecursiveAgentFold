@@ -184,7 +184,7 @@ export class LLMQueryEngine {
     readonly categories?: readonly string[];
   }): Promise<LLMQueryResult> {
     const mode: LLMQueryMode = args.mode ?? 'locate';
-    const docIds = args.documents?.length ? args.documents : this.store.list().map((d) => d.id);
+    const docIds = args.documents?.length ? args.documents : this.store.listManifest().map((d) => d.id);
     for (const id of docIds) this.store.get(id); // validate
     const modeMax = mode === 'extract' ? this.defaultExtractChunkTokens : this.defaultChunkTokens;
     const chunkTokens = args.chunkTokens
@@ -378,11 +378,78 @@ export class LLMQueryEngine {
   }
 }
 
+function parseXmlChunkFinding(text: string): Omit<ChunkFinding, 'chunk' | 'memoHit'> | undefined {
+  const relMatch = /<\s*relevant(?:\s[^>]*)?>([\s\S]*?)<\s*\/\s*relevant\s*>/i.exec(text);
+  const countsMatch = /<\s*counts(?:\s[^>]*)?>([\s\S]*?)<\s*\/\s*counts\s*>/i.exec(text);
+  const ansMatch = /<\s*answer(?:\s[^>]*)?>([\s\S]*?)<\s*\/\s*answer\s*>/i.exec(text);
+  const evMatch = /<\s*evidence(?:\s[^>]*)?>([\s\S]*?)<\s*\/\s*evidence\s*>/i.exec(text);
+  if (!relMatch && !countsMatch && !ansMatch && !evMatch) return undefined;
+
+  let counts: Record<string, number> | undefined;
+  if (countsMatch?.[1] !== undefined) {
+    const rawCounts = countsMatch[1].trim();
+    if (rawCounts.startsWith('{')) {
+      const parsed = tryParseLooseJSON<Record<string, unknown>>(rawCounts);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        counts = {};
+        for (const [k, v] of Object.entries(parsed)) {
+          const n = typeof v === 'number' ? v : Number(v);
+          if (Number.isFinite(n)) counts[k.trim().toLowerCase()] = n;
+        }
+      }
+    } else {
+      counts = {};
+      const segments = rawCounts.includes('\n') ? rawCounts.split('\n') : rawCounts.split(',');
+      for (const seg of segments) {
+        const m = /^\s*(?:[-*]\s*)?([^:=\n]+?)\s*[:=]\s*(-?\d+(?:\.\d+)?)\s*$/.exec(seg);
+        if (m && m[1] !== undefined && m[2] !== undefined) {
+          const key = m[1].trim().replace(/^["']|["']$/g, '').toLowerCase();
+          const n = Number(m[2]);
+          if (key && Number.isFinite(n)) counts[key] = n;
+        }
+      }
+    }
+    if (counts && Object.keys(counts).length === 0) counts = undefined;
+  }
+
+  const evidence: Array<{ line: number | undefined; quote: string }> = [];
+  if (evMatch?.[1] !== undefined) {
+    const rawEv = evMatch[1].trim();
+    const lines = rawEv.split('\n');
+    for (const lineStr of lines) {
+      const trimmed = lineStr.trim();
+      if (!trimmed || /^(?:none|n\/a|-)$/i.test(trimmed)) continue;
+      const m = /^(?:[-*]\s*)?(?:L|line\s*)?(\d+)\s*[:|-]\s*(.+)$/i.exec(trimmed);
+      if (m && m[1] !== undefined && m[2] !== undefined) {
+        const lineNum = Number(m[1]);
+        const quote = m[2].trim().replace(/^["']|["']$/g, '');
+        evidence.push({ line: Number.isFinite(lineNum) ? lineNum : undefined, quote });
+      } else {
+        evidence.push({ line: undefined, quote: trimmed.replace(/^[-*]\s*/, '') });
+      }
+    }
+  }
+
+  const answer = ansMatch?.[1]?.trim() ?? '';
+  const relStr = relMatch?.[1]?.trim().toLowerCase();
+  const relevant =
+    relStr === 'true' || relStr === 'yes' || relStr === '1'
+      ? true
+      : relStr === 'false' || relStr === 'no' || relStr === '0'
+        ? counts !== undefined
+        : counts !== undefined || evidence.length > 0 || (answer !== '' && !/^(no|none|not relevant|irrelevant|n\/a)\b/i.test(answer));
+
+  return { relevant, answer, evidence, counts };
+}
+
 function normalizeFinding(text: string): Omit<ChunkFinding, 'chunk' | 'memoHit'> {
+  const xmlFinding = parseXmlChunkFinding(text);
+  if (xmlFinding !== undefined) return xmlFinding;
+
   const obj = tryParseLooseJSON<Record<string, unknown>>(text);
   if (!obj || typeof obj !== 'object') {
     const t = text.trim();
-    const negative = /^(no|none|not relevant|irrelevant)\b/i.test(t) || /^(无|没有|否|不相关)/.test(t) || t === '';
+    const negative = /^(no|none|not relevant|irrelevant|n\/a)\b/i.test(t) || t === '';
     return { relevant: !negative, answer: t.slice(0, 2000), evidence: [] };
   }
   let counts: Record<string, number> | undefined;
@@ -456,7 +523,7 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
       const documents = argStringList(args, 'documents');
       const startLine = argNumber(args, 'start_line');
       const endLine = argNumber(args, 'end_line');
-      if ((startLine !== undefined || endLine !== undefined) && (documents?.length ?? engine.store.list().length) !== 1) {
+      if ((startLine !== undefined || endLine !== undefined) && (documents?.length ?? engine.store.listManifest().length) !== 1) {
         throw new ToolArgumentError('start_line/end_line requires exactly one document');
       }
       const categories = argStringList(args, 'categories');

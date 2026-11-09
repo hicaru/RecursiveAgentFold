@@ -1,7 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
@@ -35,14 +36,19 @@ const RAF_ROOT_MAX_STEPS = 100;
 const RAF_BRANCH_MAX_STEPS = 20;
 const RAF_ROOT_MAX_OUTPUT = 16000;
 const RAF_QUERY_MAX_OUTPUT = 16384;
-const RAF_STEP_TIMEOUT_MS = 600_000;
+const RAF_VISIBLE_REASONING_CHARS = 12_000;
+const RAF_PROMPT_BUDGET_RATIO = 0.6;
+const RAF_STATE_MAX_DOC_CHARS = 16_000_000;
+const RAF_STATE_MAX_DOCS = 500;
 const RAF_MAX_INVALID_STEPS = 3;
+const RAF_MAX_INVALID_TOTAL = 6;
 const RAF_MAX_REASONING_TOKENS = 32_000;
 const BRANCH_REPORT_ID_PREFIX = 'branch_report_';
 /** Provider failures that a repeated identical request can resolve. */
 const RAF_LLM_RETRY_CODES = Object.freeze(['TRANSPORT', 'TIMEOUT', 'RATE_LIMIT', 'SERVER', 'EMPTY_RESPONSE']);
 const RAF_LLM_RETRY_MAX_ATTEMPTS = 6;
 const RAF_LLM_RETRY_BASE_DELAY_MS = 500;
+const RAF_LLM_RATE_LIMIT_BASE_DELAY_MS = 5_000;
 const RAF_LLM_RETRY_MAX_DELAY_MS = 10_000;
 export const inject = ['agents', 'llm', 'tools'];
 
@@ -51,7 +57,19 @@ const rafInternal = new AsyncLocalStorage();
 let rafPromise;
 
 function loadRaf() {
-  rafPromise ??= import(new URL('../engine/dist/index.js', import.meta.url));
+  if (rafPromise === undefined) {
+    const loader = process.env.VITEST
+      ? import(new URL('../engine/src/index.ts', import.meta.url)).catch(() =>
+          import(new URL('../engine/dist/index.js', import.meta.url)),
+        )
+      : import(new URL('../engine/dist/index.js', import.meta.url));
+    rafPromise = loader.then((mod) => {
+      if (mod?.defaultRateLimitGate) {
+        bindRateLimitGate(mod.defaultRateLimitGate);
+      }
+      return mod;
+    });
+  }
   return rafPromise;
 }
 
@@ -446,8 +464,8 @@ async function catalogModels(ctx) {
 /**
  * Wait before a retry without ignoring an abort. The delay is exponential and capped.
  */
-function rafRetryDelay(attempt, signal) {
-  const delay = Math.min(RAF_LLM_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RAF_LLM_RETRY_MAX_DELAY_MS);
+function rafRetryDelay(attempt, signal, baseDelayMs = RAF_LLM_RETRY_BASE_DELAY_MS) {
+  const delay = Math.min(baseDelayMs * 2 ** (attempt - 1), RAF_LLM_RETRY_MAX_DELAY_MS);
   return new Promise((resolve, reject) => {
     let timer = null;
     const abort = () => {
@@ -467,14 +485,224 @@ function rafRetryDelay(attempt, signal) {
   });
 }
 
+const RAF_RATE_LIMIT_MAX_DELAY_MS = 300_000;
+const RAF_RATE_LIMIT_STAGGER_MS = 350;
+const RAF_RATE_LIMIT_MAX_SOLO_RETRIES = 8;
+const RATE_LIMIT_MESSAGE_RE =
+  /(?:\b429\b|rate.?limit|too many requests|\b1302\b|overloaded|temporarily unavailable|速率限制|请求频率|限流)/i;
+
+class PluginRateLimitCoordinator extends EventEmitter {
+  constructor(options = {}) {
+    super();
+    this.baseDelayMs = options.baseDelayMs ?? RAF_LLM_RATE_LIMIT_BASE_DELAY_MS;
+    this.maxDelayMs = options.maxDelayMs ?? RAF_RATE_LIMIT_MAX_DELAY_MS;
+    this.staggerMs = options.staggerMs ?? RAF_RATE_LIMIT_STAGGER_MS;
+    this.maxSoloRetries = options.maxSoloRetries ?? RAF_RATE_LIMIT_MAX_SOLO_RETRIES;
+    this._activeWorkers = 0;
+    this._inFlight = 0;
+    this._allowedConcurrency = Number.POSITIVE_INFINITY;
+    this._rateLimitUntil = 0;
+    this._streak = 0;
+    this._nextWakeAt = 0;
+    this._drainTimer = undefined;
+    this._drainTargetAt = 0;
+    this.waitQueue = [];
+  }
+  get activeWorkers() {
+    return this._activeWorkers;
+  }
+  get inFlight() {
+    return this._inFlight;
+  }
+  get allowedConcurrency() {
+    return this._allowedConcurrency;
+  }
+  get rateLimitUntil() {
+    return this._rateLimitUntil;
+  }
+  get streak() {
+    return this._streak;
+  }
+  enterWorker() {
+    this._activeWorkers += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this._activeWorkers = Math.max(0, this._activeWorkers - 1);
+    };
+  }
+  isSolo() {
+    return this._activeWorkers <= 1 && this._inFlight <= 1 && this.waitQueue.length === 0;
+  }
+  shouldTerminateSolo(soloStreak) {
+    return this.isSolo() && soloStreak >= this.maxSoloRetries;
+  }
+  createSoloExhaustedError(soloStreak, lastErrorMessage) {
+    const err = new Error(
+      `RATE_LIMIT_EXHAUSTED: Provider rate limit persisted after ${soloStreak} solo retries with no parallel contention (${lastErrorMessage})`,
+    );
+    err.code = 'RATE_LIMIT_EXHAUSTED';
+    return err;
+  }
+  noteRateLimit(retryAfterMs) {
+    this._streak += 1;
+    this._allowedConcurrency = 1;
+    const exponent = Math.min(this._streak - 1, 6);
+    const backoff = Math.min(this.baseDelayMs * 2 ** exponent, this.maxDelayMs);
+    const baseWait = retryAfterMs !== undefined && retryAfterMs > 0 ? Math.max(backoff, retryAfterMs) : backoff;
+    const jitter = Math.floor(Math.random() * Math.min(250, Math.max(1, this.baseDelayMs)));
+    const waitMs = Math.min(baseWait + jitter, this.maxDelayMs);
+    const now = Date.now();
+    this._rateLimitUntil = Math.max(this._rateLimitUntil, now + waitMs);
+    this._nextWakeAt = Math.max(this._nextWakeAt, this._rateLimitUntil);
+    this.emit('rate:limited', {
+      waitMs: this._rateLimitUntil - now,
+      streak: this._streak,
+      rateLimitUntil: this._rateLimitUntil,
+    });
+    this.scheduleDrain();
+    return { waitMs: this._rateLimitUntil - now, streak: this._streak };
+  }
+  noteSuccess() {
+    const now = Date.now();
+    if (now >= this._rateLimitUntil) {
+      const wasLimited = this._streak > 0 || this._rateLimitUntil > 0;
+      this._streak = 0;
+      this._rateLimitUntil = 0;
+      if (Number.isFinite(this._allowedConcurrency)) {
+        this._allowedConcurrency += 1;
+        if (this._allowedConcurrency >= 16 && this.waitQueue.length === 0) {
+          this._allowedConcurrency = Number.POSITIVE_INFINITY;
+        }
+      }
+      if (wasLimited) this.emit('rate:resumed', { allowedConcurrency: this._allowedConcurrency });
+    }
+    this.scheduleDrain();
+  }
+  reset() {
+    this._streak = 0;
+    this._rateLimitUntil = 0;
+    this._nextWakeAt = 0;
+    this._allowedConcurrency = Number.POSITIVE_INFINITY;
+    clearTimeout(this._drainTimer);
+    this._drainTimer = undefined;
+    this._drainTargetAt = 0;
+    this.scheduleDrain();
+  }
+  acquire(signal) {
+    if (signal?.aborted) {
+      return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'));
+    }
+    const now = Date.now();
+    if (
+      this.waitQueue.length === 0 &&
+      now >= this._rateLimitUntil &&
+      now >= this._nextWakeAt &&
+      this._inFlight < this._allowedConcurrency
+    ) {
+      return Promise.resolve(this.createLease(now));
+    }
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        const idx = this.waitQueue.indexOf(waiter);
+        if (idx !== -1) this.waitQueue.splice(idx, 1);
+        reject(signal?.reason instanceof Error ? signal.reason : new Error('aborted'));
+      };
+      const cleanup = () => {
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const waiter = { resolve, reject, cleanup };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.waitQueue.push(waiter);
+      this.scheduleDrain();
+    });
+  }
+  createLease(now) {
+    this._inFlight += 1;
+    if (this._rateLimitUntil > 0 || Number.isFinite(this._allowedConcurrency) || this.waitQueue.length > 0) {
+      this._nextWakeAt = Math.max(this._nextWakeAt, now) + this.staggerMs;
+    }
+    let released = false;
+    return {
+      isSolo: () => this.isSolo(),
+      release: () => {
+        if (released) return;
+        released = true;
+        this._inFlight = Math.max(0, this._inFlight - 1);
+        this.scheduleDrain();
+      },
+    };
+  }
+  scheduleDrain() {
+    while (this.waitQueue.length > 0 && this._inFlight < this._allowedConcurrency) {
+      const now = Date.now();
+      const targetAt = Math.max(this._rateLimitUntil, this._nextWakeAt);
+      const waitMs = targetAt - now;
+      if (waitMs > 0) {
+        if (this._drainTimer === undefined || targetAt < this._drainTargetAt) {
+          clearTimeout(this._drainTimer);
+          this._drainTargetAt = targetAt;
+          this._drainTimer = setTimeout(() => {
+            this._drainTimer = undefined;
+            this._drainTargetAt = 0;
+            this.scheduleDrain();
+          }, waitMs);
+        }
+        return;
+      }
+      const next = this.waitQueue.shift();
+      if (!next) break;
+      next.cleanup();
+      next.resolve(this.createLease(now));
+    }
+    if (this.waitQueue.length === 0) {
+      clearTimeout(this._drainTimer);
+      this._drainTimer = undefined;
+      this._drainTargetAt = 0;
+    }
+  }
+}
+
+let rateLimitGate = new PluginRateLimitCoordinator();
+let rafRateLimitUntil = 0;
+let rafRateLimitStreak = 0;
+
+function bindRateLimitGate(nextGate) {
+  if (!nextGate || nextGate === rateLimitGate) return;
+  rateLimitGate = nextGate;
+  rateLimitGate.on('rate:limited', () => {
+    rafRateLimitUntil = rateLimitGate.rateLimitUntil;
+    rafRateLimitStreak = rateLimitGate.streak;
+  });
+  rateLimitGate.on('rate:resumed', () => {
+    rafRateLimitUntil = rateLimitGate.rateLimitUntil;
+    rafRateLimitStreak = rateLimitGate.streak;
+  });
+}
+
+/** Record one provider rate-limit event and extend the shared wait window. */
+function noteRateLimit(retryAfterMs) {
+  rateLimitGate.noteRateLimit(retryAfterMs);
+  rafRateLimitUntil = rateLimitGate.rateLimitUntil;
+  rafRateLimitStreak = rateLimitGate.streak;
+}
+
+function resetRateLimit() {
+  rateLimitGate.reset();
+  rafRateLimitStreak = 0;
+  rafRateLimitUntil = 0;
+}
+
 class DshLlmClient {
-  constructor(ctx, outer, profile, reasoningEffort, target) {
+  constructor(ctx, outer, profile, reasoningEffort, target, gate) {
     this.ctx = ctx;
     this.outer = outer;
     this.profile = profile;
     this.reasoningEffort = reasoningEffort;
     this.provider = target?.provider ?? outer.provider;
     this.model = target?.model ?? outer.model;
+    this.rateLimitGate = gate ?? rateLimitGate;
     this.onDelta = undefined;
     /** True when the last completed call needed at least one retry. */
     this.retried = false;
@@ -502,40 +730,82 @@ class DshLlmClient {
       ...(signal !== undefined ? { signal } : {}),
     };
     this.retried = false;
+    const gate = this.rateLimitGate ?? rateLimitGate;
     let textParts = [];
     let reasoningParts = [];
     let usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
     let finishKind;
     let failure;
-    for (let attempt = 0; attempt < RAF_LLM_RETRY_MAX_ATTEMPTS; attempt += 1) {
-      if (attempt > 0) {
-        this.retried = true;
-        await rafRetryDelay(attempt, signal);
-      }
-      // A retried attempt must not publish reasoning again: the failed attempt already streamed its prefix.
-      const publishReasoning = attempt === 0;
-      textParts = [];
-      reasoningParts = [];
-      usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
-      finishKind = undefined;
-      failure = undefined;
-      await rafInternal.run(true, async () => {
-        for await (const chunk of this.ctx.llm.stream(options)) {
-          if (chunk === null || typeof chunk !== 'object') continue;
-          if (chunk.type === 'text-delta') textParts.push(chunk.text);
-          else if (chunk.type === 'reasoning-delta') {
-            reasoningParts.push(chunk.text);
-            if (publishReasoning && typeof this.onDelta === 'function') this.onDelta(chunk.text);
-          }
-          else if (chunk.type === 'usage') usage = chunk.usage;
-          else if (chunk.type === 'finish') {
-            finishKind = chunk.reason?.kind;
-            failure = chunk.reason?.failure;
-          }
+    let soloRateLimitStreak = 0;
+    for (let attempt = 0; ; attempt += 1) {
+      const lease = await gate.acquire(signal);
+      let soloAtAttempt = true;
+      try {
+        if (attempt > 0) this.retried = true;
+        // A retried attempt must not publish reasoning again: the failed attempt already streamed its prefix.
+        const publishReasoning = attempt === 0;
+        textParts = [];
+        reasoningParts = [];
+        usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+        finishKind = undefined;
+        failure = undefined;
+        try {
+          await rafInternal.run(true, async () => {
+            for await (const chunk of this.ctx.llm.stream(options)) {
+              if (chunk === null || typeof chunk !== 'object') continue;
+              if (chunk.type === 'text-delta') textParts.push(chunk.text);
+              else if (chunk.type === 'reasoning-delta') {
+                reasoningParts.push(chunk.text);
+                if (publishReasoning && typeof this.onDelta === 'function') this.onDelta(chunk.text);
+              } else if (chunk.type === 'usage') usage = chunk.usage;
+              else if (chunk.type === 'finish') {
+                finishKind = chunk.reason?.kind;
+                failure = chunk.reason?.failure;
+              }
+            }
+          });
+        } catch (error) {
+          finishKind = 'error';
+          failure = { message: error instanceof Error ? error.message : String(error) };
         }
-      });
-      if (finishKind !== 'error' && finishKind !== 'aborted') break;
-      const code = typeof failure?.code === 'string' ? failure.code : undefined;
+        soloAtAttempt = lease.isSolo();
+        if (finishKind !== 'error' && finishKind !== 'aborted') {
+          gate.noteSuccess();
+          rafRateLimitUntil = gate.rateLimitUntil;
+          rafRateLimitStreak = gate.streak;
+          break;
+        }
+      } finally {
+        lease.release();
+      }
+      const rawCode = failure?.code;
+      const code =
+        typeof rawCode === 'string' ? rawCode : typeof rawCode === 'number' ? String(rawCode) : undefined;
+      const failureMessage = typeof failure?.message === 'string' ? failure.message : '';
+      const rateLimit =
+        finishKind !== 'aborted' &&
+        signal?.aborted !== true &&
+        (code === 'RATE_LIMIT' ||
+          code === 'RATE_LIMITED' ||
+          code === 'RATE_LIMIT_EXCEEDED' ||
+          code === '429' ||
+          code === '1302' ||
+          RATE_LIMIT_MESSAGE_RE.test(failureMessage));
+      if (rateLimit) {
+        noteRateLimit();
+        if (!soloAtAttempt) {
+          soloRateLimitStreak = 0;
+          continue;
+        }
+        soloRateLimitStreak += 1;
+        if (gate.shouldTerminateSolo(soloRateLimitStreak)) {
+          throw gate.createSoloExhaustedError(
+            soloRateLimitStreak,
+            failureMessage !== '' ? failureMessage : 'Provider rate limit',
+          );
+        }
+        continue;
+      }
       const retryable =
         attempt < RAF_LLM_RETRY_MAX_ATTEMPTS - 1 &&
         finishKind !== 'aborted' &&
@@ -543,10 +813,11 @@ class DshLlmClient {
         code !== undefined &&
         RAF_LLM_RETRY_CODES.includes(code);
       if (!retryable) {
-        const error = new Error(typeof failure?.message === 'string' ? failure.message : 'LLM request failed');
+        const error = new Error(failureMessage !== '' ? failureMessage : 'LLM request failed');
         if (code !== undefined) error.code = code;
         throw error;
       }
+      await rafRetryDelay(attempt + 1, signal);
     }
     return {
       text: textParts.join(''),
@@ -630,6 +901,14 @@ function cleanReasoningText(text, trim = true) {
   return trim ? cleaned.trim() : cleaned;
 }
 
+/** Keep DSH history bounded while the full reasoning stays in the RAF run registry. */
+export function capVisibleReasoning(text) {
+  if (text.length <= RAF_VISIBLE_REASONING_CHARS) return text;
+  const head = Math.floor(RAF_VISIBLE_REASONING_CHARS * 0.65);
+  const tail = Math.max(0, RAF_VISIBLE_REASONING_CHARS - head);
+  return `${text.slice(0, head)}\n\n…[reasoning shortened for display; full text is in the RAF run details]…\n\n${tail > 0 ? text.slice(-tail) : ''}`;
+}
+
 function contentText(blocks) {
 
 
@@ -679,6 +958,31 @@ function toDocId(prefix, rawLabel, fallbackIndex) {
 function normalizeToolArguments(toolName, rawArgs, motivation, schemaParameters) {
   const base =
     rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs) ? { ...rawArgs } : {};
+  const props =
+    schemaParameters?.properties !== null && typeof schemaParameters?.properties === 'object'
+      ? schemaParameters.properties
+      : undefined;
+  if (props !== undefined) {
+    for (const [key, val] of Object.entries(base)) {
+      const prop = props[key];
+      if (!prop || val === undefined || val === null) continue;
+      const expectedType = Array.isArray(prop.type) ? prop.type[0] : prop.type;
+      if (expectedType === 'string' && typeof val !== 'string' && !Array.isArray(val)) {
+        base[key] = String(val);
+      } else if ((expectedType === 'number' || expectedType === 'integer') && typeof val === 'string') {
+        const trimmed = val.trim();
+        if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) base[key] = Number(trimmed);
+      } else if (expectedType === 'boolean' && typeof val === 'string') {
+        const trimmed = val.trim().toLowerCase();
+        if (trimmed === 'true' || trimmed === 'false') base[key] = trimmed === 'true';
+      } else if (expectedType === 'array' && typeof val === 'string') {
+        base[key] = val
+          .split(/[\n,]+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+    }
+  }
   const required = Array.isArray(schemaParameters?.required) ? schemaParameters.required : [];
   const needsDescription =
     required.includes('description') || toolName === 'bash' || toolName === 'run_code';
@@ -711,29 +1015,35 @@ function indexExternalToolResult(toolName, args, text, store, sessionState, work
             ? raf.sanitizeDocId(rawDocId)
             : toDocId('file', rawDocId, (sessionState?.docs?.size ?? 0) + 1);
         store.add(fileText, { id: docId, title: String(rawTarget) });
-        sessionState?.docs?.set(docId, { title: String(rawTarget), text: fileText });
+        sessionState?.docs?.set(docId, { title: String(rawTarget), text: fileText, persist: true });
       } catch {
         // Non-fatal if file cannot be read synchronously after write/edit.
       }
     }
     return text;
   }
-  if (toolName !== 'read' && toolName !== 'web_fetch') return text;
+  if (toolName !== 'read' && toolName !== 'web_fetch' && toolName !== 'web_search') return text;
   if (text.startsWith('Tool error:') || text.length < 1200) return text;
   const rawTarget =
-    args?.path ?? args?.file_path ?? args?.filePath ?? args?.url ?? `${toolName}_${(sessionState?.docs?.size ?? 0) + 1}`;
-  const docId = toDocId(toolName === 'web_fetch' ? 'web' : 'file', rawTarget, (sessionState?.docs?.size ?? 0) + 1);
+    args?.path ??
+    args?.file_path ??
+    args?.filePath ??
+    args?.url ??
+    args?.query ??
+    `${toolName}_${(sessionState?.docs?.size ?? 0) + 1}`;
+  const docPrefix = toolName === 'web_search' ? 'web_search' : toolName === 'web_fetch' ? 'web' : 'file';
+  const docId = toDocId(docPrefix, rawTarget, (sessionState?.docs?.size ?? 0) + 1);
   const title = String(rawTarget);
   try {
     const doc = store.add(text, { id: docId, title });
-    sessionState?.docs?.set(docId, { title, text });
+    sessionState?.docs?.set(docId, { title, text, persist: true });
     return `[Indexed in ContextStore as document "${docId}" (${doc.lines.length} lines, ~${doc.tokens} tokens) — use search, outline, grep, tally, read, branch(scope="${docId}"), or llm_query on "${docId}"]\n${text}`;
   } catch {
     return text;
   }
 }
 
-function createDshTools(ctx, sessionId, signal, sessionState, workspace, raf) {
+async function createDshTools(ctx, sessionId, outer, signal, sessionState, workspace, raf) {
   const agents = ctx.get('agents');
   const tools = ctx.get('tools');
   if (agents === undefined || tools === undefined) return [];
@@ -744,10 +1054,37 @@ function createDshTools(ctx, sessionId, signal, sessionState, workspace, raf) {
         ? agents.currentInitiator()
         : undefined;
   if (agent === undefined || typeof tools.definitions !== 'function' || typeof tools.execute !== 'function') return [];
-  const definitions = tools.definitions(agent);
-  if (!Array.isArray(definitions)) return [];
+  let resolvedToolSet;
+  if (typeof tools.resolve === 'function' && outer?.provider && outer?.model) {
+    try {
+      resolvedToolSet = await tools.resolve({
+        agent,
+        modelSelection: {
+          provider: outer.provider,
+          model: outer.model,
+          ...(outer.reasoningEffort ? { reasoningEffort: outer.reasoningEffort } : {}),
+        },
+        signal: signal ?? new AbortController().signal,
+      });
+    } catch {
+      resolvedToolSet = undefined;
+    }
+  }
+  const byName = new Map();
+  const withToolSet = resolvedToolSet !== undefined ? tools.definitions(agent, resolvedToolSet) : [];
+  if (Array.isArray(withToolSet)) {
+    for (const def of withToolSet) {
+      if (def && typeof def.name === 'string') byName.set(def.name, def);
+    }
+  }
+  const baseDefs = tools.definitions(agent);
+  if (Array.isArray(baseDefs)) {
+    for (const def of baseDefs) {
+      if (def && typeof def.name === 'string' && !byName.has(def.name)) byName.set(def.name, def);
+    }
+  }
   const extra = [];
-  for (const definition of definitions) {
+  for (const definition of byName.values()) {
     if (definition === null || typeof definition !== 'object') continue;
     if (typeof definition.name !== 'string' || typeof definition.execute !== 'function') continue;
     if (definition.deferLoading === true) continue;
@@ -762,18 +1099,22 @@ function createDshTools(ctx, sessionId, signal, sessionState, workspace, raf) {
       execute: async (args, toolCtx) => {
         try {
           const normalizedArgs = normalizeToolArguments(definition.name, args, '', definition.parameters);
-          const batch = await tools.execute({
-            calls: [
-              {
-                type: 'tool-call',
-                id: randomUUID(),
-                name: definition.name,
-                arguments: JSON.stringify(normalizedArgs),
-              },
-            ],
-            signal: toolCtx.signal ?? signal,
-            agent,
-          });
+          const runBatch = () =>
+            tools.execute({
+              calls: [
+                {
+                  type: 'tool-call',
+                  id: randomUUID(),
+                  name: definition.name,
+                  arguments: JSON.stringify(normalizedArgs),
+                },
+              ],
+              signal: toolCtx.signal ?? signal,
+              agent,
+              ...(resolvedToolSet !== undefined ? { toolSet: resolvedToolSet } : {}),
+            });
+          const batch =
+            typeof agents.withInitiator === 'function' ? await agents.withInitiator(agent, runBatch) : await runBatch();
           const first = Array.isArray(batch.results) ? batch.results[0] : undefined;
           const text = toolResultText(first);
           return indexExternalToolResult(definition.name, normalizedArgs, text, toolCtx.store, sessionState, workspace, raf);
@@ -784,6 +1125,48 @@ function createDshTools(ctx, sessionId, signal, sessionState, workspace, raf) {
     });
   }
   return extra;
+}
+
+/**
+ * Last-resort answer: keep the successful specialist reports when the root
+ * cannot produce a final answer. This is deliberately read-only.
+ */
+export function buildFallbackAnswer(turn) {
+  if (turn === undefined || turn.engine === undefined) return undefined;
+  const sections = [];
+  const seen = new Set();
+  try {
+    for (const entry of turn.engine.board.entries()) {
+      if (entry.kind !== 'branch' || entry.inProgress === true) continue;
+      if (entry.summary.includes(': failed —')) continue;
+      const scope = entry.scope || entry.key;
+      if (seen.has(scope)) continue;
+      seen.add(scope);
+      const body = entry.summary.length > 2_000 ? `${entry.summary.slice(0, 2_000)}…` : entry.summary;
+      sections.push(`## ${scope}\n${body}`);
+    }
+  } catch {
+    // Board is optional for the fallback.
+  }
+  try {
+    for (const doc of turn.store.list()) {
+      if (!doc.id.startsWith(BRANCH_REPORT_ID_PREFIX) || seen.has(doc.id)) continue;
+      const titleScope = typeof doc.title === 'string' ? doc.title.replace(/^branch report:\s*/i, '').trim() : '';
+      if (titleScope !== '' && seen.has(titleScope)) continue;
+      const body = doc.lines.join('\n');
+      if (body.trim() === '') continue;
+      seen.add(doc.id);
+      if (titleScope !== '') seen.add(titleScope);
+      sections.push(`## ${doc.title}\n${body.length > 2_000 ? `${body.slice(0, 2_000)}…` : body}`);
+    }
+  } catch {
+    // Store is optional for the fallback.
+  }
+  const errorText = typeof turn.lastResultError === 'string' ? turn.lastResultError : '';
+  if (sections.length === 0 && errorText === '') return undefined;
+  const gap = errorText !== '' ? `\n\n## Uncovered Scopes & Errors\n${errorText}` : '';
+  const body = sections.length > 0 ? sections.join('\n\n') : 'No completed branch reports were saved.';
+  return `# Final Report (Saved Branch Results)\n\nRoot did not produce a final answer; saved audit reports are listed below.\n\n${body}${gap}`;
 }
 
 function createRunRegistry() {
@@ -868,15 +1251,29 @@ function getLiveSession(ctx, sessionId) {
   }
 }
 
-function sessionPosition(session) {
-  const log = Array.isArray(session.log) ? session.log : [];
+function sessionPosition(session, ctx) {
+  try {
+    const boundary = ctx?.get?.('agents')?.turnBoundaryOf?.(session);
+    if (boundary && typeof boundary.turn === 'number') {
+      return { turn: boundary.turn, step: typeof boundary.step === 'number' ? boundary.step : 0 };
+    }
+  } catch {
+    // Fall through to event log inspection.
+  }
+  const log = Array.isArray(session?.log)
+    ? session.log
+    : typeof session?.snapshotEvents === 'function'
+      ? session.snapshotEvents()
+      : [];
   let turn = 1;
   let step = 0;
-  for (const event of log) {
-    if (event?.type === 'turn/start' && typeof event.data?.turn === 'number') turn = event.data.turn;
-    if (event?.type === 'step/start') {
-      if (typeof event.data?.turn === 'number') turn = event.data.turn;
-      if (typeof event.data?.step === 'number') step = event.data.step;
+  if (Array.isArray(log)) {
+    for (const event of log) {
+      if (event?.type === 'turn/start' && typeof event.data?.turn === 'number') turn = event.data.turn;
+      if (event?.type === 'step/start') {
+        if (typeof event.data?.turn === 'number') turn = event.data.turn;
+        if (typeof event.data?.step === 'number') step = event.data.step;
+      }
     }
   }
   return { turn, step };
@@ -939,13 +1336,18 @@ function runUsageOf(result) {
 }
 
 function finishRun(turn, result, signal) {
+  const failed = result.terminated === 'error' || typeof result.answer !== 'string' || result.answer === '';
+  const status = signal?.aborted ? 'aborted' : failed ? 'error' : 'done';
   if (result?.state !== undefined && turn.sessionState !== undefined) {
     turn.sessionState.rootState = result.state;
+  }
+  if (turn.sessionState !== undefined) {
+    turn.sessionState.turnStatus = status;
+    turn.sessionState.pending = undefined;
   }
   captureNewDocs(turn);
   persistSessionState(turn.sessionState);
   if (turn.run === undefined) return;
-  const status = signal?.aborted ? 'aborted' : result.terminated === 'error' ? 'error' : 'done';
   turn.finish({
     status,
     termination: result.terminated,
@@ -1010,6 +1412,9 @@ function registerRafTools(toolsCtx, raf, state) {
       const resolveTool = (name, targetScope, toolSet) =>
         (typeof toolsCtx.tools.executable === 'function'
           ? toolsCtx.tools.executable(name, targetScope, toolSet)
+          : undefined) ??
+        (typeof toolsCtx.tools.get === 'function'
+          ? toolsCtx.tools.get(name, targetScope, toolSet) ?? toolsCtx.tools.get(name, targetScope)
           : undefined) ??
         (typeof baseExecutor.pipeline?.source?.get === 'function'
           ? baseExecutor.pipeline.source.get(name, targetScope, toolSet)
@@ -1178,6 +1583,11 @@ function registerRafTools(toolsCtx, raf, state) {
             ancestorTasks: [turn.question],
           });
           turn.pendingObservation = observation;
+          if (turn.sessionState.pending !== undefined && turn.sessionState.pending.callId === turn.pendingCallId) {
+            turn.sessionState.pending = { ...turn.sessionState.pending, observation };
+            captureNewDocs(turn);
+            persistSessionState(turn.sessionState);
+          }
           return observation;
         },
       };
@@ -1239,6 +1649,64 @@ function registerRafTools(toolsCtx, raf, state) {
 
 const sessionStates = new Map();
 
+function atomicWriteFileSync(path, content, mode = 0o600) {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${randomBytes(6).toString('hex')}.tmp`;
+  writeFileSync(temporary, content, { encoding: 'utf8', mode, flag: 'wx' });
+  try {
+    renameSync(temporary, path);
+  } catch (error) {
+    try {
+      unlinkSync(temporary);
+    } catch {
+      // Best-effort cleanup of temp file.
+    }
+    throw error;
+  }
+}
+
+class SessionCommitBus extends EventEmitter {
+  constructor(sessionState) {
+    super();
+    this.sessionState = sessionState;
+    this._seq = 0;
+    this._chain = Promise.resolve();
+  }
+
+  enqueueCommit(fn) {
+    const run = async () => {
+      await fn();
+    };
+    const next = this._chain.then(run, run);
+    this._chain = next.catch(() => {});
+    return next;
+  }
+
+  recordEvent(turn, event) {
+    const seq = ++this._seq;
+    this.emit('event', { seq, event });
+    if (
+      event?.type === 'branch_report' ||
+      event?.type === 'fold' ||
+      event?.type === 'tool_result' ||
+      event?.type === 'answer'
+    ) {
+      captureNewDocs(turn);
+      if (
+        event.type === 'branch_report' ||
+        (event.agent === 'root' && (event.type === 'fold' || event.type === 'answer'))
+      ) {
+        void this.enqueueCommit(() => {
+          if (turn?.engine) {
+            turn.sessionState.rootState = turn.engine.snapshot();
+          }
+          persistSessionState(turn.sessionState);
+        });
+      }
+    }
+  }
+}
+
 function getSessionState(sessionId, raf) {
   const key = typeof sessionId === 'string' && sessionId !== '' ? sessionId : 'default';
   let state = sessionStates.get(key);
@@ -1260,8 +1728,14 @@ function getSessionState(sessionId, raf) {
       initialQuestion: undefined,
       initialManifest: undefined,
       initialDocIds: undefined,
+      turnStatus: undefined,
+      pending: undefined,
+      commitBus: undefined,
     };
+    state.commitBus = new SessionCommitBus(state);
     sessionStates.set(key, state);
+  } else if (!state.commitBus) {
+    state.commitBus = new SessionCommitBus(state);
   }
   return state;
 }
@@ -1276,35 +1750,58 @@ function captureNewDocs(turn) {
   for (const doc of turn.store.list()) {
     if (typeof doc?.id !== 'string' || !doc.id.startsWith(BRANCH_REPORT_ID_PREFIX)) continue;
     if (turn.sessionState.docs.has(doc.id)) continue;
-    turn.sessionState.docs.set(doc.id, { title: doc.title ?? doc.id, text: doc.lines.join('\n') });
+    turn.sessionState.docs.set(doc.id, { title: doc.title ?? doc.id, text: doc.lines.join('\n'), persist: true });
   }
 }
 
 function persistSessionState(state) {
   if (state === undefined || typeof state.sessionId !== 'string' || state.sessionId === '') return;
-  const docs = {};
-  for (const [id, doc] of state.docs.entries()) {
-    if (id.startsWith(BRANCH_REPORT_ID_PREFIX)) docs[id] = { title: doc.title, text: doc.text };
+  const docs = Object.create(null);
+  let docChars = 0;
+  let docCount = 0;
+  let skippedDocs = 0;
+  const ordered = [...state.docs.entries()].sort(([left], [right]) => {
+    const leftReport = left.startsWith(BRANCH_REPORT_ID_PREFIX) ? 0 : 1;
+    const rightReport = right.startsWith(BRANCH_REPORT_ID_PREFIX) ? 0 : 1;
+    return leftReport - rightReport;
+  });
+  for (const [id, doc] of ordered) {
+    if (!doc || doc.persist === false) continue;
+    if (typeof doc.title !== 'string' || typeof doc.text !== 'string') continue;
+    if (docCount >= RAF_STATE_MAX_DOCS || docChars + doc.text.length > RAF_STATE_MAX_DOC_CHARS) {
+      skippedDocs += 1;
+      continue;
+    }
+    docs[id] = { title: doc.title, text: doc.text };
+    docChars += doc.text.length;
+    docCount += 1;
+  }
+  let boardSnapshot;
+  try {
+    boardSnapshot = state.board?.snapshot?.();
+  } catch {
+    boardSnapshot = undefined;
   }
   const snapshot = {
-    version: 1,
+    version: 2,
     sessionId: state.sessionId,
     updatedAt: Date.now(),
     ...(state.rootState !== undefined ? { rootState: state.rootState } : {}),
     ...(state.initialQuestion !== undefined ? { initialQuestion: state.initialQuestion } : {}),
     ...(state.initialManifest !== undefined ? { initialManifest: state.initialManifest } : {}),
     ...(state.initialDocIds !== undefined ? { initialDocIds: [...state.initialDocIds] } : {}),
+    ...(state.turnStatus !== undefined ? { turnStatus: state.turnStatus } : {}),
+    ...(state.pending !== undefined ? { pending: state.pending } : {}),
+    ...(boardSnapshot !== undefined ? { board: boardSnapshot } : {}),
     docs,
+    ...(skippedDocs > 0 ? { skippedDocs } : {}),
   };
-  const json = JSON.stringify(snapshot);
   const path = sessionStatePath(state.sessionId);
   try {
     // Small, abort-critical file: write it synchronously so a crash or turn
     // abort cannot lose the fold state that the next turn must resume.
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    const temporary = `${path}.tmp`;
-    writeFileSync(temporary, json, { encoding: 'utf8', mode: 0o600 });
-    renameSync(temporary, path);
+    const json = JSON.stringify(snapshot);
+    atomicWriteFileSync(path, json, 0o600);
   } catch (error) {
     console.error('RAF: cannot persist session state', error);
   }
@@ -1317,25 +1814,66 @@ async function loadSessionState(sessionId, raf) {
   try {
     const parsed = JSON.parse(await readFile(sessionStatePath(sessionId), 'utf8'));
     if (parsed === null || typeof parsed !== 'object' || parsed.sessionId !== state.sessionId) return;
+    if (parsed.version !== 1 && parsed.version !== 2) return;
     if (parsed.rootState !== null && typeof parsed.rootState === 'object' && Array.isArray(parsed.rootState.blocks)) {
       state.rootState = parsed.rootState;
     }
     if (typeof parsed.initialQuestion === 'string' && parsed.initialQuestion !== '') {
       state.initialQuestion = parsed.initialQuestion;
     }
-    if (typeof parsed.initialManifest === 'string' && parsed.initialManifest !== '') {
+    if (typeof parsed.initialManifest === 'string') {
       state.initialManifest = parsed.initialManifest;
     }
     if (Array.isArray(parsed.initialDocIds)) {
-      state.initialDocIds = new Set(parsed.initialDocIds.filter((id) => typeof id === 'string' && id !== ''));
+      state.initialDocIds = new Set(parsed.initialDocIds.filter((id) => typeof id === 'string'));
+    }
+    if (parsed.turnStatus === 'done' || parsed.turnStatus === 'aborted' || parsed.turnStatus === 'error') {
+      state.turnStatus = parsed.turnStatus;
+    }
+    if (parsed.board !== null && typeof parsed.board === 'object') {
+      try {
+        state.board = raf.ResearchBoard.restore(parsed.board);
+      } catch {
+        state.board = new raf.ResearchBoard();
+      }
     }
     if (parsed.docs !== null && typeof parsed.docs === 'object') {
       for (const [id, doc] of Object.entries(parsed.docs)) {
         if (typeof id !== 'string' || doc === null || typeof doc !== 'object') continue;
         if (typeof doc.title !== 'string' || typeof doc.text !== 'string') continue;
-        state.docs.set(id, { title: doc.title, text: doc.text });
+        state.docs.set(id, { title: doc.title, text: doc.text, persist: true });
       }
     }
+    const pending = parsed.pending;
+    if (
+      pending !== null &&
+      typeof pending === 'object' &&
+      typeof pending.callId === 'string' &&
+      pending.callId !== '' &&
+      Number.isInteger(pending.step) &&
+      pending.step >= 0 &&
+      typeof pending.motivation === 'string' &&
+      pending.action !== null &&
+      typeof pending.action === 'object' &&
+      typeof pending.action.name === 'string' &&
+      pending.action.name !== '' &&
+      pending.action.arguments !== null &&
+      typeof pending.action.arguments === 'object' &&
+      !Array.isArray(pending.action.arguments) &&
+      (pending.observation === undefined || typeof pending.observation === 'string')
+    ) {
+      state.pending = {
+        callId: pending.callId,
+        step: pending.step,
+        motivation: pending.motivation,
+        action: { name: pending.action.name, arguments: pending.action.arguments },
+        ...(pending.observation !== undefined ? { observation: pending.observation } : {}),
+      };
+    }
+    // Manifests and doc ids are rebuilt after documents and workspace ingest.
+    // A persisted manifest can reference a document that the size cap skipped.
+    state.initialManifest = undefined;
+    state.initialDocIds = undefined;
   } catch {
     // Missing or corrupt state is not fatal. Start this session fresh.
   }
@@ -1412,7 +1950,7 @@ function studyBrief(question, store) {
 async function ensureTurn(ctx, outer, settings, runs, raf) {
 
   const session = getLiveSession(ctx, outer.sessionId);
-  const position = session === undefined ? undefined : sessionPosition(session);
+  const position = session === undefined ? undefined : sessionPosition(session, ctx);
   const workspace = workspaceOf(ctx, session);
   const messages = Array.isArray(outer.messages) ? outer.messages : [];
   const human = latestHumanMessage(messages);
@@ -1430,22 +1968,47 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
   const contextMessages = userIndex < 0 ? messages : messages.filter((_message, index) => index !== userIndex);
   await loadSessionState(outer.sessionId, raf);
   const sessionState = getSessionState(outer.sessionId, raf);
+  if (sessionState.turnStatus === 'done') {
+    if (contextMessages.length === 0) {
+      sessionState.rootState = undefined;
+      sessionState.initialQuestion = undefined;
+      sessionState.initialManifest = undefined;
+      sessionState.initialDocIds = undefined;
+      for (const docId of [...sessionState.docs.keys()]) {
+        if (docId.startsWith(BRANCH_REPORT_ID_PREFIX)) sessionState.docs.delete(docId);
+      }
+      sessionState.memo.clear();
+      sessionState.chunkCounts.clear();
+      sessionState.sources.clear();
+      sessionState.workspaceIngested = false;
+      sessionState.board = new raf.ResearchBoard();
+    }
+    sessionState.pending = undefined;
+    sessionState.turnStatus = undefined;
+  }
   if (sessionState.rootState === undefined) {
     const checkpoint = latestCheckpointText(contextMessages);
     if (checkpoint !== '') {
       effectiveQuestion += `\n\n### Prior context (compacted)\n${checkpoint}\n\nContinue from this prior state without redoing completed work.`;
     }
   }
-  const transcript = renderTranscript(contextMessages);
   const store = new raf.ContextStore();
-  if (transcript !== '') store.add(transcript, { id: 'session', title: 'DSH session transcript' });
+  if (sessionState.rootState === undefined) {
+    const transcript = renderTranscript(contextMessages);
+    if (transcript !== '') store.add(transcript, { id: 'session', title: 'DSH session transcript' });
+  }
   for (const [docId, docEntry] of sessionState.docs.entries()) {
     if (docId !== 'session' && typeof docEntry?.text === 'string' && docEntry.text !== '') {
-      store.add(docEntry.text, {
-        id: docId,
-        title: docEntry.title ?? docId,
-        manifest: !docId.startsWith(BRANCH_REPORT_ID_PREFIX),
-      });
+      try {
+        store.add(docEntry.text, {
+          id: docId,
+          title: docEntry.title ?? docId,
+          manifest: !docId.startsWith(BRANCH_REPORT_ID_PREFIX),
+        });
+      } catch {
+        // Corrupt or externally generated state must not abort the turn.
+        sessionState.docs.delete(docId);
+      }
     }
   }
   const contextWindow = contextWindowOf(ctx, outer.sessionId);
@@ -1461,17 +2024,18 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
   const rootProfile = { name: rootTarget.model, contextWindow, maxOutputTokens: RAF_ROOT_MAX_OUTPUT };
   const branchProfile = { name: branchTarget.model, contextWindow, maxOutputTokens: RAF_ROOT_MAX_OUTPUT };
   const queryProfile = { name: queryTarget.model, contextWindow, maxOutputTokens: RAF_QUERY_MAX_OUTPUT };
-  const rootLLM = new DshLlmClient(ctx, outer, rootProfile, outer.reasoningEffort, rootTarget);
+  const activeGate = raf.defaultRateLimitGate ?? rateLimitGate;
+  const rootLLM = new DshLlmClient(ctx, outer, rootProfile, outer.reasoningEffort, rootTarget, activeGate);
   const branchLLM =
     branchConfigured || branchTarget.provider !== rootTarget.provider || branchTarget.model !== rootTarget.model
-      ? new DshLlmClient(ctx, outer, branchProfile, branchEffort, branchTarget)
+      ? new DshLlmClient(ctx, outer, branchProfile, branchEffort, branchTarget, activeGate)
       : undefined;
-  const queryLLM = new DshLlmClient(ctx, outer, queryProfile, undefined, queryTarget);
-  const persistIngested = (res) => {
+  const queryLLM = new DshLlmClient(ctx, outer, queryProfile, undefined, queryTarget, activeGate);
+  const persistIngested = (res, persist = true) => {
     if (!res || !Array.isArray(res.files)) return;
     for (const file of res.files) {
       if (file && typeof file.id === 'string' && typeof file.content === 'string') {
-        sessionState.docs.set(file.id, { title: file.title ?? file.id, text: file.content });
+        sessionState.docs.set(file.id, { title: file.title ?? file.id, text: file.content, persist });
       }
     }
   };
@@ -1486,7 +2050,7 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
         skipRichDocuments: true,
         signal: outer.signal,
       });
-      persistIngested(res);
+      persistIngested(res, false);
       sessionState.sources.add(workspace);
     } catch {
       // Non-fatal if workspace is empty or inaccessible.
@@ -1557,9 +2121,12 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     pendingAction: undefined,
     finished: false,
     signal: outer.signal,
-    emit: (event) => runs.append(run, event),
+    emit: (event) => {
+      runs.append(run, event);
+      sessionState.commitBus?.recordEvent(turn, event);
+    },
   };
-  const extraTools = createDshTools(ctx, outer.sessionId, outer.signal, sessionState, workspace, raf);
+  const extraTools = await createDshTools(ctx, outer.sessionId, outer, outer.signal, sessionState, workspace, raf);
   const engine = new raf.RecursiveAgentFold({
     rootLLM,
     ...(branchLLM !== undefined ? { branchLLM } : {}),
@@ -1576,9 +2143,12 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     agent: {
       temperature: 0,
       maxObservationTokens: 6400,
-      maxStepMs: RAF_STEP_TIMEOUT_MS,
       maxInvalidSteps: RAF_MAX_INVALID_STEPS,
+      maxInvalidTotal: RAF_MAX_INVALID_TOTAL,
       maxReasoningTokens: RAF_MAX_REASONING_TOKENS,
+      ...(Number.isFinite(contextWindow) && contextWindow > 0
+        ? { maxPromptTokens: Math.floor(contextWindow * RAF_PROMPT_BUDGET_RATIO) }
+        : {}),
     },
     llmQuery: {
       reserveRatio: settings.reserve,
@@ -1612,6 +2182,35 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
       initialManifest: sessionState.initialManifest,
       initialDocIds: sessionState.initialDocIds,
     });
+  }
+  if (sessionState.pending !== undefined) {
+    const pending = sessionState.pending;
+    try {
+      if (sessionState.rootState === undefined) {
+        throw new Error('RAF: pending tool call has no fold state to resume; refusing to re-run the tool');
+      }
+      const saved = pending.observation ?? toolResultFor(messages, pending.callId)?.text;
+      if (saved === undefined) {
+        throw new Error(
+          `RAF: pending tool call "${pending.action.name}" (${pending.callId}) has no saved result; refusing to re-run it`,
+        );
+      }
+      engine.restorePending({
+        step: pending.step,
+        motivation: pending.motivation,
+        action: pending.action,
+      });
+      engine.submit(saved);
+      sessionState.rootState = engine.snapshot();
+      sessionState.pending = undefined;
+      captureNewDocs({ sessionState, store });
+      persistSessionState(sessionState);
+    } catch (error) {
+      sessionState.pending = undefined;
+      sessionState.turnStatus = 'error';
+      persistSessionState(sessionState);
+      throw error;
+    }
   }
   activeTurns.set(outer.sessionId, turn);
   while (activeTurns.size > MAX_ACTIVE_TURNS) {
@@ -1688,10 +2287,16 @@ async function* rafStream(ctx, outer, settings, runs) {
             turn.workspace,
             turn.raf,
           );
+      if (turn.sessionState.pending !== undefined && turn.sessionState.pending.callId === turn.pendingCallId) {
+        turn.sessionState.pending = { ...turn.sessionState.pending, observation: indexed };
+        captureNewDocs(turn);
+        persistSessionState(turn.sessionState);
+      }
       turn.engine.submit(indexed, isError ? { error: observation } : undefined);
       turn.pendingCallId = undefined;
       turn.pendingObservation = undefined;
       turn.pendingAction = undefined;
+      turn.sessionState.pending = undefined;
       const snapshot = typeof turn.engine.snapshot === 'function' ? turn.engine.snapshot() : undefined;
       if (snapshot !== undefined) turn.sessionState.rootState = snapshot;
       captureNewDocs(turn);
@@ -1699,6 +2304,7 @@ async function* rafStream(ctx, outer, settings, runs) {
     }
     let liveText = '';
     let liveOpen = false;
+    let visibleStreamChars = 0;
     let stepResult;
     let stepFailure;
     let stepDone = false;
@@ -1742,12 +2348,16 @@ async function* rafStream(ctx, outer, settings, runs) {
       // Keep whitespace deltas: providers stream words and spaces separately.
       const cleaned = cleanReasoningText(text, false);
       if (cleaned === '') continue;
+      liveText += cleaned;
+      if (visibleStreamChars >= RAF_VISIBLE_REASONING_CHARS) continue;
       if (!liveOpen) {
         yield { type: 'block-start', index: 0, blockType: 'reasoning' };
         liveOpen = true;
       }
-      liveText += cleaned;
-      yield { type: 'reasoning-delta', index: 0, text: cleaned };
+      const remaining = RAF_VISIBLE_REASONING_CHARS - visibleStreamChars;
+      const delta = cleaned.slice(0, remaining);
+      visibleStreamChars += delta.length;
+      yield { type: 'reasoning-delta', index: 0, text: delta };
     }
     await stepPromise;
     if (stepFailure !== undefined) throw stepFailure;
@@ -1762,12 +2372,14 @@ async function* rafStream(ctx, outer, settings, runs) {
       step.kind === 'tool' && typeof step.motivation === 'string'
         ? cleanReasoningText(step.motivation).replace(/^[.,;:!?\-\s]+/u, '')
         : '';
-    const visible = cleanReasoningText([
-      streamedReasoning !== '' ? streamedReasoning : reasoningFallback,
-      motivation !== '' ? `→ ${motivation}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n\n'));
+    const visible = capVisibleReasoning(
+      cleanReasoningText([
+        streamedReasoning !== '' ? streamedReasoning : reasoningFallback,
+        motivation !== '' ? `→ ${motivation}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n\n')),
+    );
     let index = 0;
     if (liveOpen) {
       yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: visible } };
@@ -1791,6 +2403,16 @@ async function* rafStream(ctx, outer, settings, runs) {
       turn.pendingCallId = callId;
       turn.pendingAction = normalizedAction;
       turn.step = step.step;
+      turn.sessionState.pending = {
+        callId,
+        step: step.step,
+        motivation: step.motivation,
+        action: normalizedAction,
+      };
+      const pendingSnapshot = typeof turn.engine.snapshot === 'function' ? turn.engine.snapshot() : undefined;
+      if (pendingSnapshot !== undefined) turn.sessionState.rootState = pendingSnapshot;
+      captureNewDocs(turn);
+      persistSessionState(turn.sessionState);
       const args = JSON.stringify(normalizedArgs);
       yield { type: 'block-start', index, blockType: 'tool-call' };
       yield { type: 'tool-call-delta', index, id: callId, name: step.action.name, argumentsDelta: args };
@@ -1812,8 +2434,31 @@ async function* rafStream(ctx, outer, settings, runs) {
     } else {
       const answer = typeof step.result.answer === 'string' && step.result.answer !== '' ? step.result.answer : '';
       const failure =
-        answer === '' && typeof step.result.error === 'string' && step.result.error !== '' ? step.result.error : undefined;
+        answer === ''
+          ? typeof step.result.error === 'string' && step.result.error !== ''
+            ? step.result.error
+            : 'RAF engine returned no answer'
+          : undefined;
       if (failure !== undefined) {
+        turn.lastResultError = failure;
+        const fallback = outer.signal?.aborted ? undefined : buildFallbackAnswer(turn);
+        if (fallback !== undefined) {
+          const result = {
+            ...step.result,
+            answer: fallback,
+            terminated: 'forced_answer',
+            error: undefined,
+          };
+          yield { type: 'block-start', index, blockType: 'text' };
+          yield { type: 'text-delta', index, text: fallback };
+          yield { type: 'block-end', index, block: { type: 'text', text: fallback } };
+          if (step.usage !== undefined) yield stepUsageChunk(step.lastUsage ?? step.usage);
+          yield { type: 'finish', reason: { kind: 'stop' } };
+          finishRun(turn, result, outer.signal);
+          turn.finished = true;
+          activeTurns.delete(outer.sessionId);
+          return;
+        }
         // A failed engine run must fail the step. Reporting its error as answer text hides the failure.
         finishRun(turn, step.result, outer.signal);
         turn.finished = true;
@@ -1821,10 +2466,9 @@ async function* rafStream(ctx, outer, settings, runs) {
         yield { type: 'finish', reason: { kind: 'error', failure: { message: failure, code: 'ERROR' } } };
         return;
       }
-      const text = answer !== '' ? answer : 'RAF engine returned no answer.';
       yield { type: 'block-start', index, blockType: 'text' };
-      yield { type: 'text-delta', index, text };
-      yield { type: 'block-end', index, block: { type: 'text', text } };
+      yield { type: 'text-delta', index, text: answer };
+      yield { type: 'block-end', index, block: { type: 'text', text: answer } };
       yield { type: 'finish', reason: { kind: 'stop' } };
       finishRun(turn, step.result, outer.signal);
     }
@@ -1832,15 +2476,37 @@ async function* rafStream(ctx, outer, settings, runs) {
     activeTurns.delete(outer.sessionId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (turn !== undefined) turn.lastResultError = message;
+    if (turn !== undefined && outer.signal?.aborted !== true) {
+      const fallback = buildFallbackAnswer(turn);
+      if (fallback !== undefined) {
+        const snapshot = typeof turn.engine?.snapshot === 'function' ? turn.engine.snapshot() : undefined;
+        if (snapshot !== undefined) turn.sessionState.rootState = snapshot;
+        yield { type: 'block-start', index: 0, blockType: 'text' };
+        yield { type: 'text-delta', index: 0, text: fallback };
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: fallback } };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+        finishRun(
+          turn,
+          { state: snapshot, answer: fallback, terminated: 'forced_answer', usage: turn.engine?.usage },
+          outer.signal,
+        );
+        turn.finished = true;
+        activeTurns.delete(outer.sessionId);
+        return;
+      }
+    }
     if (turn !== undefined) {
       if (turn.sessionState !== undefined && turn.engine !== undefined) {
         const snapshot = typeof turn.engine.snapshot === 'function' ? turn.engine.snapshot() : undefined;
         if (snapshot !== undefined) turn.sessionState.rootState = snapshot;
       }
+      const status = outer.signal?.aborted ? 'aborted' : 'error';
+      if (turn.sessionState !== undefined) turn.sessionState.turnStatus = status;
       captureNewDocs(turn);
       persistSessionState(turn.sessionState);
       if (turn.run !== undefined) {
-        turn.finish({ status: outer.signal?.aborted ? 'aborted' : 'error', answer: '', error: message, usage: null });
+        turn.finish({ status, answer: '', error: message, usage: null });
         turn.run = undefined;
       }
       turn.finished = true;
@@ -1894,6 +2560,30 @@ export function apply(ctx) {
 
   ctx.effect(() => () => activeTurns.clear(), 'raf: active turns');
 
+  const wrapCompaction = (compaction) => {
+    if (!compaction || typeof compaction.compactIfNeeded !== 'function' || compaction._rafWrapped) {
+      return () => {};
+    }
+    const original = compaction.compactIfNeeded.bind(compaction);
+    compaction._rafWrapped = true;
+    compaction.compactIfNeeded = (agent, trigger, signal) => {
+      if (trigger === 'pressure' && isRafScope(agent, state)) {
+        return Promise.resolve(null);
+      }
+      return original(agent, trigger, signal);
+    };
+    return () => {
+      compaction.compactIfNeeded = original;
+      delete compaction._rafWrapped;
+    };
+  };
+  ctx.effect(() => wrapCompaction(ctx.get?.('compaction')), 'raf: suppress pressure compaction');
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['compaction'], (compCtx) => {
+      compCtx.effect?.(() => wrapCompaction(compCtx.compaction ?? compCtx.get?.('compaction')), 'raf: suppress pressure compaction');
+    });
+  }
+
   let syncAgentTools = () => {};
   ctx.effect(() => {
     let dispose = () => {};
@@ -1924,10 +2614,7 @@ export function apply(ctx) {
     if (disposed) return;
     const json = stateJson(state);
     try {
-      mkdirSync(dirname(statePath()), { recursive: true });
-      const temporary = `${statePath()}.tmp`;
-      writeFileSync(temporary, json, 'utf8');
-      renameSync(temporary, statePath());
+      atomicWriteFileSync(statePath(), json, 0o600);
     } catch (error) {
       console.error('RAF: cannot persist engine state', error);
     }

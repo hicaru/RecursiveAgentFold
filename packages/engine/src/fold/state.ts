@@ -118,6 +118,34 @@ export class FoldState {
     };
   }
 
+  /**
+   * Merge a contiguous prefix of summary blocks without touching the latest
+   * interaction. Hosts use this under a prompt budget; partition stays gap-free.
+   */
+  condensePrefix(blockCount: number, summary: string): SummaryBlock | undefined {
+    const count = Math.max(0, Math.min(this._blocks.length, Math.floor(blockCount)));
+    if (count < 2) return undefined;
+    const prefix = this._blocks.slice(0, count);
+    const first = prefix[0];
+    const last = prefix[count - 1];
+    if (first === undefined || last === undefined) return undefined;
+    const merged: SummaryBlock = {
+      from: first.from,
+      to: last.to,
+      summary: summary.trim() || prefix.map((b) => b.summary).join('\n'),
+    };
+    this._blocks = [merged, ...this._blocks.slice(count)];
+    return merged;
+  }
+
+  /** Shorten the latest observation in place. Used only under a prompt budget. */
+  trimLatestObservation(maxChars: number): boolean {
+    const latest = this._latest;
+    if (!latest || latest.observation.length <= maxChars) return false;
+    latest.observation = `${latest.observation.slice(0, Math.max(0, maxChars))}\n…[observation shortened by prompt budget]`;
+    return true;
+  }
+
   setLatest(interaction: Interaction): void {
     if (this._latest) throw new Error('setLatest: previous interaction has not been folded');
     const expected = this.currentStep;

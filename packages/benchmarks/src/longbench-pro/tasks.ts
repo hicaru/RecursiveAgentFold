@@ -3,8 +3,8 @@ import { splitContextIntoDocuments } from '../longbench/tasks.js';
 import type { LongBenchProRow } from './dataset.js';
 
 /**
- * LongBench-Pro v1.0 answers are item lists (often Chinese) behind a
- * [答案]/[Answer]/Answer: marker, newline- or comma-separated. Scoring:
+ * LongBench-Pro v1.0 answers are item lists behind an
+ * [Answer]/Answer: marker, newline- or comma-separated. Scoring:
  * ordered exact match = 1, unordered set match = 0.5, else 0.
  */
 
@@ -19,15 +19,15 @@ export function normalizeItem(s: string): string {
     .trim();
 }
 
-/** Payload after the LAST answer marker ([答案]/[Answer]/Answer:), else the text. */
+/** Payload after the LAST answer marker ([Answer]/Answer:), else the text. */
 export function extractAnswerPayload(out: string): string {
-  const bracketed = [...out.matchAll(/\[(?:答案|answer)\]\s*[:：]?/gi)];
+  const bracketed = [...out.matchAll(/\[answer\]\s*:?/gi)];
   const lastBracket = bracketed[bracketed.length - 1];
   if (lastBracket) {
     const tail = out.slice((lastBracket.index ?? 0) + lastBracket[0].length).trim();
-    return tail.replace(/\n\s*(?:Answer|答案)\s*[:：][\s\S]*$/i, '').trim();
+    return tail.replace(/\n\s*Answer\s*:[\s\S]*$/i, '').trim();
   }
-  const markers = [...out.matchAll(/(?:答案|answer)\s*[:：]?/gi)];
+  const markers = [...out.matchAll(/answer\s*:?/gi)];
   const last = markers[markers.length - 1];
   if (!last) return out.trim();
   return out.slice((last.index ?? 0) + last[0].length).trim();
@@ -50,7 +50,7 @@ export function buildLongBenchProTasks(rows: readonly LongBenchProRow[]): BenchT
       .filter(Boolean);
     const goldJoined = gold.join('|');
     const goldSet = new Set(gold);
-    const hasNativeFormat = /\[(?:答案|answer)\]/i.test(row.question);
+    const hasNativeFormat = /\[answer\]/i.test(row.question);
     const formattedQuestion = [
       row.question.trim(),
       '',

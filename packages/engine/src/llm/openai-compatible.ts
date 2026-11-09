@@ -1,6 +1,6 @@
 import type { LLMClient, LLMRequest, LLMResponse, ModelProfile } from '../types.js';
 import { sleep } from '../util/concurrency.js';
-
+import { defaultRateLimitGate, isRateLimitError, type RateLimitCoordinator } from './rate-limit-gate.js';
 export interface OpenAICompatibleConfig {
   baseUrl: string;
   apiKey: string;
@@ -28,6 +28,7 @@ export interface OpenAICompatibleConfig {
   /** Attempts for provider content-filter refusals (code 1301). Default 1. */
   filterRetries?: number;
   fetchImpl?: typeof fetch;
+  rateLimitGate?: RateLimitCoordinator;
 }
 
 export class LLMError extends Error {
@@ -44,12 +45,16 @@ export class LLMError extends Error {
 }
 
 /** Provider error codes that never succeed on retry (Z.ai). */
-const NON_RETRYABLE_CODES = new Set([
-  '1113', // insufficient balance / no resource package
-  '1210', // invalid parameter
-  '1211', // unknown model
-  '1000', '1001', '1002', '1003', '1004', // auth
-]);
+const NON_RETRYABLE_CODES: Readonly<Record<string, true>> = Object.freeze({
+  '1113': true, // insufficient balance / no resource package
+  '1210': true, // invalid parameter
+  '1211': true, // unknown model
+  '1000': true,
+  '1001': true,
+  '1002': true,
+  '1003': true,
+  '1004': true, // auth
+});
 
 /** Parse a Retry-After header (seconds or HTTP date) into milliseconds. */
 function retryAfterMs(raw: string | null): number | undefined {
@@ -82,6 +87,7 @@ interface ChatCompletionResponse {
 export class OpenAICompatibleClient implements LLMClient {
   readonly profile: ModelProfile;
   private readonly fetchImpl: typeof fetch;
+  private readonly gate: RateLimitCoordinator;
 
   constructor(private readonly cfg: OpenAICompatibleConfig) {
     this.profile = {
@@ -90,34 +96,56 @@ export class OpenAICompatibleClient implements LLMClient {
       maxOutputTokens: cfg.maxOutputTokens,
     };
     this.fetchImpl = cfg.fetchImpl ?? fetch;
+    this.gate = cfg.rateLimitGate ?? defaultRateLimitGate;
   }
 
   async complete(req: LLMRequest): Promise<LLMResponse> {
     const base = this.cfg.retryBaseMs ?? 2000;
     const budgets = {
-      rateLimit: this.cfg.rateLimitRetries ?? 10,
       filter: this.cfg.filterRetries ?? 1,
       other: this.cfg.maxRetries ?? 4,
     };
-    const rateLimitDelay = this.cfg.rateLimitDelayMs ?? 10_000;
     const used = { rateLimit: 0, filter: 0, other: 0 };
+    let soloStreak = 0;
     for (;;) {
+      const lease = await this.gate.acquire(req.signal);
+      let soloAtAttempt = false;
       try {
-        return await this.once(req);
+        const res = await this.once(req);
+        this.gate.noteSuccess();
+        return res;
       } catch (e) {
+        soloAtAttempt = lease.isSolo();
         const err = e instanceof LLMError ? e : undefined;
+        const msg = err?.message ?? (e instanceof Error ? e.message : String(e));
+        const rateLimited =
+          !(req.signal?.aborted ?? false) && isRateLimitError(err?.code, err?.status, msg);
+        if (rateLimited) {
+          this.gate.noteRateLimit(err?.retryAfterMs ?? this.cfg.rateLimitDelayMs);
+          if (this.cfg.rateLimitRetries !== undefined) {
+            used.rateLimit += 1;
+            if (used.rateLimit > this.cfg.rateLimitRetries) throw e;
+          } else if (soloAtAttempt) {
+            soloStreak += 1;
+            if (this.gate.shouldTerminateSolo(soloStreak)) {
+              throw this.gate.createSoloExhaustedError(soloStreak, msg);
+            }
+          } else {
+            soloStreak = 0;
+          }
+          continue;
+        }
         const retryable = err?.retryable ?? !(req.signal?.aborted ?? false);
         if (!retryable) throw e;
-        const kind = err?.status === 429 ? 'rateLimit' : err?.code === '1301' ? 'filter' : 'other';
-        used[kind]++;
+        const kind = err?.code === '1301' ? 'filter' : 'other';
+        used[kind] += 1;
         if (used[kind] > budgets[kind]) throw e;
         const cap = this.cfg.retryMaxMs ?? 60_000;
         const backoff = Math.min(cap, base * 2 ** (used[kind] - 1));
-        const delay =
-          kind === 'rateLimit'
-            ? Math.max(rateLimitDelay, err?.retryAfterMs ?? 0)
-            : Math.min(Math.max(err?.retryAfterMs ?? 0, backoff), cap) * (0.75 + Math.random() * 0.5);
+        const delay = Math.min(Math.max(err?.retryAfterMs ?? 0, backoff), cap) * (0.75 + Math.random() * 0.5);
         await sleep(delay, req.signal);
+      } finally {
+        lease.release();
       }
     }
   }
@@ -135,8 +163,10 @@ export class OpenAICompatibleClient implements LLMClient {
     if (this.cfg.thinking) body.thinking = { type: this.cfg.thinking };
     if (this.cfg.extraBody) Object.assign(body, this.cfg.extraBody);
 
-    const timeout = AbortSignal.timeout(this.cfg.timeoutMs ?? 600_000);
-    const signal = req.signal ? AbortSignal.any([req.signal, timeout]) : timeout;
+    const timeoutMs = this.cfg.timeoutMs;
+    const hasTimeout = timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0;
+    const timeout = hasTimeout ? AbortSignal.timeout(timeoutMs) : undefined;
+    const signal = timeout ? (req.signal ? AbortSignal.any([req.signal, timeout]) : timeout) : req.signal;
     const started = Date.now();
     let res: Response;
     try {
@@ -163,9 +193,10 @@ export class OpenAICompatibleClient implements LLMClient {
     if (!res.ok || json?.error) {
       const code = json?.error?.code !== undefined ? String(json.error.code) : undefined;
       const msg = json?.error?.message ?? raw.slice(0, 500);
+      const isRateLimited = isRateLimitError(code, res.status, msg);
       const retryable =
-        !(code && NON_RETRYABLE_CODES.has(code)) &&
-        (res.status === 429 || res.status >= 500 || res.status === 408 || code === '1301');
+        !(code && NON_RETRYABLE_CODES[code] === true) &&
+        (isRateLimited || res.status === 429 || res.status >= 500 || res.status === 408 || code === '1301');
       throw new LLMError(
         `[${res.status}${code ? `/${code}` : ''}] ${msg}`,
         res.status,

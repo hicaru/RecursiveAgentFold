@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { isPlaceholderAnswer } from '../agent/agent-fold.js';
 import { isAncestorEcho, normalizeScopeKey, normalizeTaskKey } from '../context/board.js';
 import type { ContextStore } from '../context/store.js';
 import type { FoldStateSnapshot } from '../fold/state.js';
+import { defaultRateLimitGate } from '../llm/rate-limit-gate.js';
 import { defaultEstimator } from '../tokens.js';
 import { argNumber, argString, ToolArgumentError, type Tool } from './types.js';
 
@@ -35,33 +37,68 @@ function excerptText(text: string, maxTokens: number): string {
  * Return a compact index that keeps every subtask header and stores each full
  * report as a document. The root can read the full text by its doc id.
  */
+
 function buildReportIndex(
   outcomes: readonly BranchSubtaskResult[],
   specs: readonly SubTaskSpec[],
   store: ContextStore,
   maxTokens: number,
 ): string {
-  const reports = outcomes.map((outcome, index) => {
+  const records = outcomes.map((outcome, index) => {
     const spec = specs[index];
     return {
       outcome,
       spec,
-      report: storeReport(store, outcome.text, spec?.scope, spec?.task ?? 'branch task'),
+      report:
+        outcome.report ??
+        (outcome.failed ? undefined : storeReport(store, outcome.text, spec?.scope, spec?.task ?? 'branch task')),
     };
   });
-  const headers = reports.map(({ spec, report }, index) => {
-    const label = spec?.scope ? `[scope=${spec.scope}] ${spec.task}` : (spec?.task ?? '');
-    return `[Subtask #${index + 1}] ${label}\nFull report: \`${report.id}\` (${report.lines} lines, ~${report.tokens} tokens)`;
-  });
-  const headerTokens = defaultEstimator.count(headers.join('\n\n'));
-  let bodyBudget = Math.max(32, Math.floor((maxTokens - headerTokens - 16) / Math.max(1, reports.length)));
+  const formatHeaders = (useCompact: boolean): string[] => {
+    const taskChars = useCompact ? 48 : Math.max(40, Math.min(320, Math.floor(12_000 / Math.max(1, records.length))));
+    return records.map(({ outcome, spec, report }, index) => {
+      const task = spec?.task ?? '';
+      const shortTask = task.length > taskChars ? `${task.slice(0, taskChars - 1)}…` : task;
+      const scope = spec?.scope !== undefined && spec.scope !== '' ? `[scope=${spec.scope}] ` : '';
+      if (report === undefined) {
+        const error = (outcome.error ?? 'incomplete result').replace(/\s+/g, ' ').slice(0, useCompact ? 40 : 120);
+        return useCompact
+          ? `[Subtask #${index + 1}] ${scope}${shortTask} FAILED: ${error}`
+          : `[Subtask #${index + 1}] ${scope}${shortTask}\nFAILED: ${error}`;
+      }
+      return useCompact
+        ? `[Subtask #${index + 1}] ${scope}${shortTask} → ${report.id}`
+        : `[Subtask #${index + 1}] ${scope}${shortTask}\nFull report: \`${report.id}\` (${report.lines} lines, ~${report.tokens} tokens)`;
+    });
+  };
+  let compact = records.length > 32;
+  let headers = formatHeaders(compact);
+  let headerTokens = defaultEstimator.count(headers.join('\n\n'));
+  if (!compact && headerTokens > maxTokens) {
+    compact = true;
+    headers = formatHeaders(true);
+    headerTokens = defaultEstimator.count(headers.join('\n\n'));
+  }
+  const successes = records.filter((record) => record.report !== undefined).length;
+  let bodyBudget = compact
+    ? 0
+    : Math.max(0, Math.floor((maxTokens - headerTokens - 16) / Math.max(1, successes)));
   let index = '';
-  for (let attempt = 0; attempt < 6; attempt++) {
-    index = reports
-      .map(({ outcome }, i) => `${headers[i]}\nExcerpt:\n${excerptText(outcome.text, bodyBudget)}`)
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const effectiveBudget = attempt === 7 ? 0 : bodyBudget;
+    index = records
+      .map(({ outcome, report }, i) => {
+        const header = headers[i] ?? '';
+        return report === undefined || effectiveBudget === 0
+          ? header
+          : `${header}\nExcerpt:\n${excerptText(outcome.text, effectiveBudget)}`;
+      })
       .join('\n\n');
-    if (defaultEstimator.count(index) <= maxTokens || bodyBudget <= 32) break;
-    bodyBudget = Math.max(32, Math.floor(bodyBudget * 0.8));
+    if (defaultEstimator.count(index) <= maxTokens || effectiveBudget === 0) break;
+    bodyBudget = Math.floor(bodyBudget * 0.65);
+  }
+  if (defaultEstimator.count(index) > maxTokens && !compact) {
+    index = formatHeaders(true).join('\n\n');
   }
   return index;
 }
@@ -98,6 +135,7 @@ export interface BranchToolOptions {
   maxResultTokens?: number;
   consultOnly?: boolean;
   readonly ownScope?: string;
+  /** Maximum independent tasks in one branch call. Default 200. */
   readonly maxSpecialists?: number;
 }
 
@@ -210,13 +248,21 @@ interface BranchSubtaskResult {
   readonly failed: boolean;
   readonly scope: string;
   readonly error?: string;
+  readonly report?: { readonly id: string; readonly tokens: number; readonly lines: number };
 }
 
+const RESEARCH_TASK =
+  /\b(?:deeply|study|analy[sz]e|research|report|extract|list every|enumerate|summari[sz]e|compare|include|cite|citations|key facts|architecture|components?|tests?|benchmarks?|risks?)\b/i;
+const MIN_RESEARCH_ANSWER_CHARS = 120;
+
 /** A branch subtask is usable only when the child finished with a real answer and no error. */
-function isCompleteBranchRun(result: BranchRunnerResult): boolean {
+function isCompleteBranchRun(result: BranchRunnerResult, task: string): boolean {
   if (typeof result.error === 'string' && result.error !== '') return false;
   if (result.terminated !== 'answer' && result.terminated !== 'forced_answer') return false;
-  return typeof result.answer === 'string' && result.answer.trim() !== '';
+  const answer = typeof result.answer === 'string' ? result.answer.trim() : '';
+  if (answer === '' || isPlaceholderAnswer(answer)) return false;
+  if (RESEARCH_TASK.test(task) && answer.length < MIN_RESEARCH_ANSWER_CHARS) return false;
+  return true;
 }
 
 /**
@@ -229,7 +275,7 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
   return {
     name: 'branch',
     description:
-      'Delegate deep document/module research to a persistent scoped specialist sub-agent, or ask a follow-up question to an existing specialist [scope=...]. Pass "scope" (e.g. doc id or module name) to reuse specialist state/cache and deduplicate; supports single "task" or parallel "tasks". Use a loaded document id or a directory/module prefix present in the manifest; load a filesystem path with add_document first if it is absent, otherwise the specialist has no document to inspect.',
+      'Delegate deep document/module research to a persistent scoped specialist sub-agent, or ask a follow-up question to an existing specialist [scope=...]. Pass "scope" (e.g. doc id or module name) to reuse specialist state/cache and deduplicate; supports single "task" or up to 200 parallel "tasks". Use a loaded document id or a directory/module prefix present in the manifest; load a filesystem path with add_document first if it is absent, otherwise the specialist has no document to inspect.',
     parameters: {
       type: 'object',
       properties: {
@@ -267,127 +313,172 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
 
       const runSingle = async (subTask: string, subScope?: string): Promise<BranchSubtaskResult> => {
         const scopeKey = inferScope(subScope, subTask, ctx.store);
-        const sameOrUnspecifiedScope =
-          !subScope || !opts.ownScope || normalizeScopeKey(subScope) === normalizeScopeKey(opts.ownScope);
-        if (ctx.depth > 0 && sameOrUnspecifiedScope && ctx.ancestorTasks && isAncestorEcho(subTask, ctx.ancestorTasks)) {
-          return {
-            text: `[scope=${scopeKey}] [ledger: ancestor echo rejected — do NOT call branch on your own scope or re-delegate your assigned task. Use search / grep / read / tally directly on your scope document.]`,
-            failed: false,
-            scope: scopeKey,
-          };
+        const leaveWorker = defaultRateLimitGate.enterWorker();
+        const childController = new AbortController();
+        const outerSignal = ctx.signal;
+        const onOuterAbort = () => childController.abort(outerSignal?.reason);
+        if (outerSignal?.aborted) {
+          childController.abort(outerSignal.reason);
+        } else if (outerSignal) {
+          outerSignal.addEventListener('abort', onOuterAbort, { once: true });
         }
-        if (opts.ownScope && scopeKey === normalizeScopeKey(opts.ownScope)) {
-          return {
-            text: `[scope=${scopeKey}] You are already the specialist responsible for [${scopeKey}]; do NOT call branch on your own scope! Use grep / read / tally directly on your document.`,
-            failed: false,
-            scope: scopeKey,
-          };
-        }
-        const stack = ctx.callStack ?? [];
-        if (stack.includes(scopeKey)) {
-          const existingSummary = ctx.board?.getSpecialist(scopeKey)?.latestSummary;
-          return {
-            text: existingSummary
-              ? `[scope=${scopeKey}] (cycle detected on scope; returning latest known specialist summary)\n${existingSummary}`
-              : `[scope=${scopeKey}] (cycle detected on scope; use existing board findings or document tools directly)`,
-            failed: false,
-            scope: scopeKey,
-          };
-        }
-        if (opts.consultOnly) {
-          if (!ctx.board || !ctx.board.hasSpecialist(scopeKey)) {
-            return {
-              text: `[scope=${scopeKey}] At max depth you may only query existing specialists [scope=...] already listed on the board; specify an existing scope or use grep/read directly.`,
+        const commitIfComplete = (outcome: BranchSubtaskResult): BranchSubtaskResult => {
+          if (outcome.failed || outcome.report !== undefined) return outcome;
+          const report = storeReport(ctx.store, outcome.text, subScope ?? outcome.scope, subTask);
+          ctx.emit({
+            type: 'branch_report',
+            agent: ctx.agentName,
+            step: ctx.step,
+            scope: outcome.scope,
+            reportId: report.id,
+            tokens: report.tokens,
+            lines: report.lines,
+          });
+          return { ...outcome, report };
+        };
+        try {
+          const sameOrUnspecifiedScope =
+            !subScope || !opts.ownScope || normalizeScopeKey(subScope) === normalizeScopeKey(opts.ownScope);
+          if (ctx.depth > 0 && sameOrUnspecifiedScope && ctx.ancestorTasks && isAncestorEcho(subTask, ctx.ancestorTasks)) {
+            return commitIfComplete({
+              text: `[scope=${scopeKey}] [ledger: ancestor echo rejected — do NOT call branch on your own scope or re-delegate your assigned task. Use search / grep / read / tally directly on your scope document.]`,
               failed: false,
               scope: scopeKey,
-            };
+            });
           }
-        }
-        const nextStack = [...stack, scopeKey];
-        const maxSpec = opts.maxSpecialists ?? 12;
-        const demoted =
-          ctx.board !== undefined && !ctx.board.hasSpecialist(scopeKey) && ctx.board.specialistCount() >= maxSpec;
-        const childMaxSteps = demoted ? Math.min(maxSteps, 4) : maxSteps;
-        const nextAncestors = ctx.ancestorTasks ? [...ctx.ancestorTasks, subTask] : [subTask];
-        const outcomeOf = (r: BranchRunnerResult): BranchSubtaskResult => {
-          const complete = isCompleteBranchRun(r);
-          const status = `[scope=${scopeKey}] branch ${complete ? 'done' : 'failed'}: ${r.terminated}, ${r.steps} steps${r.error ? ` (error: ${r.error})` : ''}`;
-          const body = r.answer ?? '(no answer produced)';
-          return {
-            text: `${status}\nResult:\n${body}`,
-            failed: !complete,
-            scope: scopeKey,
-            ...(complete ? {} : { error: r.error ?? `terminated: ${r.terminated}` }),
-          };
-        };
-        if (ctx.board) {
-          let failure: string | undefined;
-          const { result, failed } = await ctx.board.runScopedBranch(
-            scopeKey,
-            subTask,
-            async (sInput) => {
-              const r = await run(sInput.initialTask, {
-                depth: ctx.depth + 1,
-                maxSteps: childMaxSteps,
-                parent: ctx.agentName,
+          if (opts.ownScope && scopeKey === normalizeScopeKey(opts.ownScope)) {
+            return commitIfComplete({
+              text: `[scope=${scopeKey}] You are already the specialist responsible for [${scopeKey}]; do NOT call branch on your own scope! Use grep / read / tally directly on your document.`,
+              failed: false,
+              scope: scopeKey,
+            });
+          }
+          const stack = ctx.callStack ?? [];
+          if (stack.includes(scopeKey)) {
+            const existingSummary = ctx.board?.getSpecialist(scopeKey)?.latestSummary;
+            return commitIfComplete({
+              text: existingSummary
+                ? `[scope=${scopeKey}] (cycle detected on scope; returning latest known specialist summary)\n${existingSummary}`
+                : `[scope=${scopeKey}] (cycle detected on scope; use existing board findings or document tools directly)`,
+              failed: false,
+              scope: scopeKey,
+            });
+          }
+          if (opts.consultOnly) {
+            if (!ctx.board || !ctx.board.hasSpecialist(scopeKey)) {
+              return commitIfComplete({
+                text: `[scope=${scopeKey}] At max depth you may only query existing specialists [scope=...] already listed on the board; specify an existing scope or use grep/read directly.`,
+                failed: false,
                 scope: scopeKey,
-                initialState: sInput.previousState,
-                followUpQuestion: sInput.followUpQuestion,
-                initialBoardCount: sInput.initialBoardRev,
-                initialBoardSnapshot: sInput.initialBoardSnapshot,
-                agentName: sInput.agentName,
-                callStack: nextStack,
-                ancestorTasks: nextAncestors,
-                signal: ctx.signal,
               });
-              const outcome = outcomeOf(r);
-              if (outcome.error !== undefined) failure = outcome.error;
-              return {
-                resultText: outcome.text,
-                answer: r.answer,
-                state: r.state ?? { blocks: [], latest: undefined },
-                ...(outcome.failed ? { failed: true } : {}),
-              };
-            },
-            { depth: ctx.depth + 1, parent: ctx.agentName },
-          );
-          return {
-            text: result,
-            failed: failed === true,
-            scope: scopeKey,
-            ...(failure !== undefined ? { error: failure } : {}),
+            }
+          }
+          const nextStack = [...stack, scopeKey];
+          const maxSpec = opts.maxSpecialists ?? 200;
+          const demoted =
+            ctx.board !== undefined && !ctx.board.hasSpecialist(scopeKey) && ctx.board.specialistCount() >= maxSpec;
+          const childMaxSteps = demoted ? Math.min(maxSteps, 4) : maxSteps;
+          const nextAncestors = ctx.ancestorTasks ? [...ctx.ancestorTasks, subTask] : [subTask];
+          const outcomeOf = (r: BranchRunnerResult): BranchSubtaskResult => {
+            const complete = isCompleteBranchRun(r, subTask);
+            const rejectReason =
+              r.error ??
+              (r.terminated !== 'answer' && r.terminated !== 'forced_answer'
+                ? `terminated: ${r.terminated}`
+                : 'answer is a placeholder or too short for a research task');
+            const status = `[scope=${scopeKey}] branch ${complete ? 'done' : 'failed'}: ${r.terminated}, ${r.steps} steps${complete ? '' : ` (${rejectReason})`}`;
+            const body = r.answer ?? '(no answer produced)';
+            return {
+              text: `${status}\nResult:\n${body}`,
+              failed: !complete,
+              scope: scopeKey,
+              ...(complete ? {} : { error: rejectReason }),
+            };
           };
+          if (ctx.board) {
+            let failure: string | undefined;
+            const { result, failed } = await ctx.board.runScopedBranch(
+              scopeKey,
+              subTask,
+              async (sInput) => {
+                const r = await run(sInput.initialTask, {
+                  depth: ctx.depth + 1,
+                  maxSteps: childMaxSteps,
+                  parent: ctx.agentName,
+                  scope: scopeKey,
+                  initialState: sInput.previousState,
+                  followUpQuestion: sInput.followUpQuestion,
+                  initialBoardCount: sInput.initialBoardRev,
+                  initialBoardSnapshot: sInput.initialBoardSnapshot,
+                  agentName: sInput.agentName,
+                  callStack: nextStack,
+                  ancestorTasks: nextAncestors,
+                  signal: childController.signal,
+                });
+                const outcome = outcomeOf(r);
+                if (outcome.error !== undefined) failure = outcome.error;
+                return {
+                  resultText: outcome.text,
+                  answer: r.answer,
+                  state: r.state ?? { blocks: [], latest: undefined },
+                  ...(outcome.failed ? { failed: true } : {}),
+                };
+              },
+              { depth: ctx.depth + 1, parent: ctx.agentName },
+            );
+            return commitIfComplete({
+              text: result,
+              failed: failed === true,
+              scope: scopeKey,
+              ...(failure !== undefined ? { error: failure } : {}),
+            });
+          }
+          const r = await run(subTask, {
+            depth: ctx.depth + 1,
+            maxSteps: childMaxSteps,
+            parent: ctx.agentName,
+            scope: scopeKey,
+            callStack: nextStack,
+            ancestorTasks: nextAncestors,
+            signal: childController.signal,
+          });
+          return commitIfComplete(outcomeOf(r));
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return {
+            text: `[scope=${scopeKey}] branch failed: ${errMsg}`,
+            failed: true,
+            scope: scopeKey,
+            error: errMsg,
+          };
+        } finally {
+          outerSignal?.removeEventListener('abort', onOuterAbort);
+          leaveWorker();
         }
-        const r = await run(subTask, {
-          depth: ctx.depth + 1,
-          maxSteps: childMaxSteps,
-          parent: ctx.agentName,
-          scope: scopeKey,
-          callStack: nextStack,
-          ancestorTasks: nextAncestors,
-          signal: ctx.signal,
-        });
-        return outcomeOf(r);
       };
 
       if (tasks.length > 0) {
         const mergedTasks = mergeSubTasksByScope(tasks, ctx.store);
-        const outcomes = await Promise.all(mergedTasks.map((t) => runSingle(t.task, t.scope)));
-        const failures = outcomes.filter((outcome) => outcome.failed);
-        if (failures.length > 0) {
-          const details = failures
-            .map((outcome) => `${outcome.scope}: ${outcome.error ?? 'incomplete result'}`)
-            .join('; ');
-          throw new Error(`branch aborted: ${failures.length} of ${outcomes.length} subtasks failed (${details})`);
+        const maxTasks = opts.maxSpecialists ?? 200;
+        if (mergedTasks.length > maxTasks) {
+          throw new ToolArgumentError(
+            `too many branch tasks: ${mergedTasks.length} (max ${maxTasks}); split the call into smaller batches`,
+          );
         }
+        const outcomes = await Promise.all(mergedTasks.map((t) => runSingle(t.task, t.scope)));
         return buildReportIndex(outcomes, mergedTasks, ctx.store, opts.maxResultTokens ?? 6000);
       }
       const single = await runSingle(task ?? '', explicitScope);
       if (single.failed) {
+        const priorSummary = ctx.board?.getSpecialist(single.scope)?.latestSummary;
+        if (priorSummary !== undefined && priorSummary !== '') {
+          return `[scope=${single.scope}] follow-up failed (${single.error ?? 'incomplete result'}); preserved prior specialist report:\n${priorSummary}`;
+        }
         throw new Error(`branch aborted: ${single.scope}: ${single.error ?? 'incomplete result'}`);
       }
       const maxTokens = opts.maxResultTokens ?? 3000;
-      const report = storeReport(ctx.store, single.text, explicitScope ?? single.scope, task ?? 'branch task');
+      const report =
+        single.report ?? storeReport(ctx.store, single.text, explicitScope ?? single.scope, task ?? 'branch task');
       return `${excerptText(single.text, maxTokens)}\n\nFull report: \`${report.id}\` (${report.lines} lines, ~${report.tokens} tokens)`;
     },
   };

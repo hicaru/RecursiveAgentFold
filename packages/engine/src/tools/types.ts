@@ -59,9 +59,86 @@ export function argStringList(args: Record<string, unknown>, key: string): strin
   throw new ToolArgumentError(`argument "${key}" must be a list of strings`);
 }
 
-/** Render tool schemas for the system prompt (stable ordering => cache-stable). */
+/** Coerce parsed tool arguments to match the tool's JSONSchema property types. */
+export function coerceToolArguments(
+  args: Record<string, unknown>,
+  schema?: JSONSchema,
+): Record<string, unknown> {
+  const props = schema?.properties;
+  if (!props) return args;
+  const out: Record<string, unknown> = { ...args };
+  for (const [key, val] of Object.entries(out)) {
+    const prop = props[key];
+    if (!prop || val === undefined || val === null) continue;
+    const expectedType = Array.isArray(prop.type) ? prop.type[0] : prop.type;
+    if (expectedType === 'string' && typeof val !== 'string' && !Array.isArray(val)) {
+      out[key] = String(val);
+    } else if ((expectedType === 'number' || expectedType === 'integer') && typeof val === 'string') {
+      const trimmed = val.trim();
+      if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+        out[key] = Number(trimmed);
+      }
+    } else if (expectedType === 'boolean' && typeof val === 'string') {
+      const trimmed = val.trim().toLowerCase();
+      if (trimmed === 'true' || trimmed === 'false') {
+        out[key] = trimmed === 'true';
+      }
+    } else if (expectedType === 'array' && typeof val === 'string') {
+      out[key] = val
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+  }
+  return out;
+}
+
+/** Render a tool call in XML tag format for step history display. */
+export function formatToolCallXml(name: string, args: Record<string, unknown>): string {
+  const parts: string[] = [`<tool_call name="${name}">`];
+  for (const [k, v] of Object.entries(args)) {
+    if (v === undefined) continue;
+    if (k === 'tasks' && Array.isArray(v)) {
+      for (const item of v) {
+        if (item && typeof item === 'object' && !Array.isArray(item)) {
+          const rec = item as Record<string, unknown>;
+          const scopeAttr = typeof rec.scope === 'string' && rec.scope ? ` scope="${rec.scope}"` : '';
+          parts.push(`<task${scopeAttr}>${String(rec.task ?? '')}</task>`);
+        } else {
+          parts.push(`<task>${String(item)}</task>`);
+        }
+      }
+    } else if (Array.isArray(v)) {
+      parts.push(`<${k}>${v.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(', ')}</${k}>`);
+    } else if (typeof v === 'object' && v !== null) {
+      parts.push(`<${k}>${JSON.stringify(v)}</${k}>`);
+    } else {
+      parts.push(`<${k}>${String(v)}</${k}>`);
+    }
+  }
+  parts.push('</tool_call>');
+  return parts.join('');
+}
+
+/** Render tool schemas in XML parameter format for the system prompt (stable ordering => cache-stable). */
 export function renderToolSchemas(tools: readonly Tool[]): string {
   return tools
-    .map((t) => JSON.stringify({ name: t.name, description: t.description, parameters: t.parameters }))
+    .map((t) => {
+      const props = t.parameters.properties ?? {};
+      const reqSet = new Set(Array.isArray(t.parameters.required) ? t.parameters.required : []);
+      const paramSpecs: string[] = [];
+      for (const [pName, pSchema] of Object.entries(props)) {
+        const baseType = Array.isArray(pSchema.type)
+          ? pSchema.type.join('|')
+          : pSchema.type === 'array' && pSchema.items?.type
+            ? `${Array.isArray(pSchema.items.type) ? pSchema.items.type.join('|') : pSchema.items.type}[]`
+            : (pSchema.type ?? 'string');
+        const enumPart = Array.isArray(pSchema.enum) ? ` [${pSchema.enum.map(String).join(' | ')}]` : '';
+        const reqPart = reqSet.has(pName) ? ', required' : '';
+        const descPart = pSchema.description ? `: ${pSchema.description}` : '';
+        paramSpecs.push(`<${pName}> (${baseType}${enumPart}${reqPart}${descPart})`);
+      }
+      return `- ${t.name}: ${t.description}\n  Parameters: ${paramSpecs.length > 0 ? paramSpecs.join('; ') : 'none'}`;
+    })
     .join('\n');
 }

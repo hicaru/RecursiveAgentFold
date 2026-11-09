@@ -3,7 +3,7 @@ import type { BenchDocument, BenchTask } from '../runner.js';
 import type { LongBenchRow } from './dataset.js';
 
 const HEADER_DELIMITER =
-  /(?:^|\n)(?=(?:={3,}\s*[^\n]+?\s*={3,}|-{3,}\s*(?:File|Document|Passage)[^\n]*|###\s*(?:File|Document|Passage)\b[^\n]*|(?:Document|Passage)\s+\d+\s*[:\n]|篇[一二三四五六七八九十\d]+\s*[：:]|片段\s*[A-Z\d]+\s*[：:]|\d+\s+[^\n]{2,40}论文[：:]|[A-Z]\.\n[A-Z][^\n]{10,150}\n))/g;
+  /(?:^|\n)(?=(?:={3,}\s*[^\n]+?\s*={3,}|-{3,}\s*(?:File|Document|Passage)[^\n]*|###\s*(?:File|Document|Passage)\b[^\n]*|(?:Document|Passage)\s+\d+\s*[:\n]|[A-Z]\.\n[A-Z][^\n]{10,150}\n))/g;
 
 export function splitContextIntoDocuments(context: string, maxDocs = 32): BenchDocument[] {
   const parts = context
@@ -49,7 +49,7 @@ export function splitContextIntoDocuments(context: string, maxDocs = 32): BenchD
 export function parseChoiceLetter(output: string): string | undefined {
   const trimmed = output.trim();
   const explicit =
-    /(?:answer|choice|option|答案|选项)\s*(?:is|:|：)?\s*\(?([ABCD])\)?(?:\b|$)/i.exec(trimmed) ??
+    /(?:answer|choice|option)\s*(?:is|:)?\s*\(?([ABCD])\)?(?:\b|$)/i.exec(trimmed) ??
     /^\(?([ABCD])\)?(?:[.\s:]|$)/i.exec(trimmed);
   if (explicit && explicit[1]) return explicit[1].toUpperCase();
   const allMatches = [...trimmed.matchAll(/\b([ABCD])\b/g)];

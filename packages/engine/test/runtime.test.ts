@@ -11,6 +11,7 @@ import { ScriptedLLM } from '../src/llm/mock.js';
 import { RecursiveAgentFold } from '../src/runtime.js';
 import { computeChunkTokens, formatMarginNote, LLMQueryEngine } from '../src/tools/llm-query.js';
 import { UsageTracker } from '../src/llm/usage.js';
+import { defaultEstimator } from '../src/tokens.js';
 import type { AgentEvent } from '../src/agent/events.js';
 import type { LLMClient } from '../src/types.js';
 import { AgentFoldAgent, extractFallbackAnswer } from '../src/agent/agent-fold.js';
@@ -161,10 +162,14 @@ describe('RecursiveAgentFold end-to-end (scripted)', () => {
     const res = await raf.run('What is the vault passcode for project Orion?');
     expect(res.answer).toBe('7341');
     expect(res.terminated).toBe('answer');
-    // at step 3 the latest interaction is step 2 → range end is normalized to 2
-    expect(res.state.blocks).toEqual([{ from: 0, to: 2, summary: 'Passcode confirmed 7341.' }]);
+    // Root defers deep folds to granular [2, 2] to preserve append-only prefix cache across turns
+    expect(res.state.blocks).toEqual([
+      { from: 0, to: 0, summary: 'llm_query located passcode at ctx L21007.' },
+      { from: 1, to: 1, summary: 'Read line: passcode 7341.' },
+      { from: 2, to: 2, summary: 'Passcode confirmed 7341.' },
+    ]);
     const folds = events.filter((e) => e.type === 'fold' && e.agent === 'root');
-    expect(folds.map((f) => (f.type === 'fold' ? f.outcome.kind : ''))).toEqual(['granular', 'granular', 'deep']);
+    expect(folds.map((f) => (f.type === 'fold' ? f.outcome.kind : ''))).toEqual(['granular', 'granular', 'granular']);
     const toolResults = events.filter((e) => e.type === 'tool_result');
     expect(toolResults.some((e) => e.type === 'tool_result' && e.name === 'branch' && e.observation.includes('7341 (ctx:21007)'))).toBe(true);
     // the big document never entered the root context
@@ -265,11 +270,11 @@ describe('RecursiveAgentFold end-to-end (scripted)', () => {
     const res = await agent.run('What is the passcode?');
     expect(res.answer).toBe('7341');
     const folds = events.filter((e): e is Extract<AgentEvent, { type: 'fold' }> => e.type === 'fold');
-    expect(folds.map((f) => f.outcome.kind)).toEqual(['granular', 'granular', 'granular', 'deep', 'deep']);
+    expect(folds.map((f) => f.outcome.kind)).toEqual(['granular', 'granular', 'granular', 'deep', 'granular']);
     expect(folds[1]?.outcome.directive.range).toEqual([1, 1]);
     expect(folds[1]?.outcome.corrections.some((c) => c.includes('deferred to granular'))).toBe(true);
     expect(folds[3]?.outcome.directive.range).toEqual([0, 3]);
-    expect(folds[4]?.outcome.directive.range).toEqual([0, 4]);
+    expect(folds[4]?.outcome.directive.range).toEqual([4, 4]);
   });
 it('ResearchBoard records entries, deduplicates, and provides byte-identical prefix across steps', async () => {
     const board = new ResearchBoard();
@@ -278,7 +283,7 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
       kind: 'llm_query',
       scope: 'ctx@8192:1-end',
       key: 'extract:count categories',
-      summary: 'counts(1/1块): cat=60, dog=60',
+      summary: 'counts(1/1 chunks): cat=60, dog=60',
       counts: { cat: 60, dog: 60 },
     });
     expect(board.entries()).toHaveLength(1);
@@ -291,11 +296,11 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
       kind: 'llm_query',
       scope: 'ctx@8192:1-end',
       key: 'extract:count categories',
-      summary: 'counts(1/1块): cat=65, dog=60',
+      summary: 'counts(1/1 chunks): cat=65, dog=60',
       counts: { cat: 65, dog: 60 },
     });
     expect(board.entries()).toHaveLength(1);
-    expect(board.entries()[0]?.summary).toBe('counts(1/1块): cat=65, dog=60');
+    expect(board.entries()[0]?.summary).toBe('counts(1/1 chunks): cat=65, dog=60');
 
     // Snapshot rendered in AgentFoldAgent and stays byte-identical across steps
     const store = new ContextStore();
@@ -322,7 +327,7 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
     state0.applyFold({ range: [0, 0], summary: 'found 1 cat' });
     const msg1 = agent.buildMessages('Count animals', state0);
 
-    // Prefix up to ### 任务 should be byte-identical
+    // Prefix up to ### Task should be byte-identical
     const prefix0 = msg0[1]!.content.split('### Previous Steps')[0]!;
     const prefix1 = msg1[1]!.content.split('### Previous Steps')[0]!;
     expect(prefix0).toBe(prefix1);
@@ -395,7 +400,7 @@ it('ResearchBoard records entries, deduplicates, and provides byte-identical pre
     expect(res.answer).toBe('8 and 250');
     expect(branchPrompts).toHaveLength(3);
 
-    // Follow-up call (3rd branch prompt) must preserve [压缩步骤 0] and [压缩步骤 1] and include ### 协同追问
+    // Follow-up call (3rd branch prompt) must preserve [Compressed Step 0] and [Compressed Step 1] and include ### Follow-up Question
     const firstPrompt = branchPrompts[0] ?? '';
     const followUpPrompt = branchPrompts[2] ?? '';
     expect(followUpPrompt).toContain('[Compressed Step 0]');
@@ -865,7 +870,7 @@ describe('accuracy & prefix cache hardening (H2a, H2b, H2c, H3)', () => {
     const store = new ContextStore();
     store.add('target_value = 99', { id: 'ctx' });
     const responses = [
-      '<motivation>wait</motivation><answer>暂无最终答案，继续验证中</answer>',
+      '<motivation>wait</motivation><answer>Pending verification, still verifying</answer>',
       '<motivation>wait more</motivation><answer>No final answer yet, still verifying.</answer>',
       '<motivation>done</motivation><answer>99</answer>',
     ];
@@ -918,7 +923,7 @@ describe('accuracy & prefix cache hardening (H2a, H2b, H2c, H3)', () => {
       { store, usage: new UsageTracker(), depth: 0, agentName: 'root', step: 0, emit: () => {} },
     );
     expect(out).toMatch(/doc lines 1-(\d+) of 20 \(stopped at line \1 due to token limit; read from \d+ to continue\)/);
-    expect(out).not.toContain('已截断');
+    expect(out).not.toContain('truncated');
     const returnedRowNums = [...out.matchAll(/^\d+\| Row_(\d+):/gm)].map((m) => Number(m[1]));
     expect(returnedRowNums.length).toBeGreaterThan(1);
     expect(returnedRowNums.length).toBeLessThan(20);
@@ -991,7 +996,7 @@ describe('rlm.pi best practices port & root cache optimization (H1-H6)', () => {
     const store = new ContextStore();
     const filler = Array.from({ length: 300 }, (_, i) => `Line ${i + 1}: routine administrative notes and general log records.`);
     filler[140] = 'Section 4: The agency is modernising sustainable healthcare innovations across regional hospitals.';
-    filler[240] = '第五卷：黄帝之曾孙颛顼高阳氏登帝位，定历法而理四时。';
+    filler[240] = 'Volume 5: Zhuanxu Gaoyang ascended the throne and established the calendar for the four seasons.';
     store.add(filler.join('\n'), { id: 'report', title: 'Annual Report' });
 
     const enHits = store.search('sustainable healthcare innovation', { k: 5 });
@@ -1001,11 +1006,11 @@ describe('rlm.pi best practices port & root cache optimization (H1-H6)', () => {
     expect(enHits[0]?.endLine).toBeGreaterThanOrEqual(141);
     expect(enHits[0]?.snippet).toContain('modernising sustainable healthcare innovations');
 
-    const cjkHits = store.search('颛顼 黄帝 曾孙', { k: 3 });
-    expect(cjkHits.length).toBeGreaterThan(0);
-    expect(cjkHits[0]?.startLine).toBeLessThanOrEqual(241);
-    expect(cjkHits[0]?.endLine).toBeGreaterThanOrEqual(241);
-    expect(cjkHits[0]?.snippet).toContain('颛顼');
+    const volHits = store.search('Zhuanxu Gaoyang calendar', { k: 3 });
+    expect(volHits.length).toBeGreaterThan(0);
+    expect(volHits[0]?.startLine).toBeLessThanOrEqual(241);
+    expect(volHits[0]?.endLine).toBeGreaterThanOrEqual(241);
+    expect(volHits[0]?.snippet).toContain('Zhuanxu');
 
     const searchTool = createSearchTool();
     const searchObs = await searchTool.execute(
@@ -1024,7 +1029,7 @@ describe('rlm.pi best practices port & root cache optimization (H1-H6)', () => {
         'export class StorageEngine {',
         '  run() {}',
         '}',
-        '第二章 系统评估',
+        'Chapter 2 System Evaluation',
         'Evaluation details.',
       ].join('\n'),
       { id: 'spec', title: 'Spec' },
@@ -1037,7 +1042,7 @@ describe('rlm.pi best practices port & root cache optimization (H1-H6)', () => {
     expect(outlineObs).toContain('L1: # 1. Architecture Overview');
     expect(outlineObs).toContain('L3: ## 1.1 Storage Engine');
     expect(outlineObs).toContain('L4: export class StorageEngine {');
-    expect(outlineObs).toContain('L7: 第二章 系统评估');
+    expect(outlineObs).toContain('L7: Chapter 2 System Evaluation');
   });
 
   it('H2: Root (depth=0) defers mid-run deep folds below 16 blocks to preserve prefix cache, while branch (depth=1) consolidates at 6 blocks', async () => {
@@ -2055,9 +2060,20 @@ describe('DSH Plugin PTC bypass, multi-turn root continuity, and live file refre
       expect(bashCalls[0]?.description).toBe('Run bash to render output PNGs');
       const persisted = JSON.parse(
         await readFile(join(tmpDir, 'raf-engine', 'sessions', 'session-ptc-1.json'), 'utf8'),
-      ) as { rootState?: { blocks?: unknown[] }; initialQuestion?: string };
+      ) as {
+        version?: number;
+        rootState?: { blocks?: unknown[] };
+        initialQuestion?: string;
+        turnStatus?: string;
+        board?: { entries?: unknown[] };
+        docs?: Record<string, { text?: string }>;
+      };
+      expect(persisted.version).toBe(2);
       expect(Array.isArray(persisted.rootState?.blocks)).toBe(true);
       expect(persisted.initialQuestion).toContain('Render the diagrams');
+      expect(persisted.turnStatus).toBe('done');
+      expect(Array.isArray(persisted.board?.entries)).toBe(true);
+      expect(persisted.docs).toBeTypeOf('object');
     } finally {
       if (prevProfileDir === undefined) delete process.env.DSH_PROFILE_DIR;
       else process.env.DSH_PROFILE_DIR = prevProfileDir;
@@ -2145,7 +2161,8 @@ describe('DSH Plugin PTC bypass, multi-turn root continuity, and live file refre
     const turn2Prefix = turn2UserPrompt.split('### Previous Steps')[0] ?? '';
     expect(turn2Prefix).toBe(turn1Prefix);
     // Verify Turn 1 folded blocks are preserved in Turn 2
-    expect(turn2UserPrompt).toContain('**[Compressed Steps 0-34]** Completed all 35 verification steps');
+    expect(turn2UserPrompt).toContain('**[Compressed Step 0]** Completed verification step 0.');
+    expect(turn2UserPrompt).toContain('**[Compressed Step 34]** Completed all 35 verification steps');
     expect(turn2UserPrompt).toContain('**[Compressed Step 35]** Completed initial task; result: Turn 1 complete: sum = 100');
     expect(turn2UserPrompt).toContain('### Newly Added Documents');
     expect(turn2UserPrompt).toContain('extra.md');
@@ -2209,8 +2226,8 @@ describe('DSH Plugin PTC bypass, multi-turn root continuity, and live file refre
         return '<motivation>Read line 1 of docs/ARCHITECTURE.md</motivation><tool_call>{"name":"read","arguments":{"document":"docs/ARCHITECTURE.md","start_line":1,"end_line":1}}</tool_call>';
       }
       if (step === 1) {
-        // Summary contains literal <think>…</think> and <answer>子代理完成：cat 50，dog 50</answer>
-        return '<folding>{"range":[0,0],"summary":"Step 0 read ARCHITECTURE.md L1: optional <think>…</think>, <tool_call>{}</tool_call>, or <answer>子代理完成：cat 50，dog 50</answer>."}</folding><motivation>Now read line 2 for FINAL_SECRET</motivation><tool_call>{"name":"read","arguments":{"document":"docs/ARCHITECTURE.md","start_line":2,"end_line":2}}</tool_call>';
+        // Summary contains literal <think>…</think> and <answer>Subagent complete: cat 50, dog 50</answer>
+        return '<folding>{"range":[0,0],"summary":"Step 0 read ARCHITECTURE.md L1: optional <think>…</think>, <tool_call>{}</tool_call>, or <answer>Subagent complete: cat 50, dog 50</answer>."}</folding><motivation>Now read line 2 for FINAL_SECRET</motivation><tool_call>{"name":"read","arguments":{"document":"docs/ARCHITECTURE.md","start_line":2,"end_line":2}}</tool_call>';
       }
       return '<folding>{"range":[1,1],"summary":"Read line 2: FINAL_SECRET = 9001."}</folding><motivation>Complete</motivation><answer>FINAL_SECRET = 9001</answer>';
     });
@@ -2264,6 +2281,53 @@ describe('step usage, invalid cap, and truncated tool calls', () => {
     expect(llm.calls).toHaveLength(2);
   });
 
+  it('resets the invalid-step counter after a valid step', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const responses: Array<string | { readonly text: string; readonly usage: { readonly promptTokens: number; readonly completionTokens: number; readonly cachedTokens: number } }> = [
+      'not the protocol',
+      '<motivation>grep seed</motivation><tool_call>{"name":"grep","arguments":{"pattern":"seed"}}</tool_call>',
+      'not the protocol again',
+      '<answer>seed</answer>',
+    ];
+    const llm = new ScriptedLLM((_req, index) => responses[Math.min(index, responses.length - 1)]!);
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [createGrepTool()],
+      store,
+      maxFormatRetries: 0,
+      maxInvalidSteps: 1,
+    });
+    const res = await agent.run('find seed');
+    expect(res.terminated).toBe('answer');
+    expect(res.answer).toBe('seed');
+  });
+
+  it('stops an alternating invalid/valid loop with a total invalid cap', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const responses = [
+      'not the protocol',
+      '<motivation>grep seed</motivation><tool_call>{"name":"grep","arguments":{"pattern":"seed"}}</tool_call>',
+      'not the protocol',
+      '<motivation>grep seed again</motivation><tool_call>{"name":"grep","arguments":{"pattern":"seed"}}</tool_call>',
+      'not the protocol',
+    ];
+    const llm = new ScriptedLLM((_req, index) => responses[Math.min(index, responses.length - 1)]!);
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [createGrepTool()],
+      store,
+      maxFormatRetries: 0,
+      maxInvalidSteps: 2,
+      maxInvalidTotal: 2,
+    });
+    const res = await agent.run('find seed');
+    expect(res.terminated).toBe('error');
+    expect(res.error).toContain('invalid responses total');
+    expect(res.error).toContain('1 consecutive');
+  });
+
   it('rejects a tool call cut by the output token limit', async () => {
     const store = new ContextStore();
     store.add('seed line', { id: 'ctx' });
@@ -2294,6 +2358,23 @@ describe('step usage, invalid cap, and truncated tool calls', () => {
 });
 
 describe('step timeout', () => {
+  it('returns from a step timeout even when the provider ignores the abort signal', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const llm: LLMClient = {
+      profile: { name: 'deaf', contextWindow: 128_000, maxOutputTokens: 1024 },
+      complete() {
+        return new Promise(() => {});
+      },
+    };
+    const started = Date.now();
+    const agent = new AgentFoldAgent({ llm, tools: [], store, maxStepMs: 25 });
+    const res = await agent.run('find seed');
+    expect(res.terminated).toBe('error');
+    expect(res.error).toContain('step timeout');
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   it('aborts a stalled LLM call after maxStepMs', async () => {
     const store = new ContextStore();
     store.add('seed line', { id: 'ctx' });
@@ -2348,5 +2429,561 @@ describe('reasoning budget', () => {
         (event) => event.type === 'format_error' && event.errors.some((error) => error.includes('reasoning budget')),
       ),
     ).toBe(true);
+  });
+
+  it('estimates reasoning tokens when the provider omits reasoning_tokens', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const responses: Array<{ readonly text: string; readonly reasoning?: string }> = [
+      {
+        text: '<motivation>grep seed</motivation><tool_call>{"name":"grep","arguments":{"pattern":"seed"}}</tool_call>',
+        reasoning: 'x'.repeat(2_000),
+      },
+      { text: '<answer>seed</answer>' },
+    ];
+    const llm = new ScriptedLLM((_req, index) => responses[Math.min(index, responses.length - 1)]!);
+    const events: AgentEvent[] = [];
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [],
+      store,
+      maxFormatRetries: 1,
+      maxReasoningTokens: 100,
+      onEvent: (event) => events.push(event),
+    });
+    const res = await agent.run('find seed');
+    expect(res.answer).toBe('seed');
+    expect(
+      events.some(
+        (event) => event.type === 'format_error' && event.errors.some((error) => error.includes('reasoning budget')),
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects over-budget reasoning on a final answer too', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const responses = [
+      {
+        text: '<answer>seed</answer>',
+        usage: { promptTokens: 100, completionTokens: 10, cachedTokens: 0, reasoningTokens: 40_000 },
+      },
+      {
+        text: '<answer>seed</answer>',
+        usage: { promptTokens: 50, completionTokens: 5, cachedTokens: 0, reasoningTokens: 100 },
+      },
+    ];
+    const llm = new ScriptedLLM((_req, index) => responses[Math.min(index, responses.length - 1)]!);
+    const events: AgentEvent[] = [];
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [],
+      store,
+      maxFormatRetries: 1,
+      maxReasoningTokens: 32_000,
+      onEvent: (event) => events.push(event),
+    });
+    const res = await agent.run('find seed');
+    expect(res.answer).toBe('seed');
+    expect(
+      events.some(
+        (event) => event.type === 'format_error' && event.errors.some((error) => error.includes('reasoning budget')),
+      ),
+    ).toBe(true);
+  });
+});
+
+
+describe('host crash recovery helpers', () => {
+  it('does not overwrite a successful board summary with a failed follow-up', async () => {
+    const board = new ResearchBoard();
+    await board.runScopedBranch('lib_a', 'Study lib_a', async () => ({
+      resultText: 'A=1',
+      answer: 'A=1',
+      state: { blocks: [{ from: 0, to: 0, summary: 'A=1' }], latest: undefined },
+    }));
+    const before = board.entries()[0]?.summary;
+    const failed = await board.runScopedBranch(
+      'lib_a',
+      'Follow-up that fails',
+      async () => ({ resultText: 'transport down', answer: null, state: { blocks: [], latest: undefined }, failed: true }),
+    );
+    expect(failed.failed).toBe(true);
+    expect(board.entries()[0]?.summary).toBe(before);
+    expect(board.getSpecialist('lib_a')?.latestSummary).toContain('A=1');
+  });
+
+  it('round-trips a ResearchBoard snapshot and reuses specialist memory', async () => {
+    const board = new ResearchBoard();
+    await board.runScopedBranch('lib_a', 'Study lib_a', async () => ({
+      resultText: 'A=1',
+      answer: 'A=1',
+      state: { blocks: [{ from: 0, to: 0, summary: 'A=1' }], latest: undefined },
+    }));
+    const snapshot = board.snapshot();
+    const restored = ResearchBoard.restore(
+      JSON.parse(JSON.stringify(snapshot)) as ReturnType<ResearchBoard['snapshot']>,
+    );
+    expect(restored.entries()).toEqual(board.entries());
+    expect(restored.currentRev()).toBe(board.currentRev());
+    expect(restored.getSpecialist('lib_a')?.latestSummary).toBe('A=1');
+    let called = false;
+    const reused = await restored.runScopedBranch('lib_a', 'Study lib_a', async () => {
+      called = true;
+      return { resultText: 'different', answer: 'different', state: { blocks: [], latest: undefined } };
+    });
+    expect(reused.reused).toBe(true);
+    expect(reused.result).toBe('A=1');
+    expect(called).toBe(false);
+  });
+
+  it('restores a pending tool step and submits its saved observation without re-running it', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const first = new ScriptedLLM(
+      () => '<motivation>grep seed</motivation><tool_call>{"name":"grep","arguments":{"pattern":"seed"}}</tool_call>',
+    );
+    const agent = new AgentFoldAgent({ llm: first, tools: [createGrepTool()], store });
+    agent.begin('find seed');
+    const step = await agent.next();
+    expect(step.kind).toBe('tool');
+    const snapshot = agent.snapshot();
+    const pending = agent.snapshotPending();
+    if (snapshot === undefined || pending === undefined) throw new Error('missing pending state');
+
+    const second = new ScriptedLLM(() => '<answer>recovered</answer>');
+    const resumed = new AgentFoldAgent({
+      llm: second,
+      tools: [createGrepTool()],
+      store,
+      initialState: snapshot,
+    });
+    resumed.begin('find seed');
+    resumed.restorePending(pending);
+    resumed.submit('seed line');
+    const answer = await resumed.next();
+    expect(answer.kind).toBe('answer');
+    if (answer.kind !== 'answer') throw new Error('expected answer');
+    expect(answer.answer).toBe('recovered');
+  });
+
+  it('condenses an oversized prompt before the LLM call', async () => {
+    const store = new ContextStore();
+    const huge = 'x'.repeat(30_000);
+    const llm = new ScriptedLLM(() => '<answer>ok</answer>');
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [],
+      store,
+      maxPromptTokens: 6_000,
+      initialState: {
+        blocks: [],
+        latest: {
+          step: 0,
+          motivation: 'inspect',
+          action: { name: 'none', arguments: {} },
+          observation: huge,
+        },
+      },
+    });
+    agent.begin('find seed');
+    const step = await agent.next();
+    expect(step.kind).toBe('answer');
+    const first = llm.calls[0];
+    if (first === undefined) throw new Error('missing LLM call');
+    const rendered = first.messages.map((m) => m.content).join('\n');
+    expect(defaultEstimator.count(rendered)).toBeLessThanOrEqual(6_000);
+  });
+
+  it('times out a tool that ignores its signal', async () => {
+    const store = new ContextStore();
+    const events: AgentEvent[] = [];
+    const slowTool = {
+      name: 'slow',
+      description: 'never returns',
+      parameters: { type: 'object', properties: {} },
+      execute: () => new Promise<string>(() => {}),
+    };
+    let call = 0;
+    const llm = new ScriptedLLM(() => {
+      call += 1;
+      return call === 1
+        ? '<motivation>call slow</motivation><tool_call>{"name":"slow","arguments":{}}</tool_call>'
+        : '<answer>done</answer>';
+    });
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [slowTool],
+      store,
+      maxToolMs: 20,
+      onEvent: (event) => events.push(event),
+    });
+    const res = await agent.run('call slow');
+    expect(res.answer).toBe('done');
+    expect(
+      events.some(
+        (event) => event.type === 'tool_result' && (event.error ?? '').includes('tool timeout'),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('hidden stored reports', () => {
+  it('excludes hidden reports from generic search/grep/tally but keeps explicit access', () => {
+    const store = new ContextStore();
+    store.add('visible NEEDLE', { id: 'visible' });
+    store.add('hidden NEEDLE', { id: 'branch_report_test', manifest: false });
+    expect(store.grep('NEEDLE').perDoc).toEqual({ visible: 1 });
+    expect(store.tally('NEEDLE').totalMatches).toBe(1);
+    expect(store.search('NEEDLE').every((hit) => hit.docId === 'visible')).toBe(true);
+    expect(store.grep('NEEDLE', { docIds: ['branch_report_test'] }).perDoc).toEqual({ branch_report_test: 1 });
+  });
+});
+
+
+describe('DSH surface budget', () => {
+  it('caps visible reasoning but keeps a marker', async () => {
+    const { capVisibleReasoning } = (await import('../../dsh-plugin/index.js' as string)) as {
+      capVisibleReasoning: (text: string) => string;
+    };
+    const capped = capVisibleReasoning('x'.repeat(20_000));
+    expect(capped.length).toBeLessThan(13_000);
+    expect(capped).toContain('reasoning shortened for display');
+    expect(capVisibleReasoning('short')).toBe('short');
+  });
+});
+
+
+describe('fallback answer', () => {
+  it('builds a final answer from successful branch summaries', async () => {
+    const { buildFallbackAnswer } = (await import('../../dsh-plugin/index.js' as string)) as {
+      buildFallbackAnswer: (turn: unknown) => string | undefined;
+    };
+    const board = new ResearchBoard();
+    board.record({ agent: 'specialist#1', kind: 'branch', scope: 'crates/aead', key: 'crates/aead', summary: 'A=1' });
+    const store = new ContextStore();
+    store.add('hidden', { id: 'branch_report_x', title: 'report x', manifest: false });
+    const answer = buildFallbackAnswer({
+      engine: { board },
+      store,
+      lastResultError: 'all four failed',
+    });
+    expect(answer).toContain('## crates/aead');
+    expect(answer).toContain('A=1');
+    expect(answer).toContain('all four failed');
+  });
+});
+
+describe('DSH conditional plugin tool bridging & root deep-fold cache preservation', () => {
+  it('bridges conditional DSH tools (web_search with { when }) to both root and branch subagents via withInitiator and tools.get fallback', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'raf-web-search-bridge-'));
+    const prevProfileDir = process.env.DSH_PROFILE_DIR;
+    process.env.DSH_PROFILE_DIR = tmpDir;
+    try {
+      await mkdir(join(tmpDir, 'raf-engine'), { recursive: true });
+      await writeFile(
+        join(tmpDir, 'raf-engine', 'state.json'),
+        JSON.stringify({
+          version: 1,
+          defaultEngine: 'raf',
+          engines: { 'session-web-1': 'raf' },
+          settings: { depth: 2, reserve: 0.3, concurrency: 4 },
+        }),
+        'utf8',
+      );
+      // Dynamic import exercises the untyped @raf/dsh-plugin ESM module boundary outside packages/engine rootDir.
+      const dshPlugin = (await import('../../dsh-plugin/index.js' as string)) as {
+        apply: (ctx: unknown) => void;
+      };
+      let currentInitiator: unknown;
+      const seenInitiators: unknown[] = [];
+      const webSearchQueries: string[] = [];
+      const mockAgent = {
+        id: 'session-web-1',
+        session: {
+          id: 'session-web-1',
+          header: { cwd: tmpDir },
+          snapshotEvents: () => [{ type: 'turn/start', data: { turn: 1 } }],
+          append: () => {},
+        },
+      };
+      const conditionalWebSearch = {
+        name: 'web_search',
+        description: 'Search the web via DeepSeek API',
+        parameters: {
+          type: 'object',
+          properties: { query: { type: 'string' } },
+          required: ['query'],
+        },
+        when: async () => true,
+        async execute(args: Record<string, unknown>) {
+          seenInitiators.push(currentInitiator);
+          webSearchQueries.push(String(args.query ?? ''));
+          return `WEB_RESULTS for ${String(args.query ?? '')}: ` + 'result_entry '.repeat(120);
+        },
+      };
+      const registered = new Map<string, typeof conditionalWebSearch>([['web_search', conditionalWebSearch]]);
+      const readyEmitter = new EventEmitter();
+      const toolsReady = once(readyEmitter, 'ready');
+      const baseExecutor = {
+        pipeline: {
+          source: {
+            get: () => undefined,
+          },
+        },
+      };
+      const mockToolsService = {
+        register(def: typeof conditionalWebSearch) {
+          registered.set(def.name, def);
+          if (def.name === 'branch') readyEmitter.emit('ready');
+          return () => registered.delete(def.name);
+        },
+        // Simulate @deepseek-ai/dsh-tools: executable returns undefined when toolSet is omitted for conditional { when } tools
+        executable(name: string, _scope: unknown, toolSet?: Set<string>) {
+          const def = registered.get(name);
+          if (!def) return undefined;
+          if ('when' in def && def.when !== undefined) {
+            return toolSet?.has(name) ? def : undefined;
+          }
+          return def;
+        },
+        get(name: string) {
+          return registered.get(name);
+        },
+        async resolve() {
+          return new Set(registered.keys());
+        },
+        definitions(_scope: unknown, toolSet?: Set<string>) {
+          return [...registered.values()].filter((d) => !('when' in d && d.when) || toolSet?.has(d.name));
+        },
+        selectExecutor(_scope?: unknown) {
+          return baseExecutor;
+        },
+        async execute(batch: {
+          calls: Array<{ id: string; name: string; arguments: string }>;
+          agent?: unknown;
+          signal?: AbortSignal;
+          toolSet?: Set<string>;
+        }) {
+          const exec = this.selectExecutor(batch.agent ?? mockAgent) as {
+            execute?: (b: typeof batch) => Promise<{ results: Array<{ callId: string; name: string; result: { isError: boolean; content: Array<{ type: string; text: string }>; value?: unknown } }> }>;
+          };
+          if (typeof exec.execute === 'function') return exec.execute(batch);
+          throw new Error('executor missing execute');
+        },
+      };
+      let streamInterceptor:
+        | ((options: Record<string, unknown>, next: () => unknown) => AsyncIterable<Record<string, unknown>>)
+        | undefined;
+      let callIdx = 0;
+      const mockCtx = {
+        tools: mockToolsService,
+        llm: {
+          async *stream(opts: Record<string, unknown>) {
+            const purpose = String(opts.purpose ?? '');
+            const stepNum = callIdx++;
+            let text: string;
+            if (purpose === 'raf-branch') {
+              const msgText = JSON.stringify(opts.messages ?? []);
+              text = msgText.includes('WEB_RESULTS')
+                ? '<folding>{"range":[0,0],"summary":"Found web results in subagent"}</folding><motivation>Done</motivation><answer>Subagent verified web_search results for RFC 9110: HTTP semantics specification details and status codes confirmed across all sections.</answer>'
+                : '<motivation>Run web_search in specialist</motivation><tool_call>{"name":"web_search","arguments":{"query":"RFC 9110"}}</tool_call>';
+            } else if (stepNum === 0) {
+              text =
+                '<motivation>Delegate web search to specialist</motivation>' +
+                '<tool_call>{"name":"branch","arguments":{"scope":"rfc9110","task":"Use web_search to research RFC 9110"}}</tool_call>';
+            } else {
+              text =
+                '<folding>{"range":[0,0],"summary":"Specialist verified RFC 9110 via web_search"}</folding>' +
+                '<motivation>Complete</motivation>' +
+                '<answer>WEB_SEARCH_BRIDGED_OK</answer>';
+            }
+            yield { type: 'text-delta', text };
+            yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 80 } };
+            yield { type: 'finish', reason: { kind: 'stop' } };
+          },
+        },
+        get(service: string) {
+          if (service === 'tools') return mockToolsService;
+          if (service === 'agents') {
+            return {
+              get: () => mockAgent,
+              list: () => [mockAgent],
+              currentInitiator: () => currentInitiator,
+              withInitiator: async <T>(agent: unknown, fn: () => Promise<T>) => {
+                const prev = currentInitiator;
+                currentInitiator = agent;
+                try {
+                  return await fn();
+                } finally {
+                  currentInitiator = prev;
+                }
+              },
+            };
+          }
+          if (service === 'workingDirectory') return { get: () => tmpDir };
+          return undefined;
+        },
+        effect(fn: () => void) {
+          fn();
+        },
+        on(
+          event: string,
+          handler: (options: Record<string, unknown>, next: () => unknown) => AsyncIterable<Record<string, unknown>>,
+        ) {
+          if (event === 'llm/stream') streamInterceptor = handler;
+          return () => {};
+        },
+        inject() {},
+      };
+
+      dshPlugin.apply(mockCtx);
+      await toolsReady;
+      if (!streamInterceptor) throw new Error('missing streamInterceptor');
+
+      const messages: Array<Record<string, unknown>> = [
+        {
+          id: 'msg-u1',
+          role: 'user',
+          content: [{ type: 'text', text: 'Search RFC 9110 via specialist' }],
+          source: { kind: 'user' },
+        },
+      ];
+      let finalAnswer = '';
+      for (let loop = 0; loop < 4; loop++) {
+        const stream = streamInterceptor(
+          { sessionId: 'session-web-1', provider: 'mock', model: 'mock-root', messages },
+          () => {
+            throw new Error('unexpected fallthrough');
+          },
+        );
+        let emittedCall: { id: string; name: string; arguments: string } | undefined;
+        for await (const chunk of stream) {
+          if (chunk.type === 'block-end') {
+            const block = chunk.block as { type: string; id?: string; name?: string; arguments?: string; text?: string };
+            if (block.type === 'tool-call' && block.id && block.name) {
+              emittedCall = { id: block.id, name: block.name, arguments: block.arguments ?? '{}' };
+            } else if (block.type === 'text' && block.text) {
+              finalAnswer = block.text;
+            }
+          }
+        }
+        if (!emittedCall) break;
+        const batchRes = await mockToolsService.execute({ calls: [emittedCall], agent: mockAgent });
+        const firstRes = batchRes.results[0];
+        messages.push({
+          id: `msg-t-${loop}`,
+          role: 'tool',
+          toolCallId: emittedCall.id,
+          isError: firstRes?.result.isError ?? false,
+          content: firstRes?.result.content ?? [],
+        });
+      }
+      expect(finalAnswer).toBe('WEB_SEARCH_BRIDGED_OK');
+      expect(webSearchQueries).toEqual(['RFC 9110']);
+      expect(seenInitiators[0]).toBe(mockAgent);
+    } finally {
+      if (prevProfileDir === undefined) delete process.env.DSH_PROFILE_DIR;
+      else process.env.DSH_PROFILE_DIR = prevProfileDir;
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps root Previous Steps 100% append-only across 20 steps and multi-turn follow-up even when deep fold [0,15] is requested', async () => {
+    const store = new ContextStore();
+    store.add('KEY_OMEGA = 777', { id: 'omega.md', title: 'omega.md' });
+    const initialManifest = store.manifest();
+    const initialDocIds = new Set(store.list().map((d) => d.id));
+    const foldKinds: string[] = [];
+    const turn1Prompts: string[] = [];
+    const rootTurn1 = new ScriptedLLM((req) => {
+      const user = req.messages[1]?.content ?? '';
+      turn1Prompts.push(user);
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+      if (step < 19) {
+        const foldRange = step === 16 ? '[0,15]' : `[${step - 1},${step - 1}]`;
+        const fold =
+          step > 0 ? `<folding>{"range":${foldRange},"summary":"Step ${step - 1} summary."}</folding>` : '';
+        return `${fold}<motivation>Step ${step}</motivation><tool_call>{"name":"calculator","arguments":{"expression":"${step}+1"}}</tool_call>`;
+      }
+      return '<folding>{"range":[0,18],"summary":"Final step 18 summary."}</folding><motivation>Answer</motivation><answer>777</answer>';
+    });
+    const raf1 = new RecursiveAgentFold({
+      rootLLM: rootTurn1,
+      store,
+      maxDepth: 0,
+      onEvent: (e) => {
+        if (e.type === 'fold' && e.agent === 'root') foldKinds.push(e.outcome.kind);
+      },
+    });
+    const turn1Res = await raf1.run('Verify 20 steps for KEY_OMEGA');
+    expect(turn1Res.answer).toBe('777');
+    expect(foldKinds.every((k) => k === 'granular')).toBe(true);
+
+    let turn2Prompt = '';
+    const rootTurn2 = new ScriptedLLM((req) => {
+      turn2Prompt = req.messages[1]?.content ?? '';
+      return '<motivation>Follow-up</motivation><answer>777 confirmed</answer>';
+    });
+    const raf2 = new RecursiveAgentFold({ rootLLM: rootTurn2, store, maxDepth: 0 });
+    raf2.begin('Verify 20 steps for KEY_OMEGA', {
+      initialState: turn1Res.state,
+      followUpQuestion: 'Confirm KEY_OMEGA',
+      initialManifest,
+      initialDocIds,
+    });
+    const step2 = await raf2.next();
+    expect(step2.kind).toBe('answer');
+    const lastTurn1 = turn1Prompts[turn1Prompts.length - 1] ?? '';
+    const turn1ThroughStep17 = lastTurn1.split('**[Step 18]**')[0] ?? '';
+    expect(turn2Prompt.startsWith(turn1ThroughStep17)).toBe(true);
+  });
+
+  it('executes end-to-end with pure XML <folding range="...">, <tool_call name="...">, and XML llm_query chunk findings', async () => {
+    const store = new ContextStore();
+    store.add('line 1: alpha\nline 2: ORION_KEY = "9942"\nline 3: omega', { id: 'doc_xml', title: 'XML test doc' });
+    const queryLLM = new ScriptedLLM((req) => {
+      const userMsg = req.messages.map((m) => m.content).join('\n');
+      if (userMsg.includes('Mode: EXTRACT')) {
+        return `<relevant>true</relevant>\n<counts>\nkey_line: 1\nother_line: 2\n</counts>\n<answer>1 key line and 2 other lines</answer>`;
+      }
+      return `<relevant>true</relevant>\n<answer>ORION_KEY is on line 2</answer>\n<evidence>\nL2: line 2: ORION_KEY = "9942"\n</evidence>`;
+    });
+    const rootLLM = new ScriptedLLM((req) => {
+      const user = req.messages[1]?.content ?? '';
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+      if (step === 0) {
+        return `<motivation>Locate ORION_KEY via llm_query</motivation>
+<tool_call name="llm_query">
+<query>Find ORION_KEY</query>
+<mode>locate</mode>
+</tool_call>`;
+      }
+      if (step === 1) {
+        return `<folding range="0-0">
+llm_query located ORION_KEY = "9942" at doc_xml:L2.
+</folding>
+<motivation>Count line categories via llm_query extract</motivation>
+<tool_call name="llm_query">
+<query>Count key_line vs other_line</query>
+<mode>extract</mode>
+<categories>key_line, other_line</categories>
+</tool_call>`;
+      }
+      return `<folding range="1-1">
+Verified counts: key_line = 1, other_line = 2.
+</folding>
+<motivation>All facts verified.</motivation>
+<answer>9942 (key_line=1, other_line=2)</answer>`;
+    });
+    const raf = new RecursiveAgentFold({ rootLLM, queryLLM, store, maxDepth: 0 });
+    const res = await raf.run('What is ORION_KEY and the category counts?');
+    expect(res.terminated).toBe('answer');
+    expect(res.answer).toBe('9942 (key_line=1, other_line=2)');
+    expect(res.formatIssues).toBe(0);
+    expect(res.state.blocks).toEqual([
+      { from: 0, to: 0, summary: 'llm_query located ORION_KEY = "9942" at doc_xml:L2.' },
+      { from: 1, to: 1, summary: 'Verified counts: key_line = 1, other_line = 2.' },
+    ]);
   });
 });

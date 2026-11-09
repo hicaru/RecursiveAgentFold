@@ -53,7 +53,7 @@ In `rlm.pi`, three mechanisms mutate the prompt prefix of `root` on every turn o
   - Implemented `Bm25DocumentIndex` in `packages/engine/src/context/bm25.ts` with 40-line overlapping windows (stride 20), deterministic English suffix stemming (`stemToken`), camelCase splitting, CJK unigram + bigram indexing (`\p{Script=Han}`), Robertson-Walker IDF, Rocchio Pseudo-Relevance Feedback (`PRF_FEEDBACK_DOCS = 3`, `PRF_EXPANSION_TERMS = 8`, `PRF_EXPANSION_WEIGHT = 0.4` when windows $\ge 12$), and adjacent query-term bigram phrase bonus (`PHRASE_BONUS_WEIGHT = 0.25`).
   - Added `store.search()` and `store.outline()` in `packages/engine/src/context/store.ts` and exposed `search` and `outline` tools in `packages/engine/src/tools/document-tools.ts`.
 - **Verification**:
-  - **Unit tests (`packages/engine/test/runtime.test.ts`)**: Verified that `store.search("sustainable healthcare innovation")` ranks the window containing morphological variants (`modernising`, `sustainable`, `innovation`) #1, CJK `store.search("颛顼 黄帝 曾孙")` ranks the exact classical Chinese window #1, and `store.outline()` extracts Markdown/code/Chinese section headers with 1-based line numbers.
+  - **Unit tests (`packages/engine/test/runtime.test.ts`)**: Verified that `store.search("sustainable healthcare innovation")` ranks the window containing morphological variants (`modernising`, `sustainable`, `innovation`) #1, `store.search("Zhuanxu Gaoyang calendar")` ranks the exact volume window #1, and `store.outline()` extracts Markdown/code/structural section headers with 1-based line numbers.
   - **Live probe (`prompt-check`)**: `search` probe (`1896 ms`, `0` LLM reader tokens, `1` window hit) and `outline` probe (`2729 ms`, `6` lines, `3` entries) both passed on the first attempt with `0` format errors.
 
 ### 3.2 Hypothesis H2: Root Orchestrator Decomposition Doctrine & Root Cache Prefix Protection
@@ -89,10 +89,10 @@ In `rlm.pi`, three mechanisms mutate the prompt prefix of `root` on every turn o
   - In `AgentFoldAgent.run()` (`packages/engine/src/agent/agent-fold.ts`), added a single-shot verification nudge (`verificationNudged`):
     1. **Case A (Truncated Read + Skipped Folding)**: When `state.latest` is a `read` observation containing `'stopped at line '` (token-limit truncation) and the model immediately emits `<answer>` while omitting `<folding>`, `AgentFoldAgent` nudges the model to fold the previous step and read the remaining lines before answering.
     2. **Case B (Bare Step-0 Answer on Large Corpus)**: When `step === 0` on a corpus $\ge 1,000$ tokens with an empty `ResearchBoard` and the model emits a bare `<answer>` without `<motivation>` or tool inspection, `AgentFoldAgent` nudges it once to inspect the documents first.
-  - Added `extractFallbackAnswer(rawText)` to salvage an unclosed `<answer>` tag or explicit `[Answer]` / `[答案]` block when `forcing` exhausts retries.
+  - Added `extractFallbackAnswer(rawText)` to salvage an unclosed `<answer>` tag or explicit `[Answer]` block when `forcing` exhausts retries.
 - **Verification (LongBench-Pro `b2d18db8`)**:
   - In baseline (`results/en-longbench-pro-20-d2`), `longbench-pro-b2d18db83b5088c6c0c7a2e98d458516736ebec2d7dc147f3b16ec10bee92baf` (`T3. Evidence-Grounded QA`, gold `ACE`) failed (`score = 0.000`, `1` format issue) after `read(1..80)` stopped at line 58 due to the token limit and the agent skipped `<folding>` at Step 1 and guessed `AE`.
-  - In `results/rlm-port-lbpro-slice`, the agent verified all options and answered `[答案]\nACE` (**`score = 1.000`**, `0` format errors).
+  - In `results/rlm-port-lbpro-slice`, the agent verified all options and answered `[Answer]\nACE` (**`score = 1.000`**, `0` format errors).
 
 ### 3.6 Hypothesis H6: Case-Exact vs Case-Insensitive `tally` Disambiguation
 

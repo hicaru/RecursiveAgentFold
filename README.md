@@ -138,5 +138,3 @@ Depth is the one knob that changes both quality and cost, so it was swept on Cod
 | 4 | 6/6 | 1.0000 | 4.3 | 272.9 s | $0.8772 | 80.1% | — |
 
 The step column is where depth pays. Depth 0 answers 6/6 but needs 11.5 steps, 63 folds and $0.2825; depth 1 falls to 5/6 (0.8333) at 2.3 steps and $0.6230; depth 2 recovers 6/6 at 2.7 steps and $0.6312. Depth 3 costs 1.38× depth 2 ($0.8729 / $0.6312) for the same 6/6, and depth 4 adds $0.0043 ($0.8772 - $0.8729) with no score change. The default is therefore `DEFAULT_MAX_DEPTH = 2` (`packages/engine/src/runtime.ts:24`).
-
-<!-- RAF-APPEND -->

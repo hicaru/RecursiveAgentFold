@@ -5,8 +5,8 @@ import { UsageTracker } from '../llm/usage.js';
 import { buildAgentSystemPrompt, FORCE_ANSWER, FORMAT_REMINDER, FORMAT_REPAIR, renderBlockLabel } from '../prompts/agent.js';
 import { parseAgentResponse, type ParsedResponse } from '../protocol/parser.js';
 import { defaultEstimator, truncateToTokens, type TokenEstimator } from '../tokens.js';
-import { renderToolSchemas, type Tool } from '../tools/types.js';
-import type { ChatMessage, LLMClient, LLMUsage } from '../types.js';
+import { coerceToolArguments, formatToolCallXml, renderToolSchemas, type Tool } from '../tools/types.js';
+import type { ChatMessage, LLMClient, LLMResponse, LLMUsage } from '../types.js';
 import type { AgentEvent, EventSink } from './events.js';
 
 export interface AgentFoldConfig {
@@ -21,10 +21,16 @@ export interface AgentFoldConfig {
   readonly minDeepFoldBlocks?: number;
   /** Re-ask the model when its response cannot be parsed. */
   maxFormatRetries?: number;
-  /** Maximum invalid responses before the step fails (default 3). */
+  /** Maximum consecutive invalid responses before the step fails (default 3). */
   maxInvalidSteps?: number;
+  /** Hard cap on invalid responses across the run (default 6). */
+  maxInvalidTotal?: number;
   /** Wall-clock budget for one engine step. Omit to disable. */
   maxStepMs?: number;
+  /** Wall-clock budget for one tool execution. Omit to disable. */
+  maxToolMs?: number;
+  /** Soft cap on rendered prompt tokens. Old summaries condense under pressure. */
+  maxPromptTokens?: number;
   /** Provider-reported reasoning budget for one call. Omit to disable. */
   maxReasoningTokens?: number;
   /** After maxSteps, ask once more for a final answer instead of failing. */
@@ -67,10 +73,10 @@ export type Termination = 'answer' | 'forced_answer' | 'max_steps' | 'error' | '
 /** Provider safety refusal (Z.ai 1301): no retry loop can repair the payload. */
 const PROVIDER_REFUSAL = /\/1301\]|unsafe or sensitive/i;
 /** Protocol tags belong outside the answer text. */
-const PROTOCOL_TAG = /<\s*\/?\s*(?:think|folding|folded_output|fold|折叠|motivation|explanation|动机|tool_call|answer)\b[^>]*>/i;
+const PROTOCOL_TAG = /<\s*\/?\s*(?:think|folding|folded_output|fold|motivation|explanation|tool_call|answer)\b[^>]*>/i;
 export const DEFAULT_MAX_OBSERVATION_TOKENS = 3200;
 export const DEFAULT_MIN_DEEP_FOLD_BLOCKS = 6;
-export const DEFAULT_ROOT_MIN_DEEP_FOLD_BLOCKS = 16;
+export const DEFAULT_ROOT_MIN_DEEP_FOLD_BLOCKS = Number.POSITIVE_INFINITY;
 
 /** Normalize text for the answer-echo guard. */
 function echoText(text: string): string {
@@ -107,15 +113,15 @@ function isRawAnswerEcho(raw: string, answer: string): boolean {
 }
 
 const PLACEHOLDER_ANSWER =
-  /^(?:暂无(?:最终)?答案|还在验证|继续验证|尚无答案|未完待续|no final answer(?: yet)?|still verifying|continuing verification|verification in progress)(?:\b|[，。,.!！])/i;
+  /^(?:no final answer(?: yet)?|still verifying|continuing verification|verification in progress|pending verification|to be continued|placeholder|todo|tbd|wip)(?:\b|[,.!:;—\-])/i;
 
-function isPlaceholderAnswer(answer: string): boolean {
+export function isPlaceholderAnswer(answer: string): boolean {
   const clean = echoText(answer);
   if (clean === '' || /^[\s.…\-—_]+$/u.test(clean)) return true;
   if (clean.length > 140) return false;
   return (
     PLACEHOLDER_ANSWER.test(clean) ||
-    /(?:暂无最终答案|继续验证中|尚未确定最终答案|need more steps to verify|(?:;\s*|^)(?:proceeding to|continuing to)\s+[a-z])/i.test(clean)
+    /(?:no final answer(?: yet)?|still verifying|continuing verification|verification in progress|pending verification|need more steps to verify|(?:;\s*|^)(?:proceeding to|continuing to)\s+[a-z])/i.test(clean)
   );
 }
 
@@ -128,7 +134,7 @@ export function extractFallbackAnswer(rawText: string): string | undefined {
       return cleaned;
     }
   }
-  const marker = /(?:^|\n)\s*(\[(?:Answer|答案)\]\s*[\s\S]+|(?:Final\s+)?Answer\s*:\s*[^\n]+)$/i.exec(rawText);
+  const marker = /(?:^|\n)\s*(\[Answer\]\s*[\s\S]+|(?:Final\s+)?Answer\s*:\s*[^\n]+)$/i.exec(rawText);
   if (marker?.[1]) {
     const cleaned = marker[1].trim();
     if (cleaned !== '' && !PROTOCOL_TAG.test(cleaned) && !isPlaceholderAnswer(cleaned)) {
@@ -181,6 +187,13 @@ function isReadAction(name: string): boolean {
   return /(?:^|_)read$/.test(name);
 }
 
+/** One parsed tool step that waits for the host to submit its observation. */
+export interface PendingAgentStep {
+  readonly step: number;
+  readonly motivation: string;
+  readonly action: ToolAction;
+}
+
 /**
  * The AgentFold loop (paper §3): perceive → reason → fold → act.
  * One LLM call per step; the context is rebuilt from the fold state each step.
@@ -202,8 +215,10 @@ export class AgentFoldAgent {
   private runQuestion = '';
   private formatIssues = 0;
   private invalidSteps = 0;
+  private invalidResponses = 0;
+  private formatErrorHistory: boolean[] = [];
   private verificationNudged = false;
-  private pending: { step: number; motivation: string; action: ToolAction } | undefined;
+  private pending: PendingAgentStep | undefined;
   private stepUsage: LLMUsage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
   private stepLastUsage: LLMUsage | undefined;
   private stepTimer: ReturnType<typeof setTimeout> | undefined;
@@ -259,6 +274,26 @@ export class AgentFoldAgent {
 
   private get maxSteps(): number {
     return this.cfg.maxSteps ?? 100;
+  }
+
+  /** Race the provider call against the step abort signal, even if the provider ignores it. */
+  private async completeWithSignal(request: Parameters<LLMClient['complete']>[0]): Promise<LLMResponse> {
+    const signal = request.signal;
+    if (signal === undefined) return this.cfg.llm.complete(request);
+    const signalReason = () =>
+      signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason ?? 'aborted'));
+    if (signal.aborted) throw signalReason();
+    const completion = this.cfg.llm.complete(request);
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(signalReason());
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([completion, aborted]);
+    } finally {
+      if (onAbort !== undefined) signal.removeEventListener('abort', onAbort);
+    }
   }
 
   private clearStepTimer(): void {
@@ -318,6 +353,92 @@ export class AgentFoldAgent {
     return this.started ? this.state.snapshot() : undefined;
   }
 
+  /** Detached pending tool step for host-side crash recovery. */
+  snapshotPending(): PendingAgentStep | undefined {
+    const pending = this.pending;
+    if (pending === undefined) return undefined;
+    return {
+      step: pending.step,
+      motivation: pending.motivation,
+      action: { name: pending.action.name, arguments: { ...pending.action.arguments } },
+    };
+  }
+
+  /** Reattach a pending tool step after restoring a snapshot. Never runs the tool. */
+  restorePending(pending: PendingAgentStep): void {
+    if (!this.started) throw new Error('restorePending() before begin()');
+    if (this.finished) throw new Error('restorePending() after run finished');
+    if (this.pending !== undefined) throw new Error('restorePending() while another tool step is pending');
+    if (pending.step !== this.state.currentStep) {
+      throw new Error(`restorePending: expected step ${this.state.currentStep}, got ${pending.step}`);
+    }
+    this.pending = {
+      step: pending.step,
+      motivation: pending.motivation,
+      action: { name: pending.action.name, arguments: { ...pending.action.arguments } },
+    };
+  }
+
+  private promptTokens(messages: readonly ChatMessage[]): number {
+    return this.estimator.count(messages.map((m) => m.content).join('\n'));
+  }
+
+  /** Condense old summaries under a prompt budget. Returns diagnostics when it acted. */
+  private enforcePromptBudget(
+    budget: number,
+    step: number,
+    tail?: string,
+  ): { beforeTokens: number; afterTokens: number; actions: string[] } | undefined {
+    const initial = this.promptTokens(this.buildMessages(this.runQuestion, this.state, tail));
+    if (initial <= budget) return undefined;
+    const actions: string[] = [];
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const messages = this.buildMessages(this.runQuestion, this.state, tail);
+      if (this.promptTokens(messages) <= budget) break;
+      const blocks = this.state.blocks;
+      if (blocks.length > 1) {
+        const count = Math.max(2, Math.floor(blocks.length / 2));
+        const merged = blocks
+          .slice(0, count)
+          .map((b) => b.summary)
+          .join('\n');
+        const summary = truncateToTokens(merged, Math.max(32, Math.floor(budget * 0.1)), this.estimator).text;
+        if (this.state.condensePrefix(count, summary) !== undefined) {
+          actions.push(`condensed ${count} old blocks`);
+          continue;
+        }
+      }
+      const latest = this.state.latest;
+      if (latest !== undefined) {
+        const observationChars = this.estimator.chars(Math.max(64, Math.floor(budget * 0.25)));
+        if (this.state.trimLatestObservation(observationChars)) {
+          actions.push('shortened latest observation');
+          continue;
+        }
+        const summary = truncateToTokens(
+          [...blocks.map((b) => b.summary), fallbackSummary(latest)].join('\n'),
+          Math.max(32, Math.floor(budget * 0.15)),
+          this.estimator,
+        ).text;
+        this.state.applyFold({ range: [blocks[0]?.from ?? latest.step, latest.step], summary });
+        actions.push('folded latest interaction into a summary');
+        continue;
+      }
+      break;
+    }
+    const after = this.promptTokens(this.buildMessages(this.runQuestion, this.state, tail));
+    if (after > budget) actions.push('prompt still exceeds budget');
+    this.emit({
+      type: 'context_budget',
+      agent: this.name,
+      step,
+      beforeTokens: initial,
+      afterTokens: after,
+      actions,
+    });
+    return { beforeTokens: initial, afterTokens: after, actions };
+  }
+
   /** Build C_t = (Q, T, S, I). Exposed for tests and cache analysis. */
   buildMessages(question: string, state: FoldState, extraUserTail?: string): ChatMessage[] {
     const blocks = state.blocks;
@@ -356,7 +477,9 @@ export class AgentFoldAgent {
         parts.push(`### Newly Added Documents\n${this.cfg.store.manifestFor(newDocIds)}`);
       }
     }
-    const storedReports = this.cfg.store.list().filter((doc) => !doc.manifest);
+    // Only the root owns the branch-report index. A specialist sees its own
+    // branch result inline; advertising sibling reports leaks other scopes.
+    const storedReports = this.depth === 0 ? this.cfg.store.list().filter((doc) => !doc.manifest) : [];
     if (storedReports.length > 0) {
       const lines = storedReports
         .slice(0, 50)
@@ -392,6 +515,8 @@ export class AgentFoldAgent {
     this.stepUsage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
     this.stepLastUsage = undefined;
     this.invalidSteps = 0;
+    this.invalidResponses = 0;
+    this.formatErrorHistory = [];
     this.clearStepTimer();
     this.finished = false;
     this.started = true;
@@ -436,7 +561,11 @@ export class AgentFoldAgent {
       this.stepLastUsage = undefined;
     }
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const messages = this.buildMessages(this.runQuestion, this.state, tail);
+      let messages = this.buildMessages(this.runQuestion, this.state, tail);
+      if (this.cfg.maxPromptTokens !== undefined) {
+        const adjusted = this.enforcePromptBudget(this.cfg.maxPromptTokens, step, tail);
+        if (adjusted !== undefined) messages = this.buildMessages(this.runQuestion, this.state, tail);
+      }
       if (attempt === 0) {
         this.emit({
           type: 'step_start',
@@ -452,7 +581,7 @@ export class AgentFoldAgent {
       let truncatedReasoning = false;
       let reasoningOverBudget = false;
       try {
-        const res = await this.cfg.llm.complete({ messages, temperature: this.cfg.temperature, signal: stepSignal, purpose: this.role });
+        const res = await this.completeWithSignal({ messages, temperature: this.cfg.temperature, signal: stepSignal, purpose: this.role });
         this.usage.record(this.role, res.usage, res.latencyMs);
         this.addStepUsage(res.usage);
         this.emit({
@@ -471,7 +600,15 @@ export class AgentFoldAgent {
         reasoning = res.reasoning;
         if (reasoning !== undefined) stepReasoning = reasoning;
         outputTruncated = res.finishReason === 'length' || res.finishReason === 'max-tokens';
-        const reasoningTokens = res.usage.reasoningTokens ?? 0;
+        // Some OpenAI-compatible providers omit completion_tokens_details.
+        // Fall back to the streamed reasoning text so the budget still applies.
+        const reportedReasoningTokens = res.usage.reasoningTokens;
+        const reasoningTokens =
+          reportedReasoningTokens !== undefined && reportedReasoningTokens > 0
+            ? reportedReasoningTokens
+            : reasoning !== undefined && reasoning !== ''
+              ? this.estimator.count(reasoning)
+              : 0;
         reasoningOverBudget =
           this.cfg.maxReasoningTokens !== undefined && reasoningTokens > this.cfg.maxReasoningTokens;
         truncatedReasoning =
@@ -483,7 +620,7 @@ export class AgentFoldAgent {
             text = reasoning.slice(tagMatch.index);
           }
         }
-        this.emit({ type: 'llm_response', agent: this.name, step, text: text.slice(0, 16_000), reasoning: reasoning?.slice(0, 16_000) });
+        this.emit({ type: 'llm_response', agent: this.name, step, text: text.slice(0, 16_000), ...(reasoning !== undefined ? { reasoning } : {}) });
       } catch (e) {
         this.usage.recordError(this.role);
         const message = (e as Error).message;
@@ -502,7 +639,7 @@ export class AgentFoldAgent {
       if (outputTruncated && p.answer === undefined && p.toolCall !== undefined) {
         p.errors.push('the <tool_call> hit the output token limit; split it into smaller steps');
       }
-      if (this.cfg.maxReasoningTokens !== undefined && p.answer === undefined && reasoningOverBudget) {
+      if (this.cfg.maxReasoningTokens !== undefined && reasoningOverBudget) {
         p.errors.push(`reasoning budget exceeded; keep internal thinking under ${this.cfg.maxReasoningTokens} tokens`);
       }
       if (forcing && !p.answer && p.errors.length === 0 && p.toolCall) p.errors.push('a final <answer> is required now');
@@ -546,7 +683,7 @@ export class AgentFoldAgent {
           step === 0 &&
           !this.isSpecialist &&
           p.motivation === undefined &&
-          this.cfg.store.totalTokens() >= 1000 &&
+          this.cfg.store.manifestTokens() >= 1000 &&
           (this.cfg.board === undefined || this.cfg.board.entries().length === 0)
         ) {
           this.verificationNudged = true;
@@ -593,15 +730,24 @@ export class AgentFoldAgent {
         };
       }
       this.invalidSteps += 1;
+      this.invalidResponses += 1;
+      this.formatErrorHistory.push(true);
+      if (this.formatErrorHistory.length > 6) this.formatErrorHistory.shift();
+      const windowErrors = this.formatErrorHistory.filter(Boolean).length;
       const maxInvalidSteps = this.cfg.maxInvalidSteps ?? 3;
-      if (this.invalidSteps > maxInvalidSteps) {
+      const maxInvalidTotal = this.cfg.maxInvalidTotal ?? 6;
+      if (
+        this.invalidSteps > maxInvalidSteps ||
+        this.invalidResponses > maxInvalidTotal ||
+        (this.formatErrorHistory.length >= 6 && windowErrors >= Math.max(3, maxInvalidSteps))
+      ) {
         return {
           kind: 'done',
           result: this.finalize({
             answer: null,
             steps: Math.max(0, step - this.startStep),
             terminated: 'error',
-            error: `format failure limit reached: ${this.invalidSteps} invalid responses (max ${maxInvalidSteps})`,
+            error: `format failure limit reached: ${this.invalidResponses} invalid responses total, ${this.invalidSteps} consecutive, ${windowErrors} in last ${this.formatErrorHistory.length} steps (max ${maxInvalidTotal} total / ${maxInvalidSteps} consecutive)`,
           }),
         };
       }
@@ -617,6 +763,10 @@ export class AgentFoldAgent {
       return this.next(true);
     }
 
+    // A valid step breaks the consecutive-invalid counter.
+    this.invalidSteps = 0;
+    this.formatErrorHistory.push(false);
+    if (this.formatErrorHistory.length > 6) this.formatErrorHistory.shift();
     // FOLD
     if (this.state.latest) {
       if (!parsed.folding) this.formatIssues++;
@@ -628,7 +778,7 @@ export class AgentFoldAgent {
       let deferredDeep = false;
       const defaultMinDeep = this.depth === 0 ? DEFAULT_ROOT_MIN_DEEP_FOLD_BLOCKS : DEFAULT_MIN_DEEP_FOLD_BLOCKS;
       const minDeep = this.cfg.minDeepFoldBlocks ?? defaultMinDeep;
-      if ((parsed.answer === undefined || this.isSpecialist) && requested.range[0] < latestStep && minDeep > 1) {
+      if (requested.range[0] < latestStep && minDeep > 1) {
         const wouldRetract = this.state.blocks.filter((b) => b.to >= requested.range[0]).length;
         if (wouldRetract < minDeep) {
           requested = { range: [latestStep, latestStep], summary: requested.summary };
@@ -739,6 +889,10 @@ export class AgentFoldAgent {
 
   /** Route an unprefixed model tool call to its prefixed twin when only that tool exists. */
   private resolveToolAction(action: ToolAction): ToolAction {
+    const finalize = (name: string, rawArgs: Record<string, unknown>): ToolAction => ({
+      name,
+      arguments: coerceToolArguments(rawArgs, this.toolMap.get(name)?.parameters),
+    });
     if (
       (action.name === 'read' || action.name === 'grep') &&
       this.toolMap.has(`raf_${action.name}`) &&
@@ -746,21 +900,21 @@ export class AgentFoldAgent {
       !('file_path' in action.arguments) &&
       !('path' in action.arguments)
     ) {
-      return { ...action, name: `raf_${action.name}` };
+      return finalize(`raf_${action.name}`, action.arguments);
     }
     if (this.toolMap.has(action.name)) {
-      return action;
+      return finalize(action.name, action.arguments);
     }
     const stripped = action.name.replace(/^(?:raf|ref)_/, '');
     if (stripped !== action.name && this.toolMap.has(stripped)) {
-      return { name: stripped, arguments: action.arguments };
+      return finalize(stripped, action.arguments);
     }
     if (this.toolMap.has(`raf_${action.name}`)) {
-      return { ...action, name: `raf_${action.name}` };
+      return finalize(`raf_${action.name}`, action.arguments);
     }
     for (const candidate of this.toolMap.keys()) {
       if (candidate.endsWith(`_${action.name}`)) {
-        return { ...action, name: candidate };
+        return finalize(candidate, action.arguments);
       }
     }
     if (action.name === 'subagent' || action.name === 'sub_agent' || action.name === 'task') {
@@ -776,13 +930,10 @@ export class AgentFoldAgent {
               : typeof rawArgs.description === 'string'
                 ? rawArgs.description
                 : undefined;
-        return {
-          name: branchName,
-          arguments: {
-            ...rawArgs,
-            ...(mappedTask !== undefined && rawArgs.task === undefined ? { task: mappedTask } : {}),
-          },
-        };
+        return finalize(branchName, {
+          ...rawArgs,
+          ...(mappedTask !== undefined && rawArgs.task === undefined ? { task: mappedTask } : {}),
+        });
       }
     }
     return action;
@@ -795,22 +946,56 @@ export class AgentFoldAgent {
       error = `Unknown tool "${name}"`;
       observation = `Error: unknown tool "${name}". Available tools: ${[...this.toolMap.keys()].join(', ')}`;
     } else {
+      const maxToolMs = this.cfg.maxToolMs;
+      const timed = maxToolMs !== undefined && Number.isFinite(maxToolMs) && maxToolMs > 0;
+      const controller = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let rejectTimeout: ((reason: Error) => void) | undefined;
+      const timeoutPromise = new Promise<never>((_resolve, reject) => {
+        rejectTimeout = reject;
+      });
+      const outer = this.cfg.signal;
+      const onAbort = () => controller.abort(outer?.reason);
+      if (timed) {
+        timer = setTimeout(() => {
+          controller.abort(new Error(`tool timeout after ${maxToolMs} ms: ${name}`));
+        }, maxToolMs);
+        timer.unref();
+        if (outer?.aborted) controller.abort(outer.reason);
+        else outer?.addEventListener('abort', onAbort, { once: true });
+        controller.signal.addEventListener(
+          'abort',
+          () => {
+            const reason = controller.signal.reason;
+            rejectTimeout?.(reason instanceof Error ? reason : new Error(String(reason)));
+          },
+          { once: true },
+        );
+        if (controller.signal.aborted) {
+          const reason = controller.signal.reason;
+          rejectTimeout?.(reason instanceof Error ? reason : new Error(String(reason)));
+        }
+      }
       try {
-        observation = await tool.execute(args, {
+        const toolPromise = tool.execute(args, {
           store: this.cfg.store,
           usage: this.usage,
           depth: this.depth,
           agentName: this.name,
           step,
           emit: (e) => this.emit(e),
-          signal: this.cfg.signal,
+          signal: timed ? controller.signal : this.cfg.signal,
           board: this.cfg.board,
           callStack: this.cfg.callStack,
           ancestorTasks: [...(this.cfg.ancestorTasks ?? []), this.cfg.followUpQuestion ?? this.currentTaskQuestion],
         });
+        observation = timed ? await Promise.race([toolPromise, timeoutPromise]) : await toolPromise;
       } catch (e) {
         error = (e as Error).message;
         observation = `Error: ${error}`;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        outer?.removeEventListener('abort', onAbort);
       }
     }
     return { text: observation, ...(error !== undefined ? { error } : {}) };
@@ -822,7 +1007,7 @@ export function renderLatest(i: Interaction): string {
   return [
     `**[Step ${i.step}]**`,
     `**Motivation:** ${i.motivation || '(none)'}`,
-    `**Tool Call:** ${JSON.stringify({ name: i.action.name, arguments: i.action.arguments })}`,
+    `**Tool Call:** ${formatToolCallXml(i.action.name, i.action.arguments)}`,
     `**Observation:**\n${i.observation}`,
   ].join('\n');
 }

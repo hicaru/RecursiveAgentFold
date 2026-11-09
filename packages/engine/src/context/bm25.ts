@@ -19,8 +19,6 @@ const STOP_WORDS: Readonly<Record<string, true>> = Object.freeze({
   of: true, on: true, or: true, that: true, the: true, to: true, was: true, were: true,
   will: true, with: true, this: true, these: true, those: true, what: true, which: true,
   who: true, whom: true, whose: true, when: true, where: true, why: true, how: true,
-  的: true, 了: true, 在: true, 是: true, 和: true, 与: true, 或: true, 及: true,
-  于: true, 中: true, 对: true, 为: true,
 });
 
 const SUFFIX_RULES: ReadonlyArray<readonly [string, string]> = Object.freeze([

@@ -31,6 +31,30 @@ export interface SpecialistSession {
   queue: Promise<void>;
 }
 
+/** JSON-safe specialist state. The queue is rebuilt on restore. */
+export interface SpecialistSessionSnapshot {
+  readonly scope: string;
+  readonly agentName: string;
+  readonly depth: number;
+  readonly parentAgent: string;
+  readonly initialTask: string;
+  readonly initialBoardRev: number;
+  readonly initialBoardCount: number;
+  readonly initialBoardSnapshot?: string;
+  readonly state: FoldStateSnapshot;
+  readonly latestSummary: string;
+  readonly historySummaries: readonly string[];
+  readonly qaMemo: readonly (readonly [string, string])[];
+}
+
+/** JSON-safe board snapshot for host-side persistence. */
+export interface ResearchBoardSnapshot {
+  readonly rev: number;
+  readonly specialistCounter: number;
+  readonly entries: readonly BoardEntry[];
+  readonly specialists: readonly SpecialistSessionSnapshot[];
+}
+
 export interface ScopedBranchRunInput {
   readonly isFollowUp: boolean;
   readonly initialTask: string;
@@ -231,6 +255,15 @@ export class ResearchBoard {
     return this._specialists.size;
   }
 
+  /** Remove one branch entry. Used to roll back an unsuccessful new task. */
+  removeBranchEntry(scope: string): boolean {
+    const norm = normalizeScopeKey(scope);
+    const index = this._entries.findIndex((entry) => entry.kind === 'branch' && normalizeScopeKey(entry.scope) === norm);
+    if (index < 0) return false;
+    this._entries.splice(index, 1);
+    return true;
+  }
+
   findCounts(scope?: string, categories?: readonly string[]): Readonly<Record<string, number>> | undefined {
     if (!categories || !categories.length) return undefined;
     const normCats = categories.map((c) => c.trim().toLowerCase());
@@ -355,48 +388,76 @@ export class ResearchBoard {
       targetSession.status = 'running';
       targetSession.activeTask = task.trim();
       try {
-        const out = await fn({
-          isFollowUp,
-          initialTask: targetSession.initialTask,
-          ...(isFollowUp ? { followUpQuestion: task.trim(), previousState: targetSession.state } : {}),
-          initialBoardRev: targetSession.initialBoardRev,
-          initialBoardCount: targetSession.initialBoardRev,
-          ...(targetSession.initialBoardSnapshot !== undefined
-            ? { initialBoardSnapshot: targetSession.initialBoardSnapshot }
-            : {}),
-          agentName: targetSession.agentName,
-        });
+        let out: ScopedBranchRunOutput;
+        try {
+          out = await fn({
+            isFollowUp,
+            initialTask: targetSession.initialTask,
+            ...(isFollowUp ? { followUpQuestion: task.trim(), previousState: targetSession.state } : {}),
+            initialBoardRev: targetSession.initialBoardRev,
+            initialBoardCount: targetSession.initialBoardRev,
+            ...(targetSession.initialBoardSnapshot !== undefined
+              ? { initialBoardSnapshot: targetSession.initialBoardSnapshot }
+              : {}),
+            agentName: targetSession.agentName,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          out = {
+            resultText: `[scope=${normScope}] branch failed: ${msg}`,
+            answer: null,
+            state: targetSession.state,
+            failed: true,
+          };
+        }
         if (out.failed === true) {
-          // Never cache a failed run: the next call must retry the specialist instead of reusing the error.
+          // Roll back a failed task atomically: no failure entry, no partial
+          // state, no cached answer. A prior successful summary stays intact.
+          if (targetSession.latestSummary === '') {
+            this._specialists.delete(normScope);
+            this.removeBranchEntry(normScope);
+          }
+          return { result: out.resultText, reused: false, scope: normScope, failed: true };
+        }
+        const previousState = targetSession.state;
+        const previousLatest = targetSession.latestSummary;
+        const previousHistory = [...targetSession.historySummaries];
+        const previousMemo = new Map(targetSession.qaMemo);
+        const entryIndex = this._entries.findIndex(
+          (entry) => entry.kind === 'branch' && normalizeScopeKey(entry.scope) === normScope,
+        );
+        const previousEntry = entryIndex >= 0 ? this._entries[entryIndex] : undefined;
+        try {
+          targetSession.state = out.state;
+          const cleanAns = (out.answer ?? out.resultText).replace(/\s+/g, ' ').trim().slice(0, 500);
+          if (cleanAns && !targetSession.historySummaries.includes(cleanAns)) {
+            targetSession.historySummaries.push(cleanAns);
+          }
+          const combinedSummary = targetSession.historySummaries.join(' | ');
+          targetSession.latestSummary =
+            isFollowUp && targetSession.latestSummary !== '' && !targetSession.latestSummary.includes(out.resultText)
+              ? `${targetSession.latestSummary}\n\n[follow-up] ${out.resultText}`
+              : out.resultText;
+          targetSession.qaMemo.set(normTask, out.resultText);
           this.record({
             agent: targetSession.agentName,
             kind: 'branch',
             scope: normScope,
             key: normScope,
-            summary: `${targetSession.agentName}: failed — ${out.resultText.slice(0, 200)}`,
+            summary: `${targetSession.agentName}: ${combinedSummary}`,
             inProgress: false,
           });
-          return { result: out.resultText, reused: false, scope: normScope, failed: true };
+        } catch (error) {
+          targetSession.state = previousState;
+          targetSession.latestSummary = previousLatest;
+          targetSession.historySummaries.length = 0;
+          targetSession.historySummaries.push(...previousHistory);
+          targetSession.qaMemo.clear();
+          for (const [key, value] of previousMemo) targetSession.qaMemo.set(key, value);
+          if (previousEntry !== undefined) this._entries[entryIndex] = previousEntry;
+          else this.removeBranchEntry(normScope);
+          throw error;
         }
-        targetSession.state = out.state;
-        const cleanAns = (out.answer ?? out.resultText).replace(/\s+/g, ' ').trim().slice(0, 500);
-        if (cleanAns && !targetSession.historySummaries.includes(cleanAns)) {
-          targetSession.historySummaries.push(cleanAns);
-        }
-        const combinedSummary = targetSession.historySummaries.join(' | ');
-        targetSession.latestSummary =
-          isFollowUp && targetSession.latestSummary !== '' && !targetSession.latestSummary.includes(out.resultText)
-            ? `${targetSession.latestSummary}\n\n[follow-up] ${out.resultText}`
-            : out.resultText;
-        targetSession.qaMemo.set(normTask, out.resultText);
-        this.record({
-          agent: targetSession.agentName,
-          kind: 'branch',
-          scope: normScope,
-          key: normScope,
-          summary: `${targetSession.agentName}: ${combinedSummary}`,
-          inProgress: false,
-        });
         return { result: out.resultText, reused: false, scope: normScope };
       } finally {
         targetSession.status = 'ready';
@@ -409,6 +470,101 @@ export class ResearchBoard {
       () => undefined,
     );
     return chained;
+  }
+
+  /** Detached JSON-safe state. Restored specialists are ready, never running. */
+  snapshot(): ResearchBoardSnapshot {
+    const specialists: SpecialistSessionSnapshot[] = [];
+    for (const s of this._specialists.values()) {
+      specialists.push({
+        scope: s.scope,
+        agentName: s.agentName,
+        depth: s.depth,
+        parentAgent: s.parentAgent,
+        initialTask: s.initialTask,
+        initialBoardRev: s.initialBoardRev,
+        initialBoardCount: s.initialBoardCount,
+        ...(s.initialBoardSnapshot !== undefined ? { initialBoardSnapshot: s.initialBoardSnapshot } : {}),
+        state: {
+          blocks: s.state.blocks.map((b) => ({ from: b.from, to: b.to, summary: b.summary })),
+          ...(s.state.latest !== undefined
+            ? {
+                latest: {
+                  step: s.state.latest.step,
+                  motivation: s.state.latest.motivation,
+                  action: { name: s.state.latest.action.name, arguments: { ...s.state.latest.action.arguments } },
+                  observation: s.state.latest.observation,
+                },
+              }
+            : {}),
+        },
+        latestSummary: s.latestSummary,
+        historySummaries: [...s.historySummaries],
+        qaMemo: [...s.qaMemo.entries()],
+      });
+    }
+    return {
+      rev: this._rev,
+      specialistCounter: this._specialistCounter,
+      entries: this._entries.map((e) => ({ ...e, ...(e.counts !== undefined ? { counts: { ...e.counts } } : {}) })),
+      specialists,
+    };
+  }
+
+  static restore(snapshot: ResearchBoardSnapshot): ResearchBoard {
+    if (snapshot === null || typeof snapshot !== 'object') throw new Error('invalid research board snapshot');
+    const board = new ResearchBoard();
+    let rev = Number.isInteger(snapshot.rev) && snapshot.rev >= 0 ? snapshot.rev : 0;
+    for (const e of snapshot.entries) {
+      const entry: BoardEntry = {
+        id: e.id,
+        rev: e.rev,
+        agent: e.agent,
+        kind: e.kind,
+        scope: e.scope,
+        key: e.key,
+        summary: e.summary,
+        ...(e.counts !== undefined ? { counts: Object.freeze({ ...e.counts }) } : {}),
+        ...(e.inProgress !== undefined ? { inProgress: e.inProgress } : {}),
+      };
+      board._entries.push(entry);
+      if (entry.rev > rev) rev = entry.rev;
+    }
+    board._rev = rev;
+    board._specialistCounter = Number.isInteger(snapshot.specialistCounter) && snapshot.specialistCounter >= 0 ? snapshot.specialistCounter : 0;
+    for (const s of snapshot.specialists) {
+      const scope = normalizeScopeKey(s.scope);
+      if (scope === '' || board._specialists.has(scope)) continue;
+      board._specialists.set(scope, {
+        scope,
+        agentName: s.agentName,
+        depth: s.depth,
+        parentAgent: s.parentAgent,
+        initialTask: s.initialTask,
+        initialBoardRev: s.initialBoardRev,
+        initialBoardCount: s.initialBoardCount,
+        ...(s.initialBoardSnapshot !== undefined ? { initialBoardSnapshot: s.initialBoardSnapshot } : {}),
+        status: 'ready',
+        state: {
+          blocks: s.state.blocks.map((b) => ({ from: b.from, to: b.to, summary: b.summary })),
+          ...(s.state.latest !== undefined
+            ? {
+                latest: {
+                  step: s.state.latest.step,
+                  motivation: s.state.latest.motivation,
+                  action: { name: s.state.latest.action.name, arguments: { ...s.state.latest.action.arguments } },
+                  observation: s.state.latest.observation,
+                },
+              }
+            : {}),
+        },
+        latestSummary: s.latestSummary,
+        historySummaries: [...s.historySummaries],
+        qaMemo: new Map(s.qaMemo.map(([k, v]) => [k, v])),
+        queue: Promise.resolve(),
+      });
+    }
+    return board;
   }
 
   async runAtomicBranch(key: string, fn: () => Promise<string>): Promise<{ result: string; reused: boolean }> {

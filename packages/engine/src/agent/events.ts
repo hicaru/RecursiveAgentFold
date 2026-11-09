@@ -31,6 +31,15 @@ export type AgentEvent =
   | { type: 'answer'; agent: string; step: number; answer: string }
   | { type: 'run_end'; agent: string; depth: number; steps: number; terminated: string }
   | {
+      type: 'branch_report';
+      agent: string;
+      step: number;
+      scope: string;
+      reportId: string;
+      tokens: number;
+      lines: number;
+    }
+  | {
       type: 'llm_query';
       agent: string;
       step?: number;
@@ -43,6 +52,14 @@ export type AgentEvent =
       chunkTokens: number;
       calls?: number;
       usage?: LLMUsage;
+    }
+  | {
+      type: 'context_budget';
+      agent: string;
+      step: number;
+      beforeTokens: number;
+      afterTokens: number;
+      actions: string[];
     }
   | { type: 'error'; agent: string; step?: number; message: string };
 

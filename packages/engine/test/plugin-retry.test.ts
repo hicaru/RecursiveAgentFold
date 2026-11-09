@@ -2,6 +2,8 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { OpenAICompatibleClient } from '../src/llm/openai-compatible.js';
+import { RateLimitCoordinator } from '../src/llm/rate-limit-gate.js';
 
 type StreamChunk = Record<string, unknown>;
 type Interceptor = (
@@ -158,7 +160,7 @@ describe('RAF LLM retry', () => {
     expect(blocks.find((block) => block.type === 'reasoning')?.text).toBe('GOOD-REASONING');
   });
 
-  it('does not turn a non-retryable failure into an answer', async () => {
+  it('turns a non-retryable failure into a saved fallback report', async () => {
     const sessionId = 'session-retry-fail';
     const harness = await createHarness(sessionId, () => [
       {
@@ -168,7 +170,107 @@ describe('RAF LLM retry', () => {
     ]);
     const { blocks, finish } = await runStep(harness, sessionId);
     expect(harness.calls()).toBe(1);
-    expect(blocks).toHaveLength(0);
-    expect(finish).toEqual({ kind: 'error', failure: { message: 'bad request', code: 'ERROR' } });
+    expect(finish).toEqual({ kind: 'stop' });
+    const text = blocks.find((block) => block.type === 'text')?.text;
+    expect(typeof text).toBe('string');
+    expect(text).toContain('bad request');
+  });
+
+  it('queues 12 parallel specialists through 10 consecutive 429/1302 rate-limit responses without dropping any task, and only terminates a solo agent after maxSoloRetries', async () => {
+    const gate = new RateLimitCoordinator({
+      baseDelayMs: 5,
+      maxDelayMs: 25,
+      staggerMs: 2,
+      maxSoloRetries: 8,
+    });
+    let rateLimitsRemaining = 10;
+    const wakeTimes: number[] = [];
+    const client = new OpenAICompatibleClient({
+      baseUrl: 'https://mock.provider/v1',
+      apiKey: 'test-key',
+      model: 'mock-model',
+      contextWindow: 128_000,
+      maxOutputTokens: 512,
+      rateLimitGate: gate,
+      fetchImpl: async () => {
+        wakeTimes.push(Date.now());
+        if (rateLimitsRemaining > 0) {
+          rateLimitsRemaining -= 1;
+          return new Response(
+            JSON.stringify({
+              error: {
+                code: '1302',
+                message: '您的账户已达到速率限制，请您控制请求频率',
+              },
+            }),
+            { status: 429, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            model: 'mock-model',
+            choices: [{ message: { content: '<answer>REPORT_OK</answer>' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 50, completion_tokens: 10 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    });
+
+    const results = await Promise.all(
+      Array.from({ length: 12 }, async (_, idx) => {
+        const leave = gate.enterWorker();
+        try {
+          const res = await client.complete({
+            messages: [{ role: 'user', content: `specialist ${idx + 1}` }],
+          });
+          return res.text;
+        } finally {
+          leave();
+        }
+      }),
+    );
+    expect(results).toHaveLength(12);
+    expect(results.every((text) => text === '<answer>REPORT_OK</answer>')).toBe(true);
+    expect(gate.activeWorkers).toBe(0);
+    expect(gate.inFlight).toBe(0);
+
+    // Now simulate a single solo agent (activeWorkers === 1) hitting 8 consecutive 429/1302 errors
+    const soloGate = new RateLimitCoordinator({
+      baseDelayMs: 2,
+      maxDelayMs: 8,
+      staggerMs: 1,
+      maxSoloRetries: 8,
+    });
+    let soloCalls = 0;
+    const soloClient = new OpenAICompatibleClient({
+      baseUrl: 'https://mock.provider/v1',
+      apiKey: 'test-key',
+      model: 'mock-model',
+      contextWindow: 128_000,
+      maxOutputTokens: 512,
+      rateLimitGate: soloGate,
+      fetchImpl: async () => {
+        soloCalls += 1;
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: '1302',
+              message: '您的账户已达到速率限制，请您控制请求频率',
+            },
+          }),
+          { status: 429, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    });
+    const leaveSolo = soloGate.enterWorker();
+    try {
+      await expect(
+        soloClient.complete({ messages: [{ role: 'user', content: 'solo request' }] }),
+      ).rejects.toThrow(/RATE_LIMIT_EXHAUSTED/);
+      expect(soloCalls).toBe(8);
+    } finally {
+      leaveSolo();
+    }
   });
 });

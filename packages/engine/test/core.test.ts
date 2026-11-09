@@ -104,16 +104,15 @@ Shift focus.
     expect(p.toolCall?.name).toBe('grep');
   });
 
-  it('parses real trace edge cases: Chinese quotes inside valid JSON, single-backslash regex, unclosed string, <folded_output>, and bare tally JSON (B5)', () => {
-    // B5a: ruler-131072-niah_single_3-0.jsonl:10 — Chinese quotes inside valid JSON string
-    const pChineseQuotes = parseAgentResponse(
-      '<folding>\n{"range": [0, 0], "summary": "在文档中定位了 needle 的位置，内容为：“One of the most important things...”"}\n</folding>\n<answer>Answer: 123</answer>',
+  it('parses real trace edge cases: smart quotes inside valid JSON, single-backslash regex, unclosed string, <folded_output>, and bare tally JSON (B5)', () => {
+    // B5a: ruler-131072-niah_single_3-0.jsonl:10 — smart quotes inside valid JSON string
+    const pSmartQuotes = parseAgentResponse(
+      '<folding>\n{"range": [0, 0], "summary": "Located the needle in the document: “One of the most important things...”"}\n</folding>\n<answer>Answer: 123</answer>',
       { expectFolding: true },
     );
-    expect(pChineseQuotes.errors).toEqual([]);
-    expect(pChineseQuotes.folding?.range).toEqual([0, 0]);
-    expect(pChineseQuotes.folding?.summary).toContain('“One of the most important things...”');
-
+    expect(pSmartQuotes.errors).toEqual([]);
+    expect(pSmartQuotes.folding?.range).toEqual([0, 0]);
+    expect(pSmartQuotes.folding?.summary).toContain('“One of the most important things...”');
     // B5b: longbench-66ec56dd821e116aacb1cd0e.jsonl:5 — single backslash in regex pattern
     const pRegex = parseAgentResponse(
       '<motivation>search init</motivation>\n<tool_call>\n{"name": "grep", "arguments": {"pattern": "self\\.name|def __init__"}}\n</tool_call>',
@@ -125,31 +124,30 @@ Shift focus.
 
     // B5c-1: codegraph-120000-diamond-1.jsonl:142 — missing closing quote before final brace
     const pUnclosedQuote = parseAgentResponse(
-      '<folding>{"range": [0, 3], "summary": "已完成所有依赖模块常量查询，各常量精确值均已确定。}</folding>\n<answer>Answer: 42</answer>',
+      '<folding>{"range": [0, 3], "summary": "Completed all dependency module constant queries; exact values are confirmed.}</folding>\n<answer>Answer: 42</answer>',
       { expectFolding: true },
     );
     expect(pUnclosedQuote.errors).toEqual([]);
     expect(pUnclosedQuote.folding?.range).toEqual([0, 3]);
-    expect(pUnclosedQuote.folding?.summary).toContain('各常量精确值均已确定。');
+    expect(pUnclosedQuote.folding?.summary).toContain('exact values are confirmed.');
 
     // B5c-2: longbench-pro-35ddea1dc...jsonl:9 — <folded_output> tag alias
     const pFoldedOutput = parseAgentResponse(
-      '<folded_output>{"range": [0, 0], "summary": "已读取第1-80行并记录关键事实"}</folded_output>\n<motivation>next</motivation>\n<tool_call>{"name": "read", "arguments": {"document": "context", "start_line": 81, "end_line": 160}}</tool_call>',
+      '<folded_output>{"range": [0, 0], "summary": "Read lines 1-80 and recorded key facts"}</folded_output>\n<motivation>next</motivation>\n<tool_call>{"name": "read", "arguments": {"document": "context", "start_line": 81, "end_line": 160}}</tool_call>',
       { expectFolding: true },
     );
     expect(pFoldedOutput.errors).toEqual([]);
-    expect(pFoldedOutput.folding?.summary).toBe('已读取第1-80行并记录关键事实');
+    expect(pFoldedOutput.folding?.summary).toBe('Read lines 1-80 and recorded key facts');
 
     // B5d: ruler-131072-fwe-0.jsonl:4 — bare JSON tally call without "name" or <tool_call>
     const pBareTally = parseAgentResponse(
-      '文档是随机连字符数字 token，其中混有真实英文单词。用 tally 对字母序列做精确频次统计即可一步拿到词频排行。{"pattern": "([A-Za-z]+)", "documents": ["haystack"], "case_sensitive": true, "top": 25}',
+      'The document contains random hyphenated numeric tokens mixed with English words. Use tally on alphabetic sequences to get word frequency rankings in one step. {"pattern": "([A-Za-z]+)", "documents": ["haystack"], "case_sensitive": true, "top": 25}',
       { expectFolding: false },
     );
     expect(pBareTally.errors).toEqual([]);
     expect(pBareTally.toolCall?.name).toBe('tally');
     expect(pBareTally.toolCall?.arguments.pattern).toBe('([A-Za-z]+)');
-    expect(pBareTally.motivation).toContain('用 tally 对字母序列做精确频次统计');
-
+    expect(pBareTally.motivation).toContain('Use tally on alphabetic sequences');
     // B5e: missing closing brace in nested arguments object
     const pMissingBrace = parseAgentResponse(
       '<motivation>search</motivation>\n<tool_call>\n{"name":"grep","arguments":{"pattern":"alpha|beta", "documents": ["context"], "max_matches": 10}\n</tool_call>',
@@ -159,15 +157,14 @@ Shift focus.
     expect(pMissingBrace.toolCall?.name).toBe('grep');
     expect(pMissingBrace.toolCall?.arguments.max_matches).toBe(10);
 
-    // B5f: longbench-66ec0c4c821e116aacb1994a.jsonl:36 — mixed <折叠>...</folding> tags
+    // B5f: mixed <fold>...</folding> tags
     const pMixedFoldTag = parseAgentResponse(
-      '<折叠>\n{"range": [4, 4], "summary": "步骤4已验证选项A成立"}\n</folding>\n<motivation>done</motivation>\n<answer>答案：A</answer>',
+      '<fold>\n{"range": [4, 4], "summary": "Step 4 verified option A holds"}\n</folding>\n<motivation>done</motivation>\n<answer>Answer: A</answer>',
       { expectFolding: true },
     );
     expect(pMixedFoldTag.errors).toEqual([]);
     expect(pMixedFoldTag.folding?.range).toEqual([4, 4]);
-    expect(pMixedFoldTag.folding?.summary).toBe('步骤4已验证选项A成立');
-
+    expect(pMixedFoldTag.folding?.summary).toBe('Step 4 verified option A holds');
     // Bare folding JSON before <motivation> without <folding> tag
     const pBareFold = parseAgentResponse(
       '{"range": [0, 0], "summary": "Step 0: grep found 0 matches"} <motivation>Next probe</motivation>\n<tool_call>{"name": "grep", "arguments": {"pattern": "test"}}</tool_call>',
@@ -188,6 +185,104 @@ Shift focus.
       summary: 'Verified years via tally on context: 1970=3, 1977=2.',
     });
   });
+
+  it('parses XML attribute/tag and key-value <folding> and <tool_call> formats without JSON escaping', () => {
+    // 1. XML attribute <folding range="0-2"> and <tool_call name="grep"> with unescaped quotes and backslashes
+    const pXml = parseAgentResponse(
+      `<folding range="0-2">
+Found KEY = "alpha\\beta" and regex \\d+ in {module_a} at doc:L42.
+</folding>
+<motivation>Search for init method with unescaped regex.</motivation>
+<tool_call name="grep">
+<pattern>def __init__\\(self, "cfg"\\)|self\\.name</pattern>
+<documents>doc_a, doc_b</documents>
+<max_matches>10</max_matches>
+</tool_call>`,
+      { expectFolding: true },
+    );
+    expect(pXml.errors).toEqual([]);
+    expect(pXml.folding).toEqual({
+      range: [0, 2],
+      summary: 'Found KEY = "alpha\\beta" and regex \\d+ in {module_a} at doc:L42.',
+    });
+    expect(pXml.toolCall).toEqual({
+      name: 'grep',
+      arguments: {
+        pattern: 'def __init__\\(self, "cfg"\\)|self\\.name',
+        documents: ['doc_a', 'doc_b'],
+        max_matches: 10,
+      },
+    });
+
+    // 2. Multi-task <tool_call name="branch"> with <task scope="..."> tags
+    const pBranchXml = parseAgentResponse(
+      `<folding range="1">Step 1 complete.</folding>
+<motivation>Dispatch parallel specialists.</motivation>
+<tool_call name="branch">
+<task scope="crates/aead">Audit "aead" nonce handling & constants</task>
+<task scope="crates/kdf">Audit HKDF derivation in crates/kdf</task>
+</tool_call>`,
+      { expectFolding: true },
+    );
+    expect(pBranchXml.errors).toEqual([]);
+    expect(pBranchXml.folding).toEqual({ range: [1, 1], summary: 'Step 1 complete.' });
+    expect(pBranchXml.toolCall).toEqual({
+      name: 'branch',
+      arguments: {
+        tasks: [
+          { scope: 'crates/aead', task: 'Audit "aead" nonce handling & constants' },
+          { scope: 'crates/kdf', task: 'Audit HKDF derivation in crates/kdf' },
+        ],
+      },
+    });
+
+    // 3. Nested HTML/XML inside <content> tag of <tool_call name="write"> preserved verbatim
+    const pWriteXml = parseAgentResponse(
+      `<motivation>Write HTML component.</motivation>
+<tool_call name="write">
+<file_path>src/App.html</file_path>
+<content>
+<div class="card">
+  <span>"Hello & Welcome"</span>
+</div>
+</content>
+</tool_call>`,
+      { expectFolding: false },
+    );
+    expect(pWriteXml.errors).toEqual([]);
+    expect(pWriteXml.toolCall).toEqual({
+      name: 'write',
+      arguments: {
+        file_path: 'src/App.html',
+        content: '<div class="card">\n  <span>"Hello & Welcome"</span>\n</div>',
+      },
+    });
+
+    // 4. Key-value fallback inside <folding> and <tool_call>
+    const pKv = parseAgentResponse(
+      `<folding>
+range: 2-4
+summary: Verified all 3 modules ("a", "b", "c").
+</folding>
+<motivation>Read lines 10-20.</motivation>
+<tool_call>
+name: read
+document: ctx
+start_line: 10
+end_line: 20
+</tool_call>`,
+      { expectFolding: true },
+    );
+    expect(pKv.errors).toEqual([]);
+    expect(pKv.folding).toEqual({
+      range: [2, 4],
+      summary: 'Verified all 3 modules ("a", "b", "c").',
+    });
+    expect(pKv.toolCall).toEqual({
+      name: 'read',
+      arguments: { document: 'ctx', start_line: 10, end_line: 20 },
+    });
+  });
 });
 
 describe('utils & CJK token estimation (B7)', () => {
@@ -199,13 +294,13 @@ describe('utils & CJK token estimation (B7)', () => {
       summary: 'Found "alpha" in doc',
     });
   });
-  it('estimates CJK tokens accurately and truncates Chinese text within token budget (B7)', () => {
-    const cjkText = '第'.repeat(3000);
+  it('estimates non-ASCII/CJK tokens accurately and truncates text within token budget (B7)', () => {
+    const cjkText = '\u4e00'.repeat(3000);
     const tokens = defaultEstimator.count(cjkText);
     expect(tokens).toBeGreaterThanOrEqual(2100);
     expect(tokens).toBeLessThanOrEqual(2200);
 
-    const longCjk = '中'.repeat(8000);
+    const longCjk = '\u4e2d'.repeat(8000);
     const trunc = truncateToTokens(longCjk, 2400, defaultEstimator);
     expect(trunc.truncated).toBe(true);
     expect(defaultEstimator.count(trunc.text)).toBeLessThanOrEqual(2500);

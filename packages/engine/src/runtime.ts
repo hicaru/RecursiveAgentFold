@@ -1,4 +1,4 @@
-import { AgentFoldAgent, type AgentFoldConfig, type AgentRunResult, type AgentStep } from './agent/agent-fold.js';
+import { AgentFoldAgent, type AgentFoldConfig, type AgentRunResult, type AgentStep, type PendingAgentStep } from './agent/agent-fold.js';
 import type { EventSink } from './agent/events.js';
 import type { ContextStore } from './context/store.js';
 import { ResearchBoard } from './context/board.js';
@@ -228,6 +228,17 @@ export class RecursiveAgentFold {
   /** Current root fold state for host-side persistence. */
   snapshot(): FoldStateSnapshot | undefined {
     return this.rootAgent?.snapshot();
+  }
+
+  /** Detached pending root tool step for host-side crash recovery. */
+  snapshotPending(): PendingAgentStep | undefined {
+    return this.rootAgent?.snapshotPending();
+  }
+
+  /** Reattach a pending root tool step after restoring a snapshot. */
+  restorePending(pending: PendingAgentStep): void {
+    if (!this.rootAgent) throw new Error('restorePending() called before begin()');
+    this.rootAgent.restorePending(pending);
   }
 
   /** Feed the root tool observation back into the fold state. */

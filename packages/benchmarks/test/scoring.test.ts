@@ -150,13 +150,13 @@ describe('ruler / mrcr / longbench-pro generators', () => {
   it('longbench-pro scores unicode item lists: ordered=1, unordered=0.5, wrong=0', () => {
     const rows = [
       {
-        _id: 'zh1',
+        _id: 'ret1',
         domain: 'T1. Retrieval & Ranking',
         difficulty: 'Easy',
         length: 'medium',
-        question: '检索条例。先输出「[答案]」标识符，再按行输出条例编号。',
-        answer: '第四十六条,第四十七条,第四十八条',
-        context: '第一章 总则\n'.padEnd(300, '条') + '第五章 运营服务',
+        question: 'Retrieve the articles. First output the "[Answer]" marker, then output each article number on its own line.',
+        answer: 'Article 46,Article 47,Article 48',
+        context: 'Chapter 1 General Provisions\n'.padEnd(300, 'x') + 'Chapter 5 Operational Services',
         token_length: 50_000,
       },
       {
@@ -174,10 +174,10 @@ describe('ruler / mrcr / longbench-pro generators', () => {
     const zh = tasks[0];
     const en = tasks[1];
     if (!zh || !en) throw new Error('missing tasks');
-    // exact ordered Chinese answer behind [答案] marker (no colon) → 1
-    expect(zh.score('[答案]\n第四十六条\n第四十七条\n第四十八条').score).toBe(1);
+    // exact ordered answer behind [Answer] marker (no colon) → 1
+    expect(zh.score('[Answer]\nArticle 46\nArticle 47\nArticle 48').score).toBe(1);
     // partial answer → 0 with hit stats
-    const miss = zh.score('Answer: 第四十六条');
+    const miss = zh.score('Answer: Article 46');
     expect(miss.score).toBe(0);
     expect(miss.extra?.hits).toBe(1);
     // reordered latin items → 0.5
@@ -194,11 +194,11 @@ describe('ruler / mrcr / longbench-pro generators', () => {
       en.score('[Answer]\nB.\nD.\nC.\nF.\nA.\nE.\n\nAnswer: [Answer] B. | D. | C. | F. | A. | E.').score,
     ).toBe(1);
 
-    // B9b: multi-document splitting on Chinese 篇一..篇三 and English A.\nTitle..C.\nTitle
+    // B9b: multi-document splitting on Passage 1..3 and English A.\nTitle..C.\nTitle
     const zhMulti = [
-      '篇一：量子计算综述\n' + '量子比特与超导电路研究进展。'.repeat(25),
-      '篇二：拓扑绝缘体\n' + '表面态与自旋轨道耦合实验。'.repeat(25),
-      '篇三：光子芯片\n' + '硅基光波导集成与纠缠源。'.repeat(25),
+      'Passage 1: Quantum Computing Survey\n' + 'Qubit and superconducting circuit progress. '.repeat(25),
+      'Passage 2: Topological Insulators\n' + 'Surface states and spin-orbit coupling experiments. '.repeat(25),
+      'Passage 3: Photonic Chips\n' + 'Silicon waveguide integration and entanglement sources. '.repeat(25),
     ].join('\n\n');
     const zhDocs = splitContextIntoDocuments(zhMulti);
     expect(zhDocs.length).toBe(3);

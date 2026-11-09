@@ -55,7 +55,7 @@ For a RAF Session, the plugin builds a `ContextStore` from the Session transcrip
 
 The engine exposes `begin(question)`, `next()`, and `submit(observation)`. `next()` returns a tool action without executing it, so the native loop executes the tool and the next `next()` receives the observation. `AgentFoldAgent.run()` is the same loop with in-process tool execution, so CLI and benchmark behavior is unchanged.
 
-Root calls always use the Session provider and model through `ctx.llm`; RAF does not override the native root model. Branch and reader routes come from the settings panel: branch has a provider, model, and optional reasoning effort; `llm_query` has a provider and model and never sends a reasoning effort. Deployment can still override `RAF_BRANCH_PROVIDER`/`RAF_BRANCH_MODEL` and `RAF_QUERY_PROVIDER`/`RAF_QUERY_MODEL`; root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 16,384 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. The root has a 100-step cap, a 10-minute per-step budget, and a 3-invalid-response cap. A step reports only its last LLM attempt to the DSH token meter, so retries and branch sub-agents do not look like one huge prompt. Internal calls are tagged with an `AsyncLocalStorage` guard and a `raf-*` `purpose` value, so the listener does not intercept them again.
+Root calls always use the Session provider and model through `ctx.llm`; RAF does not override the native root model. Branch and reader routes come from the settings panel: branch has a provider, model, and optional reasoning effort; `llm_query` has a provider and model and never sends a reasoning effort. Deployment can still override `RAF_BRANCH_PROVIDER`/`RAF_BRANCH_MODEL` and `RAF_QUERY_PROVIDER`/`RAF_QUERY_MODEL`; root and reader calls use temperature 0. Root calls use a 16,000-token output budget and reader calls 16,384 tokens, matching `RAF_ROOT_MAX_OUTPUT` / `RAF_QUERY_MAX_OUTPUT`. The root has a 100-step cap, a 32k reasoning cap, a 3-consecutive-invalid-response cap, and a 6-invalid-response total cap. RAF deliberately has no hard step/tool/branch-task timeout: it waits while an agent is working. Provider rate limits (`429` / `1302`) use a shared exponential backoff gate and retry until the user aborts or the provider succeeds. The engine also condenses old fold summaries when the rendered prompt exceeds 60% of the model context, so DSH's own compaction does not inherit an oversized RAF prompt. A step reports only its last LLM attempt to the DSH token meter, so retries and branch sub-agents do not look like one huge prompt. Internal calls are tagged with an `AsyncLocalStorage` guard and a `raf-*` `purpose` value, so the listener does not intercept them again.
 
 DSH marks internal calls with `purpose` (`session-title`, `compaction`, `auto-review`, `onboarding_use_case`). The listener passes every such call through. RAF therefore never answers a title prompt or a compaction summary.
 
@@ -75,7 +75,7 @@ The brief therefore says: this is a repository-wide study, not a docs-only summa
 
 RAF does not write display-only session events. The native DSH loop writes them:
 
-- the plugin streams the RAF model's reasoning deltas as a native **reasoning block**; protocol tags and placeholders are removed, so reasoning never looks like a tool call or an answer; the actual tool-call blocks stay separate;
+- the plugin streams the RAF model's reasoning deltas as a native **reasoning block**; protocol tags and placeholders are removed, so reasoning never looks like a tool call or an answer; visible streaming is capped at 12k characters per step (head plus tail marker), while the full reasoning stays in the RAF run registry; the actual tool-call blocks stay separate;
 - when the step settles, the same assistant message carries the tool-call block; the native tool pipeline appends `tool/call` and `tool/result`;
 - Chat renders the visible reasoning text and the native tool rows, including the running `Deep diving` status;
 - the native tool pipeline and session log remain the source of truth for tool rows;
@@ -97,7 +97,10 @@ The Host feeds engine `onEvent` records into the RAF run registry. The branch ca
 
 ### Branch reports and state
 
-`branch(tasks=[...])` stores every full subtask report in `ContextStore` under a `branch_report_*` document. The root receives a compact index with every subtask header and a short excerpt, so it can `read` or `outline` the full report later. These report documents are hidden from the model manifest; they do not change the cached prompt prefix. The Host persists the root fold state, the initial question/manifest/doc IDs, and these branch reports under `~/.dsh/raf-engine/sessions/<sessionId>.json`. A turn that is aborted or a Host that restarts can resume from that state. If no state file exists, the Host adds the latest DSH compaction checkpoint to the next task.
+`branch(tasks=[...])` accepts up to 200 independent subtasks per call and launches them together; there are no concurrency waves and no per-task timeout. It stores every successful full subtask report in `ContextStore` under a `branch_report_*` document. The root receives a compact index with every subtask header, a full-report id, optional excerpts, and any failed subtasks marked `FAILED`; it can `read` or `outline` the full report later. These report documents are hidden from the model manifest and from generic `search`/`grep`/`tally`/`llm_query` calls, so they do not change the cached prompt prefix or contaminate ordinary retrieval. The root can still open them by explicit document ID.
+If the root still ends without a final answer, the Host returns a fallback report built from successful branch reports and board summaries instead of failing the turn. Specialist state, history, Q&A memo, and the board entry are committed only after a successful run; a failed run rolls them back.
+
+The Host writes state version 2 to `~/.dsh/raf-engine/sessions/<sessionId>.json`. It contains the root fold state, the initial question, the research board, pending tool call/observation, and documents up to 16 MB / 500 entries (branch reports first). Workspace files are re-ingested from disk instead of duplicated. A completed turn is treated as history: the next turn starts from the DSH transcript/checkpoint instead of replaying the old fold state. An aborted or failed turn resumes from its state. If the Host died after a tool ran, the pending observation is recovered from the session by call ID and submitted without running the tool again; if no result exists, the turn fails instead of risking a duplicate side effect. If no state file exists, the Host adds the latest DSH compaction checkpoint to the next task.
 
 Limits of this integration:
 
@@ -106,6 +109,11 @@ Limits of this integration:
 - DSH's synthetic user messages are context, not the question. The latest human message is the question.
 - An answer cut by the output limit or an unclosed `<answer>` is rejected and retried with a shorter complete answer.
 - `llm_query` uses the configured reader model with no reasoning effort. The benchmark harness may use a separate non-thinking reader model; select it in Reader model before judging benchmark accuracy.
+- RAF has no hard step/tool/branch-task timeout. A native DSH tool that hangs outside the RAF registry is still owned by DSH's own transport/tool behavior.
+- The 16 MB / 500-document state cap applies to saved documents. The root fold state, board, and a pending observation are written in addition; a very large board can still make the file large.
+- A completed turn keeps external documents but drops its branch-report documents before the next independent request. Use the DSH transcript/checkpoint if that turn's reports are still needed.
+- Visible reasoning is capped per step; the full text is in the RAF run registry. DSH can still compact if the retained tool-result surface alone grows past its threshold.
+- The 60% prompt budget uses the engine estimator; tool schemas sit outside that count, so a small model with a large tool catalog needs a lower `RAF_PROMPT_BUDGET_RATIO`.
 
 ## Settings
 

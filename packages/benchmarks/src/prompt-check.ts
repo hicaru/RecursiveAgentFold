@@ -39,7 +39,7 @@ function numbered(n: number, make: (i: number) => string): string {
 }
 
 function corpusText(): string {
-  const out = Array.from({ length: 240 }, (_, i) => `项目记录 ${i + 1}：例行维护与巡检，未发现异常。`);
+  const out = Array.from({ length: 240 }, (_, i) => `Project record ${i + 1}: routine maintenance and inspection, no anomalies found.`);
   const notes = [
     'Personnel note: Alva Lindqvist transferred to the Lisbon office; badge number 4812.',
     'Personnel note: Chen Wei transferred to the Osaka office; badge number 7350.',
@@ -50,9 +50,9 @@ function corpusText(): string {
 }
 
 function logText(): string {
-  const out = Array.from({ length: 60 }, (_, i) => `第 ${i + 1} 行：例行巡检记录，状态正常。`);
-  out[2] = '第 3 行：灯塔的透镜需要更换';
-  out[5] = '第 6 行：老灯塔的台阶出现裂缝';
+  const out = Array.from({ length: 60 }, (_, i) => `Line ${i + 1}: routine inspection log, status normal.`);
+  out[2] = 'Line 3: the lighthouse 7742 lens needs replacement';
+  out[5] = 'Line 6: cracks appeared on the old lighthouse steps';
   return out.join('\n');
 }
 
@@ -69,15 +69,20 @@ function countText(): string {
 }
 
 function ticketsText(): string {
-  const kinds = ['客户投诉包裹延迟三天，要求赔偿。', '客户咨询如何修改账户密码。', '客户建议增加周末配送时段。'];
-  return numbered(1200, (i) => `工单 ${i + 1}：${kinds[i % kinds.length] ?? ''}`);
+  const kinds = [
+    'Customer complained about a three-day delivery delay and requested compensation.',
+    'Customer asked how to reset the account password.',
+    'Customer suggested adding weekend delivery windows.',
+  ];
+  return numbered(1200, (i) => `Ticket ${i + 1}: ${kinds[i % kinds.length] ?? ''}`);
 }
 
 const PROBES: readonly ToolProbe[] = Object.freeze([
   {
     tool: 'llm_query',
-    question: '文档 tickets 有 1200 条工单，分布在全文。请用长文阅读器扫描全部分块，按语义把每条工单分为「配送」「账户」「建议」三类，并统计每类数量。不要用关键词计数。',
-    docs: [{ id: 'tickets', title: '客服工单（约 1200 条）', text: ticketsText() }],
+    question:
+      'Document tickets has 1200 support tickets distributed across the full text. Use the long-context reader to scan all chunks, classify each ticket semantically into "delivery", "account", or "suggestion", and count each category. Do not use keyword counting.',
+    docs: [{ id: 'tickets', title: 'Support tickets (~1200 entries)', text: ticketsText() }],
     checkArgs: (a) => {
       if (!isText(a.query)) return 'query must be a non-empty string';
       return a.mode === 'extract' ? undefined : 'mode must be "extract" for semantic counting';
@@ -91,58 +96,59 @@ const PROBES: readonly ToolProbe[] = Object.freeze([
   },
   {
     tool: 'search',
-    question: '文档 log 有 60 行。请直接调用 search 工具（BM25 检索，不要用 grep），用查询词 "灯塔 7742" 检索最相关的窗口。',
-    docs: [{ id: 'log', title: '巡检日志', text: logText() }],
+    question:
+      'Document log has 60 lines. Call the search tool directly (BM25 retrieval, do not use grep) with query "lighthouse 7742" to locate the most relevant window.',
+    docs: [{ id: 'log', title: 'Inspection log', text: logText() }],
     checkArgs: (a) => (isText(a.query) ? undefined : 'query must be a non-empty string'),
     checkObservation: (o) => (o.includes('7742') ? undefined : 'search did not locate 7742 window'),
   },
   {
     tool: 'outline',
-    question: '请直接调用 outline 工具提取文档 doc 的结构大纲和章节行号（不要调用 read 或 grep）。',
-    docs: [{ id: 'doc', title: '章节示例', text: '# Chapter 1 Overview\nIntro line\n## Section 1.1 Architecture\nBody line\n# Chapter 2 Evaluation\nResult line' }],
+    question: 'Call the outline tool directly to extract the structural outline and section line numbers of document doc (do not call read or grep).',
+    docs: [{ id: 'doc', title: 'Chapter sample', text: '# Chapter 1 Overview\nIntro line\n## Section 1.1 Architecture\nBody line\n# Chapter 2 Evaluation\nResult line' }],
     checkArgs: () => undefined,
     checkObservation: (o) => (o.includes('Chapter 1') && o.includes('Section 1.1') ? undefined : 'outline missing structural headings'),
   },
   {
     tool: 'grep',
-    question: '文档 log 有 60 行。用正则搜索「灯塔」，列出所有匹配行的行号和原文。',
-    docs: [{ id: 'log', title: '巡检日志', text: logText() }],
+    question: 'Document log has 60 lines. Search with regex for "lighthouse" and list all matching line numbers and text.',
+    docs: [{ id: 'log', title: 'Inspection log', text: logText() }],
     checkArgs: (a) => (isText(a.pattern) ? undefined : 'pattern must be a non-empty string'),
     checkObservation: (o) => (o.includes('matching lines') ? undefined : 'grep report missing match count'),
   },
   {
     tool: 'read',
-    question: '读取文档 doc 的第 3 行到第 5 行。',
-    docs: [{ id: 'doc', title: '行号样例', text: readText() }],
+    question: 'Read lines 3 through 5 of document doc.',
+    docs: [{ id: 'doc', title: 'Line sample', text: readText() }],
     checkArgs: (a) =>
       isText(a.document) ? (isNumberish(a.start_line) && isNumberish(a.end_line) ? undefined : 'start_line/end_line must be numbers') : 'document must be a string',
     checkObservation: (o) => (o.includes('L4-delta') ? undefined : 'read did not return lines 3-5'),
   },
   {
     tool: 'tally',
-    question: '在文档 users 中精确统计每个 "User: <id>" 的出现次数，按次数从高到低。',
-    docs: [{ id: 'users', title: '用户事件', text: usersText() }],
+    question: 'Count the exact occurrences of each "User: <id>" in document users, ordered from highest to lowest.',
+    docs: [{ id: 'users', title: 'User events', text: usersText() }],
     checkArgs: (a) => (isText(a.pattern) ? undefined : 'pattern must be a non-empty string'),
     checkObservation: (o) => (o.includes('6 matches') && o.includes('3 distinct values') ? undefined : 'tally counts are wrong'),
   },
   {
     tool: 'calculator',
-    question: '计算 (1234 * 56 + 78) / 2 的精确值。',
+    question: 'Compute the exact value of (1234 * 56 + 78) / 2.',
     docs: [],
     checkArgs: (a) => (isText(a.expression) ? undefined : 'expression must be a non-empty string'),
     checkObservation: (o) => (o.includes('34591') ? undefined : 'calculator result is wrong'),
   },
   {
     tool: 'branch',
-    question: '把独立子任务「统计文档 count 中 cat 和 dog 各有多少行」交给一个全新上下文的子代理，只返回它的结果。',
-    docs: [{ id: 'count', title: '类别行', text: countText() }],
+    question: 'Delegate the independent subtask "count how many lines in document count contain cat and dog" to a subagent with a fresh context and return its result.',
+    docs: [{ id: 'count', title: 'Category rows', text: countText() }],
     checkArgs: (a) => (isText(a.task) ? undefined : 'task must be a non-empty string'),
-    checkObservation: (o) => (o.includes('branch done') && o.includes('子代理完成') ? undefined : 'branch result missing'),
+    checkObservation: (o) => (o.includes('branch done') && o.includes('Subagent complete') ? undefined : 'branch result missing'),
   },
 ]);
 
 function buildTools(store: ContextStore, models: BenchModels, usage: UsageTracker): Tool[] {
-  const stub = new ScriptedLLM(() => '<answer>子代理完成：cat 50，dog 50</answer>', { name: 'branch-stub', contextWindow: 32_000, maxOutputTokens: 512 });
+  const stub = new ScriptedLLM(() => '<answer>Subagent complete: cat 50, dog 50</answer>', { name: 'branch-stub', contextWindow: 32_000, maxOutputTokens: 512 });
   const raf = new RecursiveAgentFold({
     rootLLM: models.root,
     branchLLM: stub,
@@ -217,18 +223,18 @@ async function runToolProbe(probe: ToolProbe, models: BenchModels, log: (s: stri
 
 async function foldingProbe(models: BenchModels, log: (s: string) => void): Promise<boolean> {
   const store = new ContextStore();
-  store.add('alpha\nbeta\ngamma', { id: 'doc', title: '三行样例' });
+  store.add('alpha\nbeta\ngamma', { id: 'doc', title: 'Three-line sample' });
   const usage = new UsageTracker();
   const tools = buildTools(store, models, usage);
   const agent = new AgentFoldAgent({ llm: models.root, tools, store, maxSteps: 1 });
   const state = new FoldState();
   state.setLatest({
     step: 0,
-    motivation: 'grep 找到 beta。',
+    motivation: 'grep located beta.',
     action: { name: 'grep', arguments: { pattern: 'beta' } },
-    observation: 'grep /beta/：1 行匹配 — doc: 1\ndoc:2| beta',
+    observation: 'grep /beta/: 1 matching line — doc: 1\ndoc:2| beta',
   });
-  const res = await models.root.complete({ messages: agent.buildMessages('beta 在第几行？请再读取该行确认。', state), temperature: 0 });
+  const res = await models.root.complete({ messages: agent.buildMessages('Which line is beta on? Read that line to confirm.', state), temperature: 0 });
   const parsed = parseAgentResponse(res.text, { expectFolding: true, reasoning: res.reasoning });
   const issues: string[] = [...parsed.errors];
   if (!parsed.folding) issues.push('missing <folding>');
@@ -245,8 +251,8 @@ async function foldingProbe(models: BenchModels, log: (s: string) => void): Prom
 
 async function readerProbe(models: BenchModels, log: (s: string) => void): Promise<boolean> {
   const store = new ContextStore();
-  store.add(corpusText(), { id: 'corpus', title: '项目记录' });
-  store.add(numbered(120, (i) => `row ${i + 1} ${i % 2 === 0 ? 'cat' : 'dog'}`), { id: 'rows', title: '类别行' });
+  store.add(corpusText(), { id: 'corpus', title: 'Project records' });
+  store.add(numbered(120, (i) => `row ${i + 1} ${i % 2 === 0 ? 'cat' : 'dog'}`), { id: 'rows', title: 'Category rows' });
   const usage = new UsageTracker();
   const engine = new LLMQueryEngine(models.query, store, usage, {
     ...models.llmQuery,
@@ -254,7 +260,7 @@ async function readerProbe(models: BenchModels, log: (s: string) => void): Promi
     minChunkTokens: 1024,
   });
   const locate = await engine.query({
-    query: '找出所有人事备注里的姓名和工牌号，返回姓名与工牌号。',
+    query: 'Find all names and badge numbers in personnel notes and return each name and badge number.',
     mode: 'locate',
     documents: ['corpus'],
   });
@@ -266,7 +272,7 @@ async function readerProbe(models: BenchModels, log: (s: string) => void): Promi
     `  ${locateOk ? '✓' : '✗'} locate — ${locate.findings.length} chunk(s), relevant ${relevant.length}, errors ${locateErrors.length}, evidence lines ${evidence ? 'ok' : 'missing'}`,
   );
   const extract = await engine.query({
-    query: '统计本块中 cat 和 dog 的行数，按类别放进 counts。',
+    query: 'Count the number of cat and dog rows in this chunk and return them in counts.',
     mode: 'extract',
     documents: ['rows'],
     categories: ['cat', 'dog'],
@@ -282,7 +288,7 @@ async function readerProbe(models: BenchModels, log: (s: string) => void): Promi
 
   // Live dedup & canonical categories probe: second query with different wording reuses cached counts
   const cachedExtract = await engine.query({
-    query: '请给出每种动物（如 cat 与 dog）在当前分块内的出现次数',
+    query: 'Report the occurrence counts of each animal (cat and dog) in this chunk.',
     mode: 'extract',
     documents: ['rows'],
     categories: ['cat', 'dog'],
@@ -316,7 +322,7 @@ async function e2eProbe(models: BenchModels, outDir: string, log: (s: string) =>
 }
 
 /**
- * Live checks of the Chinese prompts against the configured models:
+ * Live checks of the English prompts against the configured models:
  *  1. reachability of root + query models
  *  2. one probe per tool: the root model must choose it and pass valid arguments
  *  3. folding format on a synthetic step-1 state
