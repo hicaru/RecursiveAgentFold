@@ -19,7 +19,7 @@ import {
 } from './tools/document-tools.js';
 import { createLLMQueryTool, LLMQueryEngine, type LLMQueryOptions } from './tools/llm-query.js';
 import type { Tool } from './tools/types.js';
-import type { LLMClient } from './types.js';
+import type { ChatMessage, LLMClient } from './types.js';
 
 export const DEFAULT_MAX_DEPTH = 2;
 
@@ -62,7 +62,7 @@ export interface RecursiveAgentFoldOptions {
       boolean
     >
   >;
-  extraTools?: Tool[];
+  extraTools?: readonly Tool[] | ((depth: number) => readonly Tool[]);
   agent?: Partial<Omit<AgentFoldConfig, 'llm' | 'tools' | 'store' | 'depth' | 'name' | 'usage' | 'onEvent'>>;
   onEvent?: EventSink;
   usage?: UsageTracker;
@@ -146,7 +146,10 @@ export class RecursiveAgentFold {
       prefix === ''
         ? builtins
         : builtins.map((tool) => ({ ...tool, name: `${prefix}${tool.name}`, execute: tool.execute.bind(tool) }));
-    if (this.opts.extraTools) tools.push(...this.opts.extraTools);
+    if (this.opts.extraTools !== undefined) {
+      const extra = typeof this.opts.extraTools === 'function' ? this.opts.extraTools(depth) : this.opts.extraTools;
+      tools.push(...extra);
+    }
     return tools;
   }
 
@@ -219,6 +222,14 @@ export class RecursiveAgentFold {
     });
     this.rootAgent.begin(question);
   }
+  /** Build and cache the root prompt messages for the next native step. */
+  prepareRootMessages(): ChatMessage[] {
+    if (this.rootAgent === undefined) {
+      throw new Error('RecursiveAgentFold.begin() must run before prepareRootMessages()');
+    }
+    return this.rootAgent.prepareMessages();
+  }
+
   /** Produce one root step; a tool step waits for `submit()`. */
   async next(): Promise<AgentStep> {
     if (this.rootAgent === undefined) throw new Error('RecursiveAgentFold.begin() must run before next()');

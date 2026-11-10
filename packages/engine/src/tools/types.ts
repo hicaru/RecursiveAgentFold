@@ -120,6 +120,22 @@ export function formatToolCallXml(name: string, args: Record<string, unknown>): 
   return parts.join('');
 }
 
+function formatSchemaType(schema: JSONSchema, depth = 0): string {
+  if (depth < 2 && schema.type === 'array' && schema.items !== undefined) {
+    return `${formatSchemaType(schema.items, depth + 1)}[]`;
+  }
+  if (depth < 2 && schema.properties !== undefined) {
+    const entries = Object.entries(schema.properties);
+    if (entries.length > 0) {
+      const req = new Set(Array.isArray(schema.required) ? schema.required : []);
+      const fields = entries.map(([k, v]) => `${k}${req.has(k) ? '' : '?'}: ${formatSchemaType(v, depth + 1)}`);
+      return `{${fields.join(', ')}}`;
+    }
+  }
+  if (Array.isArray(schema.type)) return schema.type.join('|');
+  return schema.type ?? 'string';
+}
+
 /** Render tool schemas in XML parameter format for the system prompt (stable ordering => cache-stable). */
 export function renderToolSchemas(tools: readonly Tool[]): string {
   return tools
@@ -128,11 +144,7 @@ export function renderToolSchemas(tools: readonly Tool[]): string {
       const reqSet = new Set(Array.isArray(t.parameters.required) ? t.parameters.required : []);
       const paramSpecs: string[] = [];
       for (const [pName, pSchema] of Object.entries(props)) {
-        const baseType = Array.isArray(pSchema.type)
-          ? pSchema.type.join('|')
-          : pSchema.type === 'array' && pSchema.items?.type
-            ? `${Array.isArray(pSchema.items.type) ? pSchema.items.type.join('|') : pSchema.items.type}[]`
-            : (pSchema.type ?? 'string');
+        const baseType = formatSchemaType(pSchema);
         const enumPart = Array.isArray(pSchema.enum) ? ` [${pSchema.enum.map(String).join(' | ')}]` : '';
         const reqPart = reqSet.has(pName) ? ', required' : '';
         const descPart = pSchema.description ? `: ${pSchema.description}` : '';

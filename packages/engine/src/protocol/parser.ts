@@ -62,6 +62,8 @@ const STRING_PARAM_KEYS: Readonly<Record<string, true>> = Object.freeze({
   content: true,
   old_string: true,
   new_string: true,
+  oldText: true,
+  newText: true,
   command: true,
   description: true,
   expression: true,
@@ -77,6 +79,8 @@ const MULTILINE_PRESERVE_KEYS: Readonly<Record<string, true>> = Object.freeze({
   content: true,
   old_string: true,
   new_string: true,
+  oldText: true,
+  newText: true,
   command: true,
 });
 
@@ -108,6 +112,9 @@ const KNOWN_PARAM_NAMES: Readonly<Record<string, true>> = Object.freeze({
   content: true,
   old_string: true,
   new_string: true,
+  oldText: true,
+  newText: true,
+  edits: true,
   command: true,
   description: true,
   scope: true,
@@ -428,7 +435,48 @@ function parseXmlParamValue(key: string, rawVal: string): unknown {
       return trimmed;
     }
   }
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
+    const nested = parseNestedXmlChildren(trimmed);
+    if (nested !== undefined) return nested;
+  }
   return trimmed;
+}
+
+function parseNestedXmlChildren(xml: string): unknown {
+  const entries: Array<{ tag: string; value: unknown }> = [];
+  let pos = 0;
+  while (pos < xml.length) {
+    while (pos < xml.length && /\s/.test(xml[pos] ?? '')) pos++;
+    if (pos >= xml.length) break;
+    const openRe = /<\s*([a-zA-Z_][a-zA-Z0-9_-]*)(?:\s[^>]*)?>/y;
+    openRe.lastIndex = pos;
+    const openMatch = openRe.exec(xml);
+    const tag = openMatch?.[1];
+    if (!openMatch || tag === undefined) return undefined;
+    const start = openMatch.index + openMatch[0].length;
+    const closeRe = new RegExp(`<\\s*\\/\\s*${tag}\\s*>`, 'gi');
+    closeRe.lastIndex = start;
+    const closeMatch = closeRe.exec(xml);
+    if (!closeMatch) return undefined;
+    const inner = xml.slice(start, closeMatch.index);
+    entries.push({ tag, value: parseXmlParamValue(tag, inner) });
+    pos = closeMatch.index + closeMatch[0].length;
+  }
+  if (entries.length === 0) return undefined;
+  const firstTag = entries[0]?.tag;
+  const allSameItemTag =
+    entries.length > 1
+      ? entries.every((e) => e.tag === firstTag)
+      : firstTag === 'item' || firstTag === 'edit' || firstTag === 'entry';
+  if (allSameItemTag) return entries.map((e) => e.value);
+  const obj: Record<string, unknown> = {};
+  for (const e of entries) {
+    const prev = obj[e.tag];
+    if (prev === undefined) obj[e.tag] = e.value;
+    else if (Array.isArray(prev)) prev.push(e.value);
+    else obj[e.tag] = [prev, e.value];
+  }
+  return obj;
 }
 
 function extractTaskElements(xmlText: string): Array<{ scope?: string; task: string }> {

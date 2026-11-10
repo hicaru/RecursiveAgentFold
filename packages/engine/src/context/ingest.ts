@@ -22,6 +22,8 @@ import {
 
 export const MAX_SINGLE_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_WALK_FILE_BYTES = 1_048_576;
+export const DEFAULT_MAX_WALK_FILES = 1200;
+export const DEFAULT_MAX_TOTAL_CHARS = 32 * 1024 * 1024;
 export const MAX_DOCUMENT_BYTES = 64 * 1024 * 1024;
 export const MAX_SKIPPED_REPORTED = 64;
 
@@ -43,6 +45,7 @@ export interface IngestOptions {
   readonly signal?: AbortSignal;
   readonly maxWalkFileBytes?: number;
   readonly maxFiles?: number;
+  readonly maxTotalChars?: number;
   readonly skipRichDocuments?: boolean;
 }
 
@@ -237,16 +240,18 @@ export async function resolveIngestSource(
 
   if (s.isDirectory()) {
     const allPaths = await enumerateFiles(resolvedPath, opts.signal);
-    const maxFiles = opts.maxFiles !== undefined && opts.maxFiles > 0 ? opts.maxFiles : undefined;
-    const paths = maxFiles !== undefined && allPaths.length > maxFiles ? allPaths.slice(0, maxFiles) : allPaths;
-    const overflowPaths =
-      maxFiles !== undefined && allPaths.length > maxFiles ? allPaths.slice(maxFiles) : [];
+    const maxFiles = opts.maxFiles !== undefined && opts.maxFiles > 0 ? opts.maxFiles : DEFAULT_MAX_WALK_FILES;
+    const maxTotalChars =
+      opts.maxTotalChars !== undefined && opts.maxTotalChars > 0 ? opts.maxTotalChars : DEFAULT_MAX_TOTAL_CHARS;
+    const paths = allPaths.length > maxFiles ? allPaths.slice(0, maxFiles) : allPaths;
+    const overflowPaths = allPaths.length > maxFiles ? allPaths.slice(maxFiles) : [];
     const anydoc = await getAnydoc();
     const limit = createLimiter(INGEST_CONCURRENCY);
     const maxWalkBytes = opts.maxWalkFileBytes ?? MAX_WALK_FILE_BYTES;
     const n = paths.length;
     const slots = new Array<IngestedFile | undefined>(n);
     const drops = new Array<SkippedFile | undefined>(n);
+    let readChars = 0;
 
     await Promise.all(
       paths.map((rel, i) =>
@@ -254,6 +259,10 @@ export async function resolveIngestSource(
           const docPath = makeDocId(sourceId, rel);
           if (opts.signal?.aborted) {
             drops[i] = Object.freeze({ path: docPath, reason: 'aborted' });
+            return;
+          }
+          if (readChars >= maxTotalChars) {
+            drops[i] = Object.freeze({ path: docPath, reason: 'resourceLimit' });
             return;
           }
           if (isSensitivePath(rel)) {
@@ -274,6 +283,7 @@ export async function resolveIngestSource(
             }
             const docRes = await documentToIngestedFile(safety.realAbs, rel, sourceId, anydoc);
             if (docRes.ok) {
+              readChars += docRes.value.content.length;
               slots[i] = docRes.value;
             } else {
               drops[i] = docRes.skipped;
@@ -282,6 +292,7 @@ export async function resolveIngestSource(
           }
           const textRes = await textToIngestedFile(safety.realAbs, rel, sourceId, maxWalkBytes);
           if (textRes.ok) {
+            readChars += textRes.value.content.length;
             slots[i] = textRes.value;
           } else {
             drops[i] = textRes.skipped;
@@ -298,10 +309,18 @@ export async function resolveIngestSource(
     let totalChars = 0;
     let documents = 0;
     let converted = 0;
+    let budgetExceeded = false;
 
     for (let i = 0; i < n; i++) {
       const f = slots[i];
       if (f !== undefined) {
+        if (budgetExceeded || totalChars + f.content.length > maxTotalChars) {
+          budgetExceeded = true;
+          if (si < MAX_SKIPPED_REPORTED) {
+            skipped[si++] = Object.freeze({ path: f.id, reason: 'resourceLimit' });
+          }
+          continue;
+        }
         files[fi++] = f;
         totalTokens += f.tokens;
         totalChars += f.content.length;

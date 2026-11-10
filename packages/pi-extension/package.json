@@ -1,0 +1,29 @@
+{
+  "name": "@raf/pi-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Recursive AgentFold for pi: native-step RAF root loop, scoped branch specialists, llm_query reader, live agent UI.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./raf.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "build": "echo \"pi loads the extension from source via jiti\""
+  },
+  "dependencies": {
+    "@raf/engine": "workspace:*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@earendil-works/pi-tui": "1.5.2",
+    "typebox": "1.4.6"
+  }
+}

@@ -60,12 +60,12 @@ export const TOOL_GUIDANCE: Record<string, string> = Object.freeze({
   tally:
     '- **tally**: Deterministic exact regex/capture-group frequency counter. Never count regex matches by hand. When a task asks for frequencies of exact given terms (e.g. lowercase words), use the exact-case counts (or set `<case_sensitive>true</case_sensitive>`) rather than adding capitalized sentence-start variants.',
   branch:
-    '- **branch**: Delegate deep document/module research to a persistent scoped specialist sub-agent, or ask a follow-up to an existing specialist. Always pass `scope` (`<tool_call name="branch"><scope>doc_1</scope><task>...</task></tool_call>`, or multiple `<task scope="doc_1">...</task>` tags for parallel tasks): (1) each specialist inspects ONLY its own `scope` document; (2) pass the same `scope` to ask follow-up questions (reusing its folded state and KV cache); (3) never spawn duplicate scans for the same scope or use `branch` for a single grep/read; (4) each scope must be a loaded document id or a manifest prefix; load a filesystem path with add_document before dispatch if it is absent, otherwise the specialist has no document to inspect.',
+    '- **branch**: Delegate deep document, module, or external-tool research to a persistent scoped specialist sub-agent, or ask a follow-up to an existing specialist. Always pass `scope` (`<tool_call name="branch"><scope>doc_1</scope><task>...</task></tool_call>`, or multiple `<task scope="doc_1">...</task>` tags for parallel tasks): (1) each specialist owns its `scope` and can use all available tools; (2) pass the same `scope` to ask follow-up questions (reusing its folded state and KV cache); (3) never spawn duplicate scans for the same scope or use `branch` for a single grep/read; (4) for document or codebase scopes, use a loaded document id or manifest prefix (load unindexed paths with `add_document` first); for external tool or web research, use a clear topic scope.',
   calculator: '- **calculator**: Exact arithmetic evaluation (+ - * / % ^, sum, min, max, avg, round, floor, ceil, abs, sqrt). Never do mental math.',
-  bash: '- **bash**: Execute shell commands, scripts, builds, tests, or renderers directly in the workspace. Always include `<description>...</description>` and `<command>...</command>`.',
-  write: '- **write**: Create or overwrite a workspace file at `<file_path>...</file_path>` with complete `<content>...</content>`.',
-  edit: '- **edit**: Replace an exact string in a workspace file at `<file_path>...</file_path>` (`<old_string>...</old_string>` -> `<new_string>...</new_string>`).',
-  glob: '- **glob**: Match workspace files by glob `<pattern>...</pattern>` (and optional `<path>...</path>`).',
+  bash: '- **bash**: Execute shell commands, scripts, builds, tests, or renderers directly in the workspace using the declared parameters in `# Tools`.',
+  write: '- **write**: Create or overwrite a workspace file with complete content using the declared parameters in `# Tools`.',
+  edit: '- **edit**: Replace exact text in a workspace file using the declared parameters in `# Tools`.',
+  glob: '- **glob**: Match workspace files by glob pattern using the declared parameters in `# Tools`.',
 });
 
 /** Resolve a tool name to its TOOL_GUIDANCE key; strips a leading prefix (e.g. "raf_"). */

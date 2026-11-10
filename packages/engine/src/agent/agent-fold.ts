@@ -229,6 +229,7 @@ export class AgentFoldAgent {
   private finished = false;
   private inProcessRun = false;
   private runResult: AgentRunResult | undefined;
+  private preparedStep: { readonly step: number; readonly messages: ChatMessage[] } | undefined;
   constructor(private readonly cfg: AgentFoldConfig) {
     this.depth = cfg.depth ?? 0;
     this.name = cfg.name ?? (this.depth === 0 ? 'root' : `branch@${this.depth}`);
@@ -377,6 +378,7 @@ export class AgentFoldAgent {
       motivation: pending.motivation,
       action: { name: pending.action.name, arguments: { ...pending.action.arguments } },
     };
+    this.preparedStep = undefined;
   }
 
   private promptTokens(messages: readonly ChatMessage[]): number {
@@ -522,6 +524,7 @@ export class AgentFoldAgent {
     this.started = true;
     this.inProcessRun = false;
     this.runResult = undefined;
+    this.preparedStep = undefined;
     this.emit({
       type: 'run_start',
       agent: this.name,
@@ -531,6 +534,27 @@ export class AgentFoldAgent {
       ...(this.cfg.scope !== undefined ? { scope: this.cfg.scope } : {}),
       isFollowUp: this.cfg.followUpQuestion !== undefined,
     });
+  }
+
+  /**
+   * Build and cache the prompt messages for attempt 0 of the current step.
+   * Calling `next()` afterwards reuses the exact cached message array.
+   */
+  prepareMessages(): ChatMessage[] {
+    if (!this.started) throw new Error('AgentFoldAgent.prepareMessages() called before begin()');
+    const step = this.state.currentStep;
+    if (this.preparedStep !== undefined && this.preparedStep.step === step) {
+      return this.preparedStep.messages;
+    }
+    const forcing = step - this.startStep >= this.maxSteps;
+    const tail = forcing ? FORCE_ANSWER : undefined;
+    let messages = this.buildMessages(this.runQuestion, this.state, tail);
+    if (this.cfg.maxPromptTokens !== undefined) {
+      const adjusted = this.enforcePromptBudget(this.cfg.maxPromptTokens, step, tail);
+      if (adjusted !== undefined) messages = this.buildMessages(this.runQuestion, this.state, tail);
+    }
+    this.preparedStep = { step, messages };
+    return messages;
   }
 
   /**
@@ -544,6 +568,7 @@ export class AgentFoldAgent {
     const stepSignal = this.armStepTimeout(step);
     const forcing = step - this.startStep >= this.maxSteps;
     if (forcing && !(this.cfg.forceAnswerOnLimit ?? true)) {
+      this.preparedStep = undefined;
       return {
         kind: 'done',
         result: this.finalize({ answer: null, steps: Math.max(0, step - this.startStep), terminated: 'max_steps' }),
@@ -561,10 +586,16 @@ export class AgentFoldAgent {
       this.stepLastUsage = undefined;
     }
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      let messages = this.buildMessages(this.runQuestion, this.state, tail);
-      if (this.cfg.maxPromptTokens !== undefined) {
-        const adjusted = this.enforcePromptBudget(this.cfg.maxPromptTokens, step, tail);
-        if (adjusted !== undefined) messages = this.buildMessages(this.runQuestion, this.state, tail);
+      let messages: ChatMessage[];
+      if (attempt === 0 && this.preparedStep !== undefined && this.preparedStep.step === step) {
+        messages = this.preparedStep.messages;
+        this.preparedStep = undefined;
+      } else {
+        messages = this.buildMessages(this.runQuestion, this.state, tail);
+        if (this.cfg.maxPromptTokens !== undefined) {
+          const adjusted = this.enforcePromptBudget(this.cfg.maxPromptTokens, step, tail);
+          if (adjusted !== undefined) messages = this.buildMessages(this.runQuestion, this.state, tail);
+        }
       }
       if (attempt === 0) {
         this.emit({
@@ -847,6 +878,7 @@ export class AgentFoldAgent {
   submit(observation: string, meta?: { error?: string }): void {
     const pending = this.pending;
     if (pending === undefined) throw new Error('submit() without a pending tool call');
+    this.preparedStep = undefined;
     const { text } = truncateToTokens(observation, this.cfg.maxObservationTokens ?? DEFAULT_MAX_OBSERVATION_TOKENS, this.estimator);
     this.state.setLatest({
       step: pending.step,
