@@ -21,6 +21,7 @@ export * from './tools/types.js';
 export * from './tools/llm-query.js';
 export * from './tools/document-tools.js';
 export * from './tools/calculator.js';
+export * from './tools/branch-args.js';
 export * from './tools/branch.js';
 export * from './agent/events.js';
 export * from './agent/run-events.js';

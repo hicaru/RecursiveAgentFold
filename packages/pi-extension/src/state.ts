@@ -39,6 +39,7 @@ export interface PersistedState {
   readonly initialQuestion?: string;
   readonly initialManifest?: string;
   readonly initialDocIds?: readonly string[];
+  readonly docSeq?: number;
   readonly board?: ResearchBoardSnapshot;
   readonly pending?: PendingCall;
   readonly docs?: Readonly<Record<string, { readonly title: string; readonly text: string }>>;
@@ -59,11 +60,11 @@ export class SessionState {
   readonly sources = new Set<string>();
   workspaceIngested = false;
   docSeq = 0;
-  rootState: FoldStateSnapshot | undefined;
-  initialQuestion: string | undefined;
-  initialManifest: string | undefined;
-  initialDocIds: ReadonlySet<string> | undefined;
-  pending: PendingCall | undefined;
+  rootState?: FoldStateSnapshot;
+  initialQuestion?: string;
+  initialManifest?: string;
+  initialDocIds?: ReadonlySet<string>;
+  pending?: PendingCall;
 
   /** Replace the carried-over state with a persisted entry. Workspace files are re-indexed later. */
   restore(state: PersistedState | undefined): void {
@@ -90,10 +91,17 @@ export class SessionState {
         this.board = new ResearchBoard();
       }
     }
+    let maxDocNum = 0;
     for (const [id, doc] of Object.entries(state.docs ?? {})) {
       this.docs.set(id, { title: doc.title, text: doc.text, persist: true });
+      const seqMatch = /_(\d+)$/.exec(id);
+      if (seqMatch?.[1] !== undefined) {
+        const parsedSeq = Number.parseInt(seqMatch[1], 10);
+        if (Number.isFinite(parsedSeq) && parsedSeq > maxDocNum) maxDocNum = parsedSeq;
+      }
     }
-    this.docSeq = this.docs.size;
+    const savedSeq = typeof state.docSeq === 'number' && Number.isFinite(state.docSeq) ? state.docSeq : 0;
+    this.docSeq = Math.max(savedSeq, maxDocNum, this.docs.size);
   }
 
   /** Build the entry data for the current state. */
@@ -121,8 +129,7 @@ export class SessionState {
       status,
       ...(this.rootState !== undefined ? { rootState: this.rootState } : {}),
       ...(this.initialQuestion !== undefined ? { initialQuestion: this.initialQuestion } : {}),
-      ...(this.initialManifest !== undefined ? { initialManifest: this.initialManifest } : {}),
-      ...(this.initialDocIds !== undefined ? { initialDocIds: [...this.initialDocIds] } : {}),
+      ...(this.docSeq > 0 ? { docSeq: this.docSeq } : {}),
       ...(board !== undefined ? { board } : {}),
       ...(this.pending !== undefined ? { pending: this.pending } : {}),
       ...(count > 0 ? { docs } : {}),

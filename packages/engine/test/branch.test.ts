@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ResearchBoard } from '../src/context/board.js';
 import { ContextStore } from '../src/context/store.js';
 import { UsageTracker } from '../src/llm/usage.js';
+import { normalizeBranchArguments } from '../src/tools/branch-args.js';
 import { BRANCH_REPORT_ID_PREFIX, createBranchTool, type BranchRunner, type BranchRunnerResult } from '../src/tools/branch.js';
 import type { ToolContext } from '../src/tools/types.js';
 import { defaultEstimator } from '../src/tokens.js';
@@ -257,5 +258,161 @@ describe('branch full reports', () => {
     expect(followUpOut).toContain('Completed audit for crates/session');
     expect(board.getSpecialist('crates/session')?.latestSummary).toContain('Completed audit for crates/session');
     expect(board.entries().find((e) => e.scope === 'crates/session')?.summary).toContain('Completed audit for crates/session');
+  });
+
+  it('preserves partial specialist FoldState blocks on abort without poisoning the board', async () => {
+    const board = new ResearchBoard();
+    let attempt = 0;
+    const first = await board.runScopedBranch('packages/engine', 'Audit engine', async (opts) => {
+      attempt += 1;
+      expect(opts.previousState).toBeUndefined();
+      return {
+        resultText: 'aborted',
+        answer: null,
+        failed: true,
+        state: { blocks: [{ from: 0, to: 1, summary: 'Verified parser and state.' }] },
+      };
+    });
+    expect(first.failed).toBe(true);
+    // Failed board entry is removed so retry is not short-circuited
+    expect(board.entries()).toHaveLength(0);
+    // Partial folded blocks survive for resumption
+    expect(board.getSpecialist('packages/engine')?.state.blocks).toHaveLength(1);
+
+    const second = await board.runScopedBranch('packages/engine', 'Audit engine', async (opts) => {
+      attempt += 1;
+      expect(opts.previousState?.blocks[0]?.summary).toBe('Verified parser and state.');
+      return {
+        resultText: 'Full engine audit complete with zero issues found.',
+        answer: 'Full engine audit complete with zero issues found.',
+        state: { blocks: [{ from: 0, to: 2, summary: 'Complete audit.' }] },
+      };
+    });
+    expect(attempt).toBe(2);
+    expect(second.failed).toBeUndefined();
+    expect(second.result).toContain('Full engine audit complete');
+  });
+});
+
+describe('universal multi-format branch normalization', () => {
+  it('accepts XML, paired XML tags, custom scope tags, TOML, YAML, Markdown, maps, and shorthand strings without splitting prose commas', async () => {
+    // 1. XML <task scope="..."> with prose commas and rescued max_steps
+    expect(
+      normalizeBranchArguments(
+        '<tasks><task scope="packages/engine" max_steps="12">Inspect parser, board, and store</task><task scope="packages/pi-extension">Inspect live widget, renderers, and state</task></tasks>',
+      ),
+    ).toEqual({
+      max_steps: 12,
+      tasks: [
+        { scope: 'packages/engine', task: 'Inspect parser, board, and store' },
+        { scope: 'packages/pi-extension', task: 'Inspect live widget, renderers, and state' },
+      ],
+    });
+
+    // 2. Paired flat XML <scope>...</scope><task>...</task>
+    expect(
+      normalizeBranchArguments(
+        '<scope>packages/engine</scope><task>Check fold state</task><scope>packages/pi-extension</scope><task>Check UI</task>',
+      ),
+    ).toEqual({
+      tasks: [
+        { scope: 'packages/engine', task: 'Check fold state' },
+        { scope: 'packages/pi-extension', task: 'Check UI' },
+      ],
+    });
+
+    // 3. Custom XML scope tags
+    expect(
+      normalizeBranchArguments('<docs>Audit documentation</docs><tests>Audit test coverage</tests>'),
+    ).toEqual({
+      tasks: [
+        { scope: 'docs', task: 'Audit documentation' },
+        { scope: 'tests', task: 'Audit test coverage' },
+      ],
+    });
+
+    // 4. TOML [[tasks]] and [scope] sections
+    expect(
+      normalizeBranchArguments(`
+max_steps = 15
+[[tasks]]
+scope = "packages/engine"
+task = "Analyze engine, parser, and walk"
+
+[[tasks]]
+scope = "packages/pi-extension"
+task = "Analyze TUI widget"
+`),
+    ).toEqual({
+      max_steps: 15,
+      tasks: [
+        { scope: 'packages/engine', task: 'Analyze engine, parser, and walk' },
+        { scope: 'packages/pi-extension', task: 'Analyze TUI widget' },
+      ],
+    });
+
+    expect(
+      normalizeBranchArguments(`
+["packages/engine"]
+task = "Check engine"
+["packages/pi-extension"]
+task = "Check extension"
+`),
+    ).toEqual({
+      tasks: [
+        { scope: 'packages/engine', task: 'Check engine' },
+        { scope: 'packages/pi-extension', task: 'Check extension' },
+      ],
+    });
+
+    // 5. YAML block list & scope map
+    expect(
+      normalizeBranchArguments(`
+tasks:
+  - scope: packages/engine
+    task: Audit engine, tools, and prompts
+  - scope: packages/pi-extension
+    task: Audit extension, schema, and live UI
+`),
+    ).toEqual({
+      tasks: [
+        { scope: 'packages/engine', task: 'Audit engine, tools, and prompts' },
+        { scope: 'packages/pi-extension', task: 'Audit extension, schema, and live UI' },
+      ],
+    });
+
+    // 6. Markdown bullet list
+    expect(
+      normalizeBranchArguments(`
+- \`packages/engine\`: Inspect engine internals, protocol parser, and context store
+- **packages/pi-extension** — Inspect native fallback and TUI widgets
+`),
+    ).toEqual({
+      tasks: [
+        { scope: 'packages/engine', task: 'Inspect engine internals, protocol parser, and context store' },
+        { scope: 'packages/pi-extension', task: 'Inspect native fallback and TUI widgets' },
+      ],
+    });
+
+    // 7. Scope-keyed JSON map passed directly to createBranchTool
+    const store = new ContextStore();
+    const seen: Array<{ scope?: string; task: string }> = [];
+    const tool = createBranchTool(async (task, opts) => {
+      seen.push({ ...(opts.scope !== undefined ? { scope: opts.scope } : {}), task });
+      return answer(`Detailed report for ${opts.scope ?? 'none'}: ${task}`);
+    });
+    await tool.execute(
+      {
+        branches: {
+          'packages/engine': 'Audit engine, parser, and board thoroughly',
+          'packages/pi-extension': 'Audit extension, schema, and live widget thoroughly',
+        },
+      },
+      contextFor(store),
+    );
+    expect(seen).toEqual([
+      { scope: 'packages/engine', task: 'Audit engine, parser, and board thoroughly' },
+      { scope: 'packages/pi-extension', task: 'Audit extension, schema, and live widget thoroughly' },
+    ]);
   });
 });

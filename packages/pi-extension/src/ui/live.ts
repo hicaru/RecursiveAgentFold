@@ -17,94 +17,102 @@ import {
   joinParts,
   percent,
   shortModel,
-  spinnerFrame,
   tokens,
 } from './format.js';
 
-const MAX_TREE_AGENTS = 12;
-const TICK_MS = 120;
+const TICK_MS = 250;
+const ROUTE_INDENT = '    ';
 
-function statusIcon(theme: Theme, agent: AgentSnapshot, now: number): string {
-  if (agent.status === 'running') return theme.fg('accent', spinnerFrame(now));
-  if (agent.status === 'done') return theme.fg('success', '✓');
-  return theme.fg('error', '✗');
+function modelLabel(spec: string, thinking: string): string {
+  const name = shortModel(spec);
+  return thinking === 'off' || thinking === '' ? name : `${name}:${thinking}`;
 }
 
-function agentTail(agent: AgentSnapshot): string {
-  if (agent.status === 'running') return agent.action ?? 'thinking';
-  return agent.terminated ?? agent.answer ?? agent.status;
-}
-
-/** One agent row: icon, name, then raw numbers. */
-function agentRow(theme: Theme, agent: AgentSnapshot, prefix: string, now: number): string {
-  const name = agent.depth === 0 ? 'root' : (agent.scope ?? agent.name);
-  const parts: string[] = [agentTail(agent)];
-
-  parts.push(`s${agent.step}/${agent.steps}`);
-  if (agent.folds > 0) parts.push(`f${agent.folds}`);
-  if (agent.blocks > 0) parts.push(`${agent.blocks}b`);
-
+function rootTelemetryParts(root: AgentSnapshot | undefined): string[] {
+  if (root === undefined || root.steps <= 0) return [];
+  const parts: string[] = [`s${root.step}/${root.steps}`];
+  if (root.folds > 0) parts.push(`f${root.folds}`);
+  if (root.blocks > 0) parts.push(`${root.blocks}b`);
   const rate = cacheRate([
     {
-      calls: agent.calls,
-      promptTokens: agent.promptTokens,
-      cachedTokens: agent.cachedTokens,
-      completionTokens: agent.completionTokens,
+      calls: root.calls,
+      promptTokens: root.promptTokens,
+      cachedTokens: root.cachedTokens,
+      completionTokens: root.completionTokens,
       costUsd: 0,
     },
   ]);
   if (rate !== undefined) parts.push(`cache ${percent(rate)}`);
-
-  const total = agent.promptTokens + agent.completionTokens;
-  if (total > 0) parts.push(`${tokens(total)}tok`);
-
-  return `${prefix}${statusIcon(theme, agent, now)} ${theme.bold(name)} ${theme.fg('muted', joinParts(parts))}`;
+  const contextSize = root.contextTokens > 0 ? root.contextTokens : root.promptTokens + root.completionTokens;
+  if (contextSize > 0) parts.push(tokens(contextSize));
+  return parts;
 }
 
-function treePrefix(index: number, last: boolean, depth: number): string {
-  if (depth === 0) return '';
-  return '│ '.repeat(depth - 1) + (last ? '└─' : '├─');
+/** RAF status & route lines rendered directly above the editor. */
+export function headerLines(
+  theme: Theme,
+  routes: Routes,
+  width: number,
+  rootAgent?: AgentSnapshot,
+): string[] {
+  const branchNote = routes.branch.missing === undefined ? '/raf' : `/raf · ! unknown ${routes.branch.missing}`;
+  const readerNote = routes.reader.missing === undefined ? '' : ` ${theme.fg('dim', `! unknown ${routes.reader.missing}`)}`;
+  const telemetry = rootTelemetryParts(rootAgent);
+  const telemetrySuffix = telemetry.length > 0 ? ` ${theme.fg('muted', `· ${joinParts(telemetry)}`)}` : '';
+  return [
+    truncateToWidth(`${theme.fg('accent', theme.bold('RAF'))} ${theme.fg('dim', 'ctr+sh+S')}${telemetrySuffix}`, width),
+    truncateToWidth(`${ROUTE_INDENT}${theme.fg('toolTitle', '◉')} ${modelLabel(routes.root.spec, routes.root.thinking)} ${theme.fg('dim', '/model')}`, width),
+    truncateToWidth(`${ROUTE_INDENT}${theme.fg('toolTitle', '⑂')} ${modelLabel(routes.branch.spec, routes.branch.thinking)} ${theme.fg('dim', branchNote)}`, width),
+    truncateToWidth(`${ROUTE_INDENT}${theme.fg('toolTitle', '⟂')} ${shortModel(routes.reader.spec)}${readerNote}`, width),
+  ];
 }
 
 /**
- * Live agent tree shown above the editor while a RAF turn runs.
- * Children indent under their parent (usually root). Root is skipped when the
- * tree has children: the root row is already the turn's status line.
+ * Persistent RAF status & routes widget placed directly above the editor (`aboveEditor`).
+ * Merges live root telemetry onto the `RAF ctr+sh+S` header line without duplicating
+ * pi's `Working` spinner or `BR branch` sub-agent trees.
  */
-export class AgentsWidget {
+export class RafWidget {
   private readonly tracker: RunTracker;
+  private readonly getRoutes: () => Routes | undefined;
   private readonly tui: TUI;
   private readonly theme: Theme;
   private readonly unsubscribe: () => void;
   private timer: ReturnType<typeof setInterval> | undefined;
-  private running = false;
 
-  constructor(tracker: RunTracker, tui: TUI, theme: Theme) {
+  constructor(
+    tracker: RunTracker,
+    getRoutes: () => Routes | undefined,
+    tui: TUI,
+    theme: Theme,
+  ) {
     this.tracker = tracker;
+    this.getRoutes = getRoutes;
     this.tui = tui;
     this.theme = theme;
     this.unsubscribe = tracker.subscribe(() => this.onChange());
-    this.onChange();
+    this.syncTimer();
   }
 
-  private onChange(): void {
-    const tree = this.tracker.agentTree();
-    const now = Date.now();
-    const running = tree.some((agent) => agent.status === 'running');
-    const throttle = this.tracker.rateLimitRemaining(now) > 0;
-    if (running || throttle) {
+  private syncTimer(): void {
+    const throttle = this.tracker.rateLimitRemaining(Date.now()) > 0;
+    if (throttle) {
       if (this.timer === undefined) {
-        this.timer = setInterval(() => this.tui.requestRender(), TICK_MS);
+        this.timer = setInterval(() => {
+          this.syncTimer();
+          this.tui.requestRender();
+        }, TICK_MS);
         this.timer.unref?.();
       }
     } else if (this.timer !== undefined) {
       clearInterval(this.timer);
       this.timer = undefined;
     }
-    if (running !== this.running || tree.length > 0) {
-      this.running = running;
-      this.tui.requestRender();
-    }
+  }
+
+  private onChange(): void {
+    this.syncTimer();
+    this.tui.requestRender();
   }
 
   dispose(): void {
@@ -118,44 +126,21 @@ export class AgentsWidget {
   invalidate(): void {}
 
   render(width: number): string[] {
-    const tree = this.tracker.agentTree();
-    if (tree.length === 0) return [];
-
-    const now = Date.now();
-    const shown = tree.slice(0, MAX_TREE_AGENTS);
-    const lines: string[] = [];
-    for (let index = 0; index < shown.length; index += 1) {
-      const agent = shown[index];
-      if (agent === undefined) continue;
-      const next = shown[index + 1];
-      const last = next === undefined || next.depth <= agent.depth;
-      const prefix = treePrefix(index, last, agent.depth);
-      lines.push(truncateToWidth(agentRow(this.theme, agent, prefix, now), width));
-    }
-    if (tree.length > shown.length) {
-      lines.push(this.theme.fg('dim', `… +${tree.length - shown.length} agents`));
-    }
-    const waiting = this.tracker.rateLimitRemaining(now);
+    const routes = this.getRoutes();
+    if (routes === undefined) return [];
+    const rootAgent = this.tracker.agentTree().find((agent) => agent.depth === 0);
+    const lines = headerLines(this.theme, routes, width, rootAgent);
+    const waiting = this.tracker.rateLimitRemaining(Date.now());
     if (waiting > 0) {
-      lines.push(this.theme.fg('warning', `⏳ rate limit · ${duration(waiting)} left`));
+      lines.push(
+        truncateToWidth(
+          `${ROUTE_INDENT}${this.theme.fg('warning', `⏳ rate limit · ${duration(waiting)} left`)}`,
+          width,
+        ),
+      );
     }
     return lines;
   }
 }
 
-function modelLabel(spec: string, thinking: string): string {
-  const name = shortModel(spec);
-  return thinking === 'off' || thinking === '' ? name : `${name}:${thinking}`;
-}
-
-/** Header card: model routes only. */
-export function headerLines(theme: Theme, routes: Routes, width: number): string[] {
-  const branchNote = routes.branch.missing === undefined ? '/raf' : `/raf · ! unknown ${routes.branch.missing}`;
-  const readerNote = routes.reader.missing === undefined ? '' : ` ${theme.fg('dim', `! unknown ${routes.reader.missing}`)}`;
-  return [
-    truncateToWidth(`${theme.fg('accent', theme.bold('RAF'))} ${theme.fg('dim', 'ctr+sh+S')}`, width),
-    truncateToWidth(`${theme.fg('toolTitle', '◉')} ${modelLabel(routes.root.spec, routes.root.thinking)} ${theme.fg('dim', '/model')}`, width),
-    truncateToWidth(`${theme.fg('toolTitle', '⑂')} ${modelLabel(routes.branch.spec, routes.branch.thinking)} ${theme.fg('dim', branchNote)}`, width),
-    truncateToWidth(`${theme.fg('toolTitle', '⟂')} ${shortModel(routes.reader.spec)}${readerNote}`, width),
-  ];
-}
+export { RafWidget as AgentsWidget };

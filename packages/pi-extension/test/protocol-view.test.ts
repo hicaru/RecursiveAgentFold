@@ -7,14 +7,14 @@ describe('renderProtocolMarkdown', () => {
     expect(renderProtocolMarkdown(text)).toBe(text);
   });
 
-  it('renders a complete step: fold, motivation, tool call', () => {
+  it('renders fold and motivation while stripping tool_call blocks without emitting tool names', () => {
     const out = renderProtocolMarkdown(
-      '<folding range="3-3">grep found the key at line 12.</folding>\n<motivation>Verify the value.</motivation>\n<tool_call name="grep"><pattern>key</pattern></tool_call>',
+      '<folding range="3-3">grep found the key at line 12.</folding>\n<motivation>Verify the value.</motivation>\n<tool_call name="bash"><command>git status</command></tool_call>',
     );
     expect(out).toContain('fold 3–3');
     expect(out).toContain('grep found the key at line 12.');
     expect(out).toContain('Verify the value.');
-    expect(out).toContain('`grep`');
+    expect(out).not.toContain('`bash`');
     expect(out).not.toMatch(/<\s*(?:folding|motivation|tool_call)/);
   });
 
@@ -37,8 +37,8 @@ describe('renderProtocolMarkdown', () => {
     expect(renderProtocolMarkdown('visible<think>partial reasoning')).toBe('visible');
   });
 
-  it('takes the tool name from JSON arguments when the attribute is missing', () => {
-    const out = renderProtocolMarkdown('<tool_call>{"name":"read","arguments":{"document":"doc_1"}}</tool_call>');
-    expect(out).toContain('`read`');
+  it('strips both closed and streaming unclosed tool_call blocks cleanly', () => {
+    expect(renderProtocolMarkdown('<tool_call>{"name":"read","arguments":{"document":"doc_1"}}</tool_call>')).toBe('');
+    expect(renderProtocolMarkdown('<motivation>Run check.</motivation>\n<tool_call name="bash"><command>ls')).toBe('Run check.');
   });
 });

@@ -72,8 +72,9 @@ interface Harness {
   readonly getActiveTools: () => string[];
   readonly entries: Array<{ type: 'custom'; customType: string; data: unknown }>;
   readonly messages: AgentMessage[];
-  readonly widgets: Map<string, unknown>;
+  readonly widgets: Map<string, { factory: unknown; options?: { placement?: string } }>;
   readonly getHeaderLines: () => string[] | undefined;
+  readonly getWidgetLines: (key: string) => string[] | undefined;
   readonly emit: (eventName: string, event: Record<string, unknown>) => Promise<unknown>;
   readonly runCommand: (name: string, args: string) => Promise<void>;
   readonly runShortcut: (key: string) => Promise<void>;
@@ -86,7 +87,7 @@ function createHarness(cwd: string, configPath: string): Harness {
   const shortcuts = new Map<string, { handler: (ctx: ExtensionContext) => Promise<void> }>();
   const entries: Array<{ type: 'custom'; customType: string; data: unknown }> = [];
   const messages: AgentMessage[] = [];
-  const widgets = new Map<string, unknown>();
+  const widgets = new Map<string, { factory: unknown; options?: { placement?: string } }>();
   let headerFactory: ((tui: TUI, theme: Theme) => { render(width: number): string[] }) | undefined;
 
   // Pre-seed native pi builtins (read, grep, bash).
@@ -132,9 +133,9 @@ function createHarness(cwd: string, configPath: string): Harness {
       setHeader: vi.fn((factory: typeof headerFactory) => {
         headerFactory = factory;
       }),
-      setWidget: vi.fn((key: string, value: unknown) => {
+      setWidget: vi.fn((key: string, value: unknown, options?: { placement?: string }) => {
         if (value === undefined) widgets.delete(key);
-        else widgets.set(key, value);
+        else widgets.set(key, { factory: value, ...(options !== undefined ? { options } : {}) });
       }),
     },
   } as unknown as ExtensionCommandContext;
@@ -187,6 +188,15 @@ function createHarness(cwd: string, configPath: string): Harness {
     messages,
     widgets,
     getHeaderLines: () => headerFactory?.(tui, plainTheme).render(200),
+    getWidgetLines: (key: string) => {
+      const entry = widgets.get(key);
+      const factory = entry?.factory as ((t: TUI, th: Theme) => { render(width: number): string[]; dispose?: () => void }) | undefined;
+      if (factory === undefined) return undefined;
+      const inst = factory(tui, plainTheme);
+      const lines = inst.render(200);
+      inst.dispose?.();
+      return lines;
+    },
     async emit(eventName: string, event: Record<string, unknown>) {
       let last: unknown;
       for (const handler of handlers.get(eventName) ?? []) {
@@ -224,21 +234,33 @@ describe('rafExtension integration', () => {
     const harness = createHarness(cwd, configPath);
     await harness.emit('session_start', { type: 'session_start' });
 
-    // Exact 4-line header format requested by user.
-    expect(harness.getHeaderLines()).toEqual([
+    // Top-of-scrollback header is never used; RAF card is mounted aboveEditor!
+    expect(harness.getHeaderLines()).toBeUndefined();
+    expect(harness.widgets.get('raf-live')?.options?.placement).toBe('aboveEditor');
+    expect(harness.getWidgetLines('raf-live')).toEqual([
       'RAF ctr+sh+S',
-      '◉ glm-5.3-flash:max /model',
-      '⑂ glm-5.3-flash:max /raf',
-      '⟂ glm-5.3',
+      '    ◉ glm-5.3-flash:max /model',
+      '    ⑂ glm-5.3-flash:max /raf',
+      '    ⟂ glm-5.3',
     ]);
 
     // `RAF ○ idle` (`raf-stats`) widget is never registered.
     expect(harness.widgets.has('raf-stats')).toBe(false);
 
-    // RAF tools are active and branch declares `reachesTools: () => "all"`.
+    // RAF tools are active, branch declares `reachesTools: () => "all"`, and prepareArguments normalizes any format.
     expect(harness.getActiveTools()).toContain('branch');
     expect(harness.getActiveTools()).toContain('llm_query');
     expect(harness.tools.get('branch')?.reachesTools?.({})).toBe('all');
+    expect(
+      harness.tools.get('branch')?.prepareArguments?.(
+        '[[tasks]]\nscope = "packages/engine"\ntask = "Audit engine"\n[[tasks]]\nscope = "packages/pi-extension"\ntask = "Audit UI"',
+      ),
+    ).toEqual({
+      tasks: [
+        { scope: 'packages/engine', task: 'Audit engine' },
+        { scope: 'packages/pi-extension', task: 'Audit UI' },
+      ],
+    });
 
     // Outside a turn while RAF is enabled, `read` still works with RAF aliases (`document`, `start_line`, `end_line`).
     const toolCtx = { ...harness.ctx, tools: [], executeTool: vi.fn() } as unknown as ExtensionToolContext;
@@ -252,9 +274,10 @@ describe('rafExtension integration', () => {
     const fallbackText = fallbackRead?.content[0]?.type === 'text' ? fallbackRead.content[0].text : '';
     expect(fallbackText).toContain('needle-token');
 
-    // Toggle RAF off via ctrl+shift+r -> header clears, RAF-only tools deactivate, native pi `read` & `grep` are restored!
+    // Toggle RAF off via ctrl+shift+r -> aboveEditor widget clears, RAF-only tools deactivate, native pi `read` & `grep` are restored!
     await harness.runShortcut('ctrl+shift+r');
     expect(harness.getHeaderLines()).toBeUndefined();
+    expect(harness.widgets.has('raf-live')).toBe(false);
     expect(harness.getActiveTools()).toEqual(['read', 'grep', 'bash']);
     expect(harness.entries.some((e) => e.customType === ENTRY_MODE)).toBe(true);
 
@@ -370,13 +393,13 @@ describe('rafExtension integration', () => {
       message: rawStep1,
     })) as { message: AssistantMessage } | undefined;
     expect(end1?.message.stopReason).toBe('stop');
-    expect(harness.widgets.has('raf-live')).toBe(false);
+    expect(harness.widgets.has('raf-live')).toBe(true);
 
     expect(harness.entries.some((e) => e.customType === ENTRY_STATE)).toBe(true);
     expect(harness.entries.some((e) => e.customType === ENTRY_RUN)).toBe(true);
 
     // Navigate `/tree` (`session_tree`) and verify state restores cleanly without errors.
     await harness.emit('session_tree', { type: 'session_tree' });
-    expect(harness.getHeaderLines()?.[0]).toBe('RAF ctr+sh+S');
+    expect(harness.getWidgetLines('raf-live')?.[0]).toContain('RAF ctr+sh+S');
   });
 });

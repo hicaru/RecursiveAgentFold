@@ -1,5 +1,17 @@
 import type { FoldDirective, ToolAction } from '../fold/state.js';
+import { decodeXmlText, normalizeBranchArguments, stripCodeFence } from '../tools/branch-args.js';
 import { extractBalanced, normalizeQuotes, parseLooseJSON } from '../util/json.js';
+
+/** Replace Markdown fenced code blocks and inline code spans with spaces of equal length. */
+export function maskMarkdownCode(text: string): string {
+  if (!text.includes('`') && !text.includes('~')) return text;
+  const maskMatch = (m: string): string => m.replace(/[^\r\n]/g, ' ');
+  const withoutFences = text.replace(
+    /(^|\r?\n)([ \t]*)(`{3,}|~{3,})[^\r\n]*\r?\n[\s\S]*?\r?\n[ \t]*\3[ \t]*(?=\r?\n|$)/g,
+    (m) => maskMatch(m),
+  );
+  return withoutFences.replace(/(`+)([^`\r\n]+)\1/g, (m) => maskMatch(m));
+}
 
 /**
  * Parser for the AgentFold response protocol:
@@ -207,7 +219,7 @@ function parseXmlAttributes(attrString: string): Record<string, string> {
   while ((m = re.exec(attrString)) !== null) {
     const key = m[1];
     const val = m[2] ?? m[3] ?? m[4] ?? '';
-    if (key) attrs[key] = val;
+    if (key) attrs[key] = decodeXmlText(val);
   }
   return attrs;
 }
@@ -397,13 +409,16 @@ function inferBareToolName(obj: Record<string, unknown>, contextText: string): s
 
 function parseXmlParamValue(key: string, rawVal: string): unknown {
   if (MULTILINE_PRESERVE_KEYS[key]) {
-    return rawVal.replace(/^\r?\n/, '').replace(/\r?\n$/, '');
+    const stripped = rawVal.replace(/^\r?\n/, '').replace(/\r?\n$/, '');
+    return key === 'command'
+      ? decodeXmlText(stripped)
+      : decodeXmlText(stripped, { preserveHtmlEntitiesWhenRawTagsPresent: true });
   }
   const trimmed = rawVal.trim();
   if (LIST_PARAM_KEYS[key]) {
     const childMatches = [...trimmed.matchAll(/<\s*(?:item|value|doc|document|category|path)(?:\s[^>]*)?>([\s\S]*?)<\s*\/\s*(?:item|value|doc|document|category|path)\s*>/gi)];
     if (childMatches.length > 0) {
-      return childMatches.map((m) => (m[1] ?? '').trim()).filter(Boolean);
+      return childMatches.map((m) => decodeXmlText(m[1] ?? '').trim()).filter(Boolean);
     }
     if (trimmed.startsWith('[')) {
       try {
@@ -413,13 +428,13 @@ function parseXmlParamValue(key: string, rawVal: string): unknown {
         // Fall through to delimiter split
       }
     }
-    return trimmed
+    return decodeXmlText(trimmed)
       .split(/[\n,]+/)
       .map((s) => s.trim().replace(/^["']|["']$/g, ''))
       .filter(Boolean);
   }
   if (STRING_PARAM_KEYS[key]) {
-    return trimmed;
+    return decodeXmlText(trimmed);
   }
   if (/^(?:true|false)$/i.test(trimmed)) {
     return trimmed.toLowerCase() === 'true';
@@ -432,14 +447,14 @@ function parseXmlParamValue(key: string, rawVal: string): unknown {
     try {
       return parseLooseJSON(trimmed);
     } catch {
-      return trimmed;
+      return decodeXmlText(trimmed);
     }
   }
   if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
     const nested = parseNestedXmlChildren(trimmed);
     if (nested !== undefined) return nested;
   }
-  return trimmed;
+  return decodeXmlText(trimmed);
 }
 
 function parseNestedXmlChildren(xml: string): unknown {
@@ -518,7 +533,7 @@ function tryParseStructuredToolCall(
     args[k] = parseXmlParamValue(k, v);
   }
 
-  let body = raw.trim();
+  let body = stripCodeFence(raw.trim());
 
   // Unwrap <invoke name="...">...</invoke> or <tool_name>...</tool_name> wrapper inside <tool_call>
   const outerWrap = /^<\s*([a-zA-Z_][a-zA-Z0-9_-]*)(\s[^>]*)?>([\s\S]*)<\s*\/\s*\1\s*>$/i.exec(body);
@@ -528,40 +543,55 @@ function tryParseStructuredToolCall(
     const outerAttrs = parseXmlAttributes(outerWrap[2] ?? '');
     if (outerTagLower === 'invoke' || outerTagLower === 'function_call' || outerTagLower === 'tool') {
       toolName = outerAttrs.name ?? outerAttrs.tool ?? outerAttrs.function ?? toolName;
-      body = outerWrap[3].trim();
+      body = stripCodeFence(outerWrap[3]);
     } else if (!KNOWN_PARAM_NAMES[outerTag] && !KNOWN_PARAM_NAMES[outerTagLower]) {
       toolName = toolName ?? outerTag;
       for (const [k, v] of Object.entries(outerAttrs)) {
         if (k === 'name' || k === 'tool') continue;
         args[k] = parseXmlParamValue(k, v);
       }
-      body = outerWrap[3].trim();
+      body = stripCodeFence(outerWrap[3]);
     }
   }
 
   // If body after optional unwrap is JSON, parse JSON arguments with resolved toolName
-  if (body.startsWith('{')) {
+  if (body.startsWith('{') || (toolName === 'branch' && body.startsWith('['))) {
     try {
-      const jsonObj = parseLooseJSON<Record<string, unknown>>(body);
-      const fn = (jsonObj.function ?? jsonObj) as Record<string, unknown>;
-      const resolvedName =
-        (typeof fn.name === 'string' ? fn.name : undefined) ??
-        (typeof fn.tool === 'string' ? fn.tool : undefined) ??
-        toolName ??
-        (contextText !== undefined ? inferBareToolName(fn, contextText) : undefined);
-      if (resolvedName) {
-        let jsonArgs = fn.arguments ?? fn.args ?? fn.parameters ?? fn.input;
-        if (jsonArgs === undefined) {
-          const { name: _n, tool: _t, tool_name: _tn, function: _f, ...rest } = fn;
-          jsonArgs = rest;
-        }
-        if (typeof jsonArgs === 'string') jsonArgs = parseLooseJSON(jsonArgs);
-        if (jsonArgs && typeof jsonArgs === 'object' && !Array.isArray(jsonArgs)) {
-          return { name: resolvedName, arguments: { ...args, ...(jsonArgs as Record<string, unknown>) } };
+      const jsonParsed: unknown = parseLooseJSON(body);
+      if (toolName === 'branch' && Array.isArray(jsonParsed)) {
+        return { name: 'branch', arguments: normalizeBranchArguments({ ...args, tasks: jsonParsed }) };
+      }
+      if (jsonParsed !== null && typeof jsonParsed === 'object' && !Array.isArray(jsonParsed)) {
+        const jsonObj = jsonParsed as Record<string, unknown>;
+        const fn = (jsonObj.function ?? jsonObj) as Record<string, unknown>;
+        const resolvedName =
+          (typeof fn.name === 'string' ? fn.name : undefined) ??
+          (typeof fn.tool === 'string' ? fn.tool : undefined) ??
+          toolName ??
+          (contextText !== undefined ? inferBareToolName(fn, contextText) : undefined);
+        if (resolvedName) {
+          let jsonArgs = fn.arguments ?? fn.args ?? fn.parameters ?? fn.input;
+          if (jsonArgs === undefined) {
+            const { name: _n, tool: _t, tool_name: _tn, function: _f, ...rest } = fn;
+            jsonArgs = rest;
+          }
+          if (typeof jsonArgs === 'string') {
+            jsonArgs = resolvedName === 'branch' ? normalizeBranchArguments(jsonArgs) : parseLooseJSON(jsonArgs);
+          }
+          if (resolvedName === 'branch' && Array.isArray(jsonArgs)) {
+            return { name: 'branch', arguments: normalizeBranchArguments({ ...args, tasks: jsonArgs }) };
+          }
+          if (jsonArgs && typeof jsonArgs === 'object' && !Array.isArray(jsonArgs)) {
+            const mergedArgs = { ...args, ...(jsonArgs as Record<string, unknown>) };
+            return {
+              name: resolvedName,
+              arguments: resolvedName === 'branch' ? normalizeBranchArguments(mergedArgs) : mergedArgs,
+            };
+          }
         }
       }
     } catch {
-      // Continue to XML / key-value parsing
+      // Continue to XML / key-value / flexible branch parsing
     }
   }
 
@@ -574,7 +604,19 @@ function tryParseStructuredToolCall(
   // Unwrap <arguments>...</arguments> or <parameters>...</parameters> if present
   const argsWrap = /<\s*(?:arguments|parameters|args|input)(?:\s[^>]*)?>([\s\S]*?)<\s*\/\s*(?:arguments|parameters|args|input)\s*>/i.exec(body);
   if (argsWrap?.[1] !== undefined) {
-    body = argsWrap[1].trim();
+    body = stripCodeFence(argsWrap[1]);
+  }
+
+  if (toolName === 'branch') {
+    const bodyWithoutName = body.replace(
+      /^\s*<\s*(?:name|tool|tool_name)\s*>[\s\S]*?<\s*\/\s*(?:name|tool|tool_name)\s*>\s*/i,
+      '',
+    );
+    const normalizedBody = normalizeBranchArguments(bodyWithoutName);
+    const merged = normalizeBranchArguments({ ...args, ...normalizedBody });
+    if (Object.keys(merged).length > 0) {
+      return { name: 'branch', arguments: merged };
+    }
   }
 
   const taskItems: Array<{ scope?: string; task: string }> = [];
@@ -616,15 +658,16 @@ function tryParseStructuredToolCall(
       continue;
     }
 
+    const attrKey = tagAttrs.name ?? tagAttrs.key;
     const paramKey =
       (tagLower === 'parameter' || tagLower === 'param' || tagLower === 'arg' || tagLower === 'argument' || tagLower === 'field') &&
-      (tagAttrs.name ?? tagAttrs.key)
-        ? (tagAttrs.name ?? tagAttrs.key)!
+      attrKey !== undefined
+        ? attrKey
         : rawTagName;
 
     if (paramKey === 'task') {
       const scopeAttr = tagAttrs.scope?.trim();
-      const trimmedTask = inner.trim();
+      const trimmedTask = decodeXmlText(inner).trim();
       if (trimmedTask) {
         taskItems.push(scopeAttr ? { scope: scopeAttr, task: trimmedTask } : { task: trimmedTask });
       }
@@ -661,8 +704,8 @@ function tryParseStructuredToolCall(
   }
 
   if (taskItems.length > 0) {
-    if (taskItems.length === 1 && args.tasks === undefined) {
-      const first = taskItems[0]!;
+    const first = taskItems[0];
+    if (taskItems.length === 1 && first !== undefined && args.tasks === undefined) {
       if (first.scope !== undefined && args.scope === undefined) {
         args.scope = first.scope;
       }
@@ -704,7 +747,7 @@ function tryParseStructuredToolCall(
 
     // Single shorthand scalar inside <calculator>2 + 2</calculator> or <grep>pattern</grep>
     if (kvCount === 0 && toolName && Object.keys(args).length === 0 && body.trim()) {
-      const scalar = body.trim();
+      const scalar = decodeXmlText(body).trim();
       if (toolName === 'calculator') args.expression = scalar;
       else if (toolName === 'grep' || toolName === 'tally') args.pattern = scalar;
       else if (toolName === 'search' || toolName === 'llm_query') args.query = scalar;
@@ -718,7 +761,7 @@ function tryParseStructuredToolCall(
     toolName ?? (Object.keys(args).length > 0 && contextText !== undefined ? inferBareToolName(args, contextText) : undefined);
   if (!finalName) return undefined;
   if (!foundXmlParam && Object.keys(args).length === 0 && !attrs && !fallbackName) return undefined;
-  return { name: finalName, arguments: args };
+  return { name: finalName, arguments: finalName === 'branch' ? normalizeBranchArguments(args) : args };
 }
 
 function parseToolCall(
@@ -728,10 +771,11 @@ function parseToolCall(
   fallbackName?: string,
   contextText?: string,
 ): ToolAction | undefined {
-  const trimmed = raw.trim();
+  const cleanedRaw = stripCodeFence(raw);
+  const trimmed = cleanedRaw.trim();
   const hasXmlOrAttrs = Boolean(attrs && attrs.trim()) || (trimmed.startsWith('<') && !trimmed.startsWith('{'));
-  if (hasXmlOrAttrs || (!trimmed.startsWith('{') && !trimmed.startsWith('```'))) {
-    const structured = tryParseStructuredToolCall(raw, attrs, fallbackName, contextText);
+  if (hasXmlOrAttrs || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+    const structured = tryParseStructuredToolCall(cleanedRaw, attrs, fallbackName, contextText);
     if (structured) return structured;
     if (hasXmlOrAttrs && !trimmed.includes('{')) {
       errors.push('tool_call.name is missing');
@@ -739,17 +783,30 @@ function parseToolCall(
     }
   }
 
-  let obj: Record<string, unknown>;
+  let parsedJson: unknown;
   try {
-    obj = parseLooseJSON<Record<string, unknown>>(raw);
+    parsedJson = parseLooseJSON(cleanedRaw);
   } catch (e) {
-    const structured = tryParseStructuredToolCall(raw, attrs, fallbackName, contextText);
+    const structured = tryParseStructuredToolCall(cleanedRaw, attrs, fallbackName, contextText);
     if (structured) return structured;
     errors.push(`<tool_call> is not valid: ${(e as Error).message}`);
     return undefined;
   }
   const topAttrs = parseXmlAttributes(attrs ?? '');
   const attrName = topAttrs.name ?? topAttrs.tool ?? topAttrs.tool_name ?? topAttrs.function;
+  if (Array.isArray(parsedJson)) {
+    const arrayToolName = attrName ?? fallbackName;
+    if (arrayToolName === 'branch') {
+      return { name: 'branch', arguments: normalizeBranchArguments(parsedJson) };
+    }
+    errors.push('tool_call.arguments must be an object');
+    return undefined;
+  }
+  if (parsedJson === null || typeof parsedJson !== 'object') {
+    errors.push('tool_call.arguments must be an object');
+    return undefined;
+  }
+  const obj = parsedJson as Record<string, unknown>;
   // Accept OpenAI-style {"function": {"name", "arguments": "<json>"}} as well.
   const fn = (obj.function ?? obj) as Record<string, unknown>;
   const name =
@@ -770,18 +827,46 @@ function parseToolCall(
     args = rest;
   }
   if (typeof args === 'string') {
-    try {
-      args = parseLooseJSON(args);
-    } catch {
-      errors.push('tool_call.arguments is a string, not valid JSON');
-      return undefined;
+    if (name === 'branch') {
+      args = normalizeBranchArguments(args);
+    } else {
+      try {
+        args = parseLooseJSON(args);
+      } catch {
+        errors.push('tool_call.arguments is a string, not valid JSON');
+        return undefined;
+      }
     }
+  }
+  if (name === 'branch' && Array.isArray(args)) {
+    return { name: 'branch', arguments: normalizeBranchArguments(args) };
   }
   if (typeof args !== 'object' || args === null || Array.isArray(args)) {
     errors.push('tool_call.arguments must be an object');
     return undefined;
   }
-  return { name, arguments: args as Record<string, unknown> };
+  return {
+    name,
+    arguments: name === 'branch' ? normalizeBranchArguments(args as Record<string, unknown>) : (args as Record<string, unknown>),
+  };
+}
+
+function extractAnswerFromBody(actionBody: string): string | undefined {
+  const masked = maskMarkdownCode(actionBody);
+  const openMatch = /<\s*answer(?:\s[^>]*)?>/i.exec(masked);
+  if (!openMatch) return undefined;
+  const start = openMatch.index + openMatch[0].length;
+  const closeRe = /<\s*\/\s*answer\s*>/gi;
+  closeRe.lastIndex = start;
+  let lastClose: RegExpExecArray | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = closeRe.exec(masked)) !== null) {
+    lastClose = m;
+  }
+  if (lastClose !== null) {
+    return actionBody.slice(start, lastClose.index).trim();
+  }
+  return extractTagWithAttrs(actionBody, 'answer')?.content;
 }
 
 export interface ParseOptions {
@@ -810,7 +895,16 @@ export function parseAgentResponse(text: string, opts: ParseOptions): ParsedResp
     warnings.push('used <folded_output>/<fold> alias for <folding>');
   }
   if (foldExt !== undefined && (foldExt.content.trim() !== '' || foldExt.attrs !== '')) {
-    out.folding = parseFolding(foldExt.content, foldExt.attrs, warnings, errors);
+    if (opts.expectFolding) {
+      out.folding = parseFolding(foldExt.content, foldExt.attrs, warnings, errors);
+    } else {
+      const foldErrors: string[] = [];
+      const parsedFold = parseFolding(foldExt.content, foldExt.attrs, warnings, foldErrors);
+      if (parsedFold !== undefined && foldErrors.length === 0) {
+        out.folding = parsedFold;
+      }
+      warnings.push('unexpected <folding> when expectFolding=false');
+    }
   } else if (opts.expectFolding) {
     const motIdx = openTagIndex(body, 'motivation');
     const prefix = motIdx >= 0 ? body.slice(0, motIdx).trim() : body.trim();
@@ -832,8 +926,11 @@ export function parseAgentResponse(text: string, opts: ParseOptions): ParsedResp
   if (motExt?.content) out.motivation = motExt.content;
 
   const actionBody = afterFoldBody.replace(groupTagRegex(MOTIVATION_TAGS), '');
-  const answer = extractTag(actionBody, 'answer');
-  const toolExt = extractTagWithAttrs(actionBody, 'tool_call');
+  const answer = extractAnswerFromBody(actionBody);
+  const toolExt =
+    answer !== undefined
+      ? extractTagWithAttrs(maskMarkdownCode(actionBody), 'tool_call')
+      : extractTagWithAttrs(actionBody, 'tool_call');
   if (answer !== undefined) {
     out.answer = answer;
     if (toolExt !== undefined) warnings.push('both <answer> and <tool_call> present; using <answer>');

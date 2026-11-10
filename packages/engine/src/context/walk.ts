@@ -139,6 +139,17 @@ export async function checkPathSafety(absPath: string, packRoot: string): Promis
   }
 }
 
+function isIgnoredRelPath(relPath: string): boolean {
+  const segments = relPath.split('/');
+  for (let i = 0; i < segments.length - 1; i++) {
+    const seg = segments[i];
+    if (seg === undefined || seg === '') continue;
+    if (FALLBACK_IGNORED[seg]) return true;
+    if (seg.startsWith('.') && !DOT_DIR_ALLOWED[seg]) return true;
+  }
+  return false;
+}
+
 async function gitFiles(cwd: string, signal?: AbortSignal): Promise<readonly string[] | undefined> {
   try {
     const { stdout } = await execFileP('git', ['ls-files', '-co', '--exclude-standard', '-z'], {
@@ -153,7 +164,7 @@ async function gitFiles(cwd: string, signal?: AbortSignal): Promise<readonly str
     let n = 0;
     for (let i = 0; i < parts.length; i++) {
       const p = parts[i];
-      if (p !== undefined && p !== '') out[n++] = p;
+      if (p !== undefined && p !== '' && !isIgnoredRelPath(p)) out[n++] = p;
     }
     out.length = n;
     return Object.freeze(out);

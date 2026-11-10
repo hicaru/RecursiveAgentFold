@@ -19,13 +19,21 @@ const MAX_AGENTS = 8;
 const MAX_QUERIES = 3;
 const TAIL = 60;
 
-/** `BR branch · 3 tasks` — what this call is about, in one line. */
+/** `BR branch packages/engine` or `BR branch 3 tasks` — what this call is about, in one line. */
 export function rafRenderCall(name: string, label: string) {
   return (args: unknown, theme: Theme): Text => {
     const record = (args ?? {}) as Record<string, unknown>;
     const parts: string[] = [];
     if (Array.isArray(record.tasks)) {
-      parts.push(plural(record.tasks.length, 'task'));
+      const single =
+        record.tasks.length === 1 && record.tasks[0] !== null && typeof record.tasks[0] === 'object'
+          ? (record.tasks[0] as Record<string, unknown>)
+          : undefined;
+      if (single !== undefined && typeof single.scope === 'string' && single.scope.trim() !== '') {
+        parts.push(clip(oneLine(single.scope, 48), 40));
+      } else {
+        parts.push(plural(record.tasks.length, 'task'));
+      }
     } else if (typeof record.scope === 'string' && record.scope !== '') {
       parts.push(clip(oneLine(record.scope, 48), 40));
     }
@@ -53,49 +61,46 @@ function statusIcon(theme: Theme, agent: AgentSnapshot, now: number): string {
   return theme.fg('error', '✖');
 }
 
-/** `s3 · 4b · f2+1 · cache 62% · 305Ktok` — the per-agent telemetry spine. */
+/** `cache 17% · 24K` — compact specialist telemetry. */
 function agentMeta(agent: AgentSnapshot): string {
-  const meta: string[] = [`s${agent.step}`];
-  if (agent.steps > 0 && agent.steps !== agent.step) meta.push(`/${agent.steps}`);
-  if (agent.blocks > 0) meta.push(`${agent.blocks}b`);
-  if (agent.folds > 0) meta.push(agent.deepFolds > 0 ? `f${agent.folds}+${agent.deepFolds}` : `f${agent.folds}`);
+  const meta: string[] = [];
   if (agent.promptTokens > 0) {
     const rate = agent.cachedTokens / agent.promptTokens;
     meta.push(`cache ${percent(rate)}`);
   }
-  const used = agent.promptTokens + agent.completionTokens;
-  if (used > 0) meta.push(`${tokens(used)}tok`);
+  const contextSize = agent.contextTokens > 0 ? agent.contextTokens : agent.promptTokens + agent.completionTokens;
+  if (contextSize > 0) meta.push(tokens(contextSize));
   return meta.join(SEP);
 }
 
-function agentTail(theme: Theme, agent: AgentSnapshot): string {
-  if (agent.status === 'running') {
-    const action = agent.action;
-    if (action === undefined || action === '' || action === 'thinking') return theme.fg('dim', 'thinking…');
-    return clip(oneLine(action, 90), TAIL);
-  }
-  const settled = agent.terminated ?? agent.answer ?? agent.status;
-  return theme.fg(agent.status === 'done' ? 'dim' : 'error', clip(oneLine(settled, 120), TAIL));
+function branchRail(depth: number): string {
+  if (depth <= 0) return '';
+  return `└${'─'.repeat(1 + (depth - 1) * 4)}`;
 }
 
 function agentRow(theme: Theme, agent: AgentSnapshot, prefix: string, now: number): string {
   const name = agent.depth === 0 ? 'root' : (agent.scope ?? agent.name);
-  return `${prefix}${statusIcon(theme, agent, now)} ${theme.bold(name)} ${theme.fg('muted', agentMeta(agent))} ${agentTail(theme, agent)}`;
+  const meta = agentMeta(agent);
+  const metaPart = meta === '' ? '' : ` ${theme.fg('muted', meta)}`;
+  const failPart =
+    agent.status === 'failed'
+      ? ` ${theme.fg('error', clip(oneLine(agent.terminated ?? 'failed', 80), TAIL))}`
+      : '';
+  return `${prefix}${statusIcon(theme, agent, now)} ${theme.bold(name)}${metaPart}${failPart}`;
 }
 
-/** Depth-first tree with box-drawing rails; root stays unindented. */
+/** Depth-first specialist tree: `└─` at depth 1, `└─────` at depth 2. */
 function snapshotLines(theme: Theme, call: CallSnapshot, now: number): string[] {
   const lines: string[] = [];
   const agents = call.agents.filter((agent) => agent.depth > 0 || agent.steps > 0).slice(0, MAX_AGENTS);
-  agents.forEach((agent, index) => {
+  for (const agent of agents) {
     if (agent.depth === 0) {
       lines.push(agentRow(theme, agent, '', now));
-      return;
+      continue;
     }
-    const next = agents[index + 1];
-    const rail = next === undefined || next.depth <= agent.depth ? '└─' : '├─';
-    lines.push(agentRow(theme, agent, `${theme.fg('dim', `${'│ '.repeat(Math.max(0, agent.depth - 1))}${rail}`)} `, now));
-  });
+    const rail = branchRail(agent.depth);
+    lines.push(agentRow(theme, agent, `${theme.fg('dim', rail)} `, now));
+  }
   const hidden = call.agents.length - agents.length;
   if (hidden > 0) lines.push(theme.fg('dim', `   … ${plural(hidden, 'agent')} omitted`));
 

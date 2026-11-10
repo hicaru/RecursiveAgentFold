@@ -30,6 +30,39 @@ function num(value: unknown): number | undefined {
   return undefined;
 }
 
+/** Normalize RAF `read` parameter aliases into native pi `{ path, offset, limit }` shape. */
+export function normalizeReadArgs(raw: unknown): Record<string, unknown> {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const rec: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  const path = str(rec.path) ?? str(rec.file_path) ?? str(rec.document);
+  if (path !== undefined && rec.path === undefined) rec.path = path;
+  const start = num(rec.offset) ?? num(rec.start_line);
+  const end = num(rec.end_line);
+  if (start !== undefined && rec.offset === undefined) rec.offset = start;
+  if (rec.limit === undefined && start !== undefined && end !== undefined && end >= start) {
+    rec.limit = end - start + 1;
+  }
+  return rec;
+}
+
+/** Normalize RAF `grep` parameter aliases into native pi `{ pattern, path, limit, ignoreCase }` shape. */
+export function normalizeGrepArgs(raw: unknown): Record<string, unknown> {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const rec: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  const singleDoc =
+    Array.isArray(rec.documents) && rec.documents.length === 1 && typeof rec.documents[0] === 'string'
+      ? rec.documents[0]
+      : undefined;
+  const path = str(rec.path) ?? str(rec.document) ?? str(singleDoc);
+  if (path !== undefined && rec.path === undefined) rec.path = path;
+  const limit = num(rec.limit) ?? num(rec.max_matches);
+  if (limit !== undefined && rec.limit === undefined) rec.limit = limit;
+  if (rec.ignoreCase === undefined && typeof rec.case_sensitive === 'boolean') {
+    rec.ignoreCase = !rec.case_sensitive;
+  }
+  return rec;
+}
+
 /** Run pi's native `read` or `grep` tool with RAF parameter alias support. */
 export async function fallbackExecute(
   name: string,
@@ -60,10 +93,19 @@ export async function fallbackExecute(
       ctx,
     );
     const text = contentText(native.content);
+    const nativeDetails =
+      native.details !== null && typeof native.details === 'object'
+        ? (native.details as Record<string, unknown>)
+        : {};
     return {
       content: native.content,
       ...(native.isError !== undefined ? { isError: native.isError } : {}),
-      details: { tool: 'read', lines: text === '' ? 0 : text.split('\n').length, chars: text.length },
+      details: {
+        ...nativeDetails,
+        tool: 'read',
+        lines: text === '' ? 0 : text.split('\n').length,
+        chars: text.length,
+      } as RafToolDetails,
     };
   }
   if (name === 'grep') {
@@ -71,7 +113,11 @@ export async function fallbackExecute(
     if (pattern === undefined) {
       throw new Error('grep: missing "pattern" argument');
     }
-    const searchPath = str(args.path);
+    const singleDoc =
+      Array.isArray(args.documents) && args.documents.length === 1 && typeof args.documents[0] === 'string'
+        ? args.documents[0]
+        : undefined;
+    const searchPath = str(args.path) ?? str(args.document) ?? str(singleDoc);
     const glob = str(args.glob);
     const ignoreCase =
       typeof args.ignoreCase === 'boolean'
@@ -98,10 +144,19 @@ export async function fallbackExecute(
       ctx,
     );
     const text = contentText(native.content);
+    const nativeDetails =
+      native.details !== null && typeof native.details === 'object'
+        ? (native.details as Record<string, unknown>)
+        : {};
     return {
       content: native.content,
       ...(native.isError !== undefined ? { isError: native.isError } : {}),
-      details: { tool: 'grep', lines: text === '' ? 0 : text.split('\n').length, chars: text.length },
+      details: {
+        ...nativeDetails,
+        tool: 'grep',
+        lines: text === '' ? 0 : text.split('\n').length,
+        chars: text.length,
+      } as RafToolDetails,
     };
   }
   throw new Error(`RAF is off · ${name} needs a live RAF turn · press ${toggleShortcut}`);

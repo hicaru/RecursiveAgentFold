@@ -3,7 +3,7 @@ import type { ResearchBoard } from '../context/board.js';
 import { FoldState, fallbackSummary, type FoldDirective, type FoldStateSnapshot, type Interaction, type ToolAction } from '../fold/state.js';
 import { UsageTracker } from '../llm/usage.js';
 import { buildAgentSystemPrompt, FORCE_ANSWER, FORMAT_REMINDER, FORMAT_REPAIR, renderBlockLabel } from '../prompts/agent.js';
-import { parseAgentResponse, type ParsedResponse } from '../protocol/parser.js';
+import { maskMarkdownCode, parseAgentResponse, type ParsedResponse } from '../protocol/parser.js';
 import { defaultEstimator, truncateToTokens, type TokenEstimator } from '../tokens.js';
 import { coerceToolArguments, formatToolCallXml, renderToolSchemas, type Tool } from '../tools/types.js';
 import type { ChatMessage, LLMClient, LLMResponse, LLMUsage } from '../types.js';
@@ -675,13 +675,14 @@ export class AgentFoldAgent {
       }
       if (forcing && !p.answer && p.errors.length === 0 && p.toolCall) p.errors.push('a final <answer> is required now');
       if (p.errors.length === 0 && p.answer !== undefined) {
-        const answerOpen = /<\s*answer\b/i.test(text);
-        const answerClosed = /<\s*\/\s*answer\s*>/i.test(text);
+        const maskedText = maskMarkdownCode(text);
+        const answerOpen = /<\s*answer\b/i.test(maskedText);
+        const answerClosed = /<\s*\/\s*answer\s*>/i.test(maskedText);
         if (outputTruncated) {
           p.errors.push('the <answer> hit the output token limit; produce a complete, shorter final answer');
         } else if (answerOpen && !answerClosed) {
           p.errors.push('the <answer> is not closed; produce a complete final answer');
-        } else if (PROTOCOL_TAG.test(p.answer)) {
+        } else if (PROTOCOL_TAG.test(maskMarkdownCode(p.answer))) {
           p.errors.push('the <answer> contains a protocol tag; return only the answer text');
         } else if (isFoldDirectiveAnswer(p.answer)) {
           p.errors.push('the <answer> contains a folding directive; emit the fold in <folding> and answer with the actual result');

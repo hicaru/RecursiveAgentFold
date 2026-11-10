@@ -7,6 +7,7 @@ import {
   BRANCH_REPORT_ID_PREFIX,
   ContextStore,
   defaultRateLimitGate,
+  normalizeBranchArguments,
   RecursiveAgentFold,
   extractPromptPaths,
   sanitizeDocId,
@@ -21,6 +22,7 @@ import type { RafConfig } from './config.js';
 import { addUsage, ModelClient, PrefetchedRootClient, reasoningOf, toEngineResponse, toPiMessages } from './llm.js';
 import type { AgentMessage } from './pi-types.js';
 import type { Routes } from './routes.js';
+import { geminiSafeSchema } from './schema.js';
 import { contentText, renderTranscript, seedPriorTurns, type SessionState, type TurnStatus } from './state.js';
 import type { CallSnapshot, RunTracker } from './tracker.js';
 
@@ -34,6 +36,7 @@ const MAX_INVALID_STEPS = 3;
 const MAX_INVALID_TOTAL = 6;
 const MAX_REASONING_TOKENS = 32_000;
 const MAX_OBSERVATION_TOKENS = 6400;
+const MAX_STEP_MS = 300_000;
 const WORKSPACE_MAX_FILES = 1200;
 const WORKSPACE_MAX_FILE_BYTES = 8 * 1024 * 1024;
 /** Native tool results longer than this are indexed as documents. */
@@ -41,6 +44,12 @@ const INDEX_RESULT_MIN_CHARS = 6000;
 const UPDATE_INTERVAL_MS = 150;
 /** Bound extra callable tools exposed dynamically to branch subagents. */
 const MAX_EXTRA_CALLABLE_TOOLS = 24;
+
+export const RAF_DOC_TOOL_OPTIONS = Object.freeze({
+  maxReadLines: 500,
+  maxReadTokens: 12_000,
+  maxGrepMatches: 100,
+});
 
 /** RAF built-in tools. They register under these bare names and replace the pi tool of the same name. */
 export const RAF_TOOL_NAMES = Object.freeze([
@@ -128,8 +137,14 @@ function declaredTypeOf(propSchema: unknown): string | undefined {
   if (!isPlainRecord(propSchema)) return undefined;
   if (typeof propSchema.type === 'string') return propSchema.type;
   if (Array.isArray(propSchema.type)) {
-    const found = propSchema.type.find((entry): entry is string => typeof entry === 'string' && entry !== 'null');
-    if (found !== undefined) return found;
+    const types = propSchema.type.filter((entry): entry is string => typeof entry === 'string' && entry !== 'null');
+    if (isPlainRecord(propSchema.properties) && Object.keys(propSchema.properties).length > 0 && types.includes('object')) {
+      return 'object';
+    }
+    if ('items' in propSchema && types.includes('array')) {
+      return 'array';
+    }
+    if (types[0] !== undefined) return types[0];
   }
   return undefined;
 }
@@ -184,7 +199,11 @@ export function fitArguments(args: JsonObject, schema: unknown): JsonObject {
   const props = isPlainRecord(schema.properties) ? schema.properties : undefined;
   if (props === undefined) return args;
 
-  const working: JsonObject = { ...args };
+  const baseArgs =
+    'tasks' in props && ('scope' in props || 'task' in props)
+      ? toJsonObject(normalizeBranchArguments(args))
+      : args;
+  const working: JsonObject = { ...baseArgs };
   const consumedAliases = new Set<string>();
 
   if ('path' in props && working.path === undefined) {
@@ -200,9 +219,28 @@ export function fitArguments(args: JsonObject, schema: unknown): JsonObject {
     consumedAliases.add('path');
   }
 
-  if ('limit' in props && working.limit === undefined && working.max_matches !== undefined) {
-    working.limit = working.max_matches;
-    consumedAliases.add('max_matches');
+  if ('offset' in props && working.offset === undefined && working.start_line !== undefined) {
+    working.offset = working.start_line;
+    consumedAliases.add('start_line');
+  }
+
+  if ('limit' in props && working.limit === undefined) {
+    if (working.max_matches !== undefined) {
+      working.limit = working.max_matches;
+      consumedAliases.add('max_matches');
+    } else if (working.end_line !== undefined) {
+      const s = Number(working.offset ?? working.start_line ?? 1);
+      const e = Number(working.end_line);
+      if (Number.isFinite(s) && Number.isFinite(e) && e >= s) {
+        working.limit = e - s + 1;
+        consumedAliases.add('end_line');
+      }
+    }
+  }
+
+  if ('ignoreCase' in props && working.ignoreCase === undefined && typeof working.case_sensitive === 'boolean') {
+    working.ignoreCase = !working.case_sensitive;
+    consumedAliases.add('case_sensitive');
   }
 
   if ('edits' in props && working.edits === undefined) {
@@ -270,7 +308,7 @@ function latestCheckpoint(ctx: ExtensionContext): string {
 const STUDY_INTENT =
   /(?:\b(?:study|explore|investigate|research|deep[- ]?dive|thorough(?:ly)?|deep(?:ly)?)\b|изучи|изуча|исследуй|глубок|досконал|досканал)/iu;
 const PROJECT_INTENT = /(?:\b(?:project|repo(?:sitory)?|codebase|workspace)\b|проект|репозитор|воркспейс)/iu;
-const STUDY_SCOPE_ROOTS: ReadonlySet<string> = new Set(Object.freeze(['docs', 'results', 'scripts']));
+const STUDY_SCOPE_ROOTS: ReadonlySet<string> = new Set(Object.freeze(['docs', 'scripts']));
 
 /** Workspace scopes (top-level packages and doc folders) from the store manifest. */
 function studyScopes(store: ContextStore): string[] {
@@ -432,7 +470,7 @@ export class RafTurn {
       store,
       board: init.session.board,
       ingest: { cwd: this.workspace, onIngest: (res) => this.keepIngested(res, true) },
-      documentTools: { maxReadLines: 250, maxReadTokens: 6000, maxGrepMatches: 100 },
+      documentTools: RAF_DOC_TOOL_OPTIONS,
       maxDepth: init.config.depth,
       agent: {
         temperature: 0,
@@ -440,6 +478,7 @@ export class RafTurn {
         maxInvalidSteps: MAX_INVALID_STEPS,
         maxInvalidTotal: MAX_INVALID_TOTAL,
         maxReasoningTokens: MAX_REASONING_TOKENS,
+        maxStepMs: MAX_STEP_MS,
         ...(contextWindow > 0 ? { maxPromptTokens: Math.floor(contextWindow * PROMPT_BUDGET_RATIO) } : {}),
       },
       llmQuery: {
@@ -642,6 +681,17 @@ export class RafTurn {
     return this.step;
   }
 
+  /** True when ContextStore holds non-workspace virtual or external documents (`session`, `branch_report_*`, `tool_*`). */
+  hasVirtualDocs(): boolean {
+    for (const doc of this.store.list()) {
+      if (doc.id === 'session' || doc.id.startsWith(BRANCH_REPORT_ID_PREFIX) || doc.id.startsWith('tool_')) {
+        return true;
+      }
+      if (this.session.docs.get(doc.id)?.persist === true) return true;
+    }
+    return false;
+  }
+
   /**
    * Replace the native request with the AgentFold context. Before that, the
    * native result of the previous tool step (and any steering message) goes
@@ -684,6 +734,7 @@ export class RafTurn {
       if (typeof target === 'string' && target.trim() !== '') this.refreshFile(target);
       return text;
     }
+    if (RAF_NAME_SET.has(toolName)) return text;
     if (text.length < INDEX_RESULT_MIN_CHARS) return text;
     const label = String(args.url ?? args.path ?? args.query ?? args.command ?? toolName);
     const id = this.nextIndexedId(toolName);
@@ -880,6 +931,17 @@ export class RafTurn {
           chars: observation.length,
         },
       };
+    } catch (error) {
+      this.captureReports();
+      this.tracker.endCall(toolCallId);
+      const call = this.tracker.callSnapshot(toolCallId);
+      if (call !== undefined && (call.agents.length > 0 || call.queries.length > 0)) {
+        onUpdate?.({
+          content: [{ type: 'text', text: progressLine(call) }],
+          details: { tool: name, call, lines: 0, chars: 0 },
+        });
+      }
+      throw error;
     } finally {
       unsubscribe();
       if (timer !== undefined) clearTimeout(timer);
@@ -974,7 +1036,7 @@ function bridgeTool(info: BridgeableShape, turn: () => RafTurn | undefined): Too
   return {
     name: info.name,
     description: info.description,
-    parameters: info.parameters as JSONSchema,
+    parameters: geminiSafeSchema(info.parameters) as JSONSchema,
     async execute(args, toolCtx) {
       const current = turn();
       if (current === undefined) throw new Error(`${info.name}: RAF turn is not active`);

@@ -7,7 +7,8 @@
  * Branch specialists and the llm_query reader run inside the RAF tool call.
  */
 
-import { join } from 'node:path';
+import { statSync } from 'node:fs';
+import { extname, isAbsolute, join, resolve } from 'node:path';
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent';
 import {
   createGrepToolDefinition,
@@ -16,9 +17,9 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { Text } from '@earendil-works/pi-tui';
 import type { TSchema } from 'typebox';
-import { ContextStore, RecursiveAgentFold, type LLMClient, type Tool } from '@raf/engine';
+import { ContextStore, normalizeBranchArguments, RecursiveAgentFold, type LLMClient, type Tool } from '@raf/engine';
 import { loadConfig, saveConfig, type RafConfig } from './config.js';
-import { fallbackExecute } from './native-fallback.js';
+import { fallbackExecute, normalizeGrepArgs, normalizeReadArgs } from './native-fallback.js';
 import { renderProtocolMarkdown } from './protocol-view.js';
 import { resolveRoutes, type Routes } from './routes.js';
 import { geminiSafeSchema } from './schema.js';
@@ -32,9 +33,9 @@ import {
   type TurnStatus,
 } from './state.js';
 import { cacheRate, oneLine, RunTracker } from './tracker.js';
-import { RAF_TOOL_NAMES, RafTurn, bridgeableTools, type RafToolName } from './turn.js';
+import { RAF_DOC_TOOL_OPTIONS, RAF_TOOL_NAMES, RafTurn, bridgeableTools, type RafToolName } from './turn.js';
 import { duration, percent, usd } from './ui/format.js';
-import { AgentsWidget, headerLines } from './ui/live.js';
+import { RafWidget } from './ui/live.js';
 import { rafRenderCall, rafRenderResult } from './ui/renderers.js';
 import { openRafSettings } from './ui/settings.js';
 
@@ -45,6 +46,32 @@ const WIDGET_LIVE = 'raf-live';
 
 const SHADOWED_NATIVE: ReadonlySet<string> = new Set(Object.freeze(['read', 'grep']));
 const OWNED_RAF_TOOLS: ReadonlySet<string> = new Set(RAF_TOOL_NAMES);
+const RICH_DOC_EXTENSIONS: ReadonlySet<string> = new Set(
+  Object.freeze(['.pdf', '.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls', '.epub', '.odt', '.ods', '.odp', '.rtf']),
+);
+
+function isNativeReadableFile(rawPath: string | undefined, baseCwd: string): boolean {
+  if (rawPath === undefined || rawPath.trim() === '') return false;
+  const trimmed = rawPath.trim();
+  if (RICH_DOC_EXTENSIONS.has(extname(trimmed).toLowerCase())) return false;
+  try {
+    const abs = isAbsolute(trimmed) ? resolve(trimmed) : resolve(baseCwd, trimmed);
+    return statSync(abs, { throwIfNoEntry: false })?.isFile() === true;
+  } catch {
+    return false;
+  }
+}
+
+function isExistingWorkspacePath(rawPath: string | undefined, baseCwd: string): boolean {
+  if (rawPath === undefined || rawPath.trim() === '') return false;
+  try {
+    const trimmed = rawPath.trim();
+    const abs = isAbsolute(trimmed) ? resolve(trimmed) : resolve(baseCwd, trimmed);
+    return statSync(abs, { throwIfNoEntry: false }) !== undefined;
+  } catch {
+    return false;
+  }
+}
 
 /** Persisted run summary (custom entry data for `/tree` and reload). */
 interface RunEntryData {
@@ -77,7 +104,13 @@ function getEngineTools(): ReadonlyMap<string, Tool> {
     },
   };
   const map = new Map<string, Tool>();
-  for (const tool of new RecursiveAgentFold({ rootLLM: dummy, queryLLM: dummy, store: new ContextStore() }).toolsFor(0)) {
+  const templateEngine = new RecursiveAgentFold({
+    rootLLM: dummy,
+    queryLLM: dummy,
+    store: new ContextStore(),
+    documentTools: RAF_DOC_TOOL_OPTIONS,
+  });
+  for (const tool of templateEngine.toolsFor(0)) {
     map.set(tool.name, tool);
   }
   cachedEngineTools = map;
@@ -115,18 +148,126 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
     enabled = mode ?? config.enabledByDefault;
   }
 
-  function registerRafTools(): void {
+  function registerRafTools(cwd: string): void {
     const byName = getEngineTools();
+    const nativeRead = createReadToolDefinition(cwd);
+    const nativeGrep = createGrepToolDefinition(cwd);
+    type ReadCallArgs = Parameters<NonNullable<typeof nativeRead.renderCall>>[0];
+    type ReadCallCtx = Parameters<NonNullable<typeof nativeRead.renderCall>>[2];
+    type ReadResultArg = Parameters<NonNullable<typeof nativeRead.renderResult>>[0];
+    type GrepCallArgs = Parameters<NonNullable<typeof nativeGrep.renderCall>>[0];
+    type GrepCallCtx = Parameters<NonNullable<typeof nativeGrep.renderCall>>[2];
+    type GrepResultArg = Parameters<NonNullable<typeof nativeGrep.renderResult>>[0];
+
     for (const name of RAF_TOOL_NAMES) {
       const engineTool = byName.get(name);
       if (engineTool === undefined) continue;
+      if (name === 'read') {
+        pi.registerTool({
+          name,
+          label: nativeRead.label,
+          description: engineTool.description,
+          promptSnippet: nativeRead.promptSnippet ?? oneLine(`${name}: ${engineTool.description}`, 110),
+          ...(nativeRead.promptGuidelines !== undefined ? { promptGuidelines: nativeRead.promptGuidelines } : {}),
+          parameters: geminiSafeSchema(engineTool.parameters) as unknown as TSchema,
+          prepareArguments: (raw: unknown) => normalizeReadArgs(raw),
+          ...(nativeRead.renderCall !== undefined
+            ? {
+                renderCall: (args, theme, context) => {
+                  const norm = normalizeReadArgs(args) as unknown as ReadCallArgs;
+                  const normCtx = { ...context, args: norm } as unknown as ReadCallCtx;
+                  return nativeRead.renderCall?.(norm, theme, normCtx) ?? new Text('', 0, 0);
+                },
+              }
+            : {}),
+          ...(nativeRead.renderResult !== undefined
+            ? {
+                renderResult: (result, renderOpts, theme, context) => {
+                  const norm = normalizeReadArgs(context.args) as unknown as ReadCallArgs;
+                  const normCtx = { ...context, args: norm } as unknown as ReadCallCtx;
+                  return nativeRead.renderResult?.(result as unknown as ReadResultArg, renderOpts, theme, normCtx) ?? new Text('', 0, 0);
+                },
+              }
+            : {}),
+          async execute(toolCallId, params, signal, onUpdate, ctx) {
+            const current = turn;
+            const record = normalizeReadArgs(params ?? {});
+            const rawTarget = typeof record.path === 'string' ? record.path : undefined;
+            const activeCwd = ctx.cwd ?? cwd;
+            if (current === undefined || current.done || isNativeReadableFile(rawTarget, activeCwd)) {
+              return fallbackExecute('read', toolCallId, record, signal, ctx, HOTKEY_TOGGLE);
+            }
+            return current.executeTool('read', record, toolCallId, signal, onUpdate, ctx);
+          },
+        });
+        continue;
+      }
+      if (name === 'grep') {
+        pi.registerTool({
+          name,
+          label: nativeGrep.label,
+          description: engineTool.description,
+          promptSnippet: nativeGrep.promptSnippet ?? oneLine(`${name}: ${engineTool.description}`, 110),
+          ...(nativeGrep.promptGuidelines !== undefined ? { promptGuidelines: nativeGrep.promptGuidelines } : {}),
+          parameters: geminiSafeSchema(engineTool.parameters) as unknown as TSchema,
+          prepareArguments: (raw: unknown) => normalizeGrepArgs(raw),
+          ...(nativeGrep.renderCall !== undefined
+            ? {
+                renderCall: (args, theme, context) => {
+                  const norm = normalizeGrepArgs(args) as unknown as GrepCallArgs;
+                  const normCtx = { ...context, args: norm } as unknown as GrepCallCtx;
+                  return nativeGrep.renderCall?.(norm, theme, normCtx) ?? new Text('', 0, 0);
+                },
+              }
+            : {}),
+          ...(nativeGrep.renderResult !== undefined
+            ? {
+                renderResult: (result, renderOpts, theme, context) => {
+                  const norm = normalizeGrepArgs(context.args) as unknown as GrepCallArgs;
+                  const normCtx = { ...context, args: norm } as unknown as GrepCallCtx;
+                  return nativeGrep.renderResult?.(result as unknown as GrepResultArg, renderOpts, theme, normCtx) ?? new Text('', 0, 0);
+                },
+              }
+            : {}),
+          async execute(toolCallId, params, signal, onUpdate, ctx) {
+            const current = turn;
+            const record = normalizeGrepArgs(params ?? {});
+            const activeCwd = ctx.cwd ?? cwd;
+            const rawPath = typeof record.path === 'string' ? record.path : undefined;
+            const multiDocs = Array.isArray(record.documents) && record.documents.length > 1;
+            const needsVirtualStore =
+              current !== undefined &&
+              !current.done &&
+              (multiDocs ||
+                (rawPath !== undefined && !isExistingWorkspacePath(rawPath, activeCwd)) ||
+                (rawPath === undefined && record.glob === undefined && current.hasVirtualDocs()));
+            if (needsVirtualStore && current !== undefined) {
+              return current.executeTool('grep', record, toolCallId, signal, onUpdate, ctx);
+            }
+            try {
+              return await fallbackExecute('grep', toolCallId, record, signal, ctx, HOTKEY_TOGGLE);
+            } catch (error) {
+              if (current !== undefined && !current.done) {
+                return current.executeTool('grep', record, toolCallId, signal, onUpdate, ctx);
+              }
+              throw error;
+            }
+          },
+        });
+        continue;
+      }
       pi.registerTool({
         name,
         label: name,
         description: engineTool.description,
         promptSnippet: oneLine(`${name}: ${engineTool.description}`, 110),
         parameters: geminiSafeSchema(engineTool.parameters) as unknown as TSchema,
-        ...(name === 'branch' ? { reachesTools: () => 'all' as const } : {}),
+        ...(name === 'branch'
+          ? {
+              reachesTools: () => 'all' as const,
+              prepareArguments: (raw: unknown) => normalizeBranchArguments(raw),
+            }
+          : {}),
         renderCall: rafRenderCall(name, ''),
         renderResult: rafRenderResult,
         async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -152,7 +293,7 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
   }
 
   function syncTools(cwd: string): void {
-    if (enabled) registerRafTools();
+    if (enabled) registerRafTools(cwd);
     else restoreNativeTools(cwd);
   }
 
@@ -160,26 +301,16 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
     lastUi = ctx;
     routes = resolveRoutes(ctx, config) ?? routes;
     if (ctx.mode !== 'tui') return;
+    ctx.ui.setHeader(undefined);
     if (enabled && routes !== undefined) {
-      const current = routes;
-      ctx.ui.setHeader((_tui, theme) => ({
-        render(width: number): string[] {
-          return headerLines(theme, current, width);
-        },
-        invalidate(): void {},
-      }));
+      ctx.ui.setWidget(
+        WIDGET_LIVE,
+        (tui, theme) => new RafWidget(tracker, () => routes, tui, theme),
+        { placement: 'aboveEditor' },
+      );
     } else {
-      ctx.ui.setHeader(undefined);
+      ctx.ui.setWidget(WIDGET_LIVE, undefined);
     }
-  }
-
-  function attachLiveWidget(ctx: ExtensionContext): void {
-    if (ctx.mode !== 'tui') return;
-    ctx.ui.setWidget(
-      WIDGET_LIVE,
-      (tui, theme) => new AgentsWidget(tracker, tui, theme),
-      { placement: 'aboveEditor' },
-    );
   }
 
   function detachLiveWidget(): void {
@@ -198,7 +329,6 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
       pi.appendEntry(ENTRY_STATE, session.snapshot('aborted'));
       turn = undefined;
     }
-    detachLiveWidget();
     syncTools(ctx.cwd);
     refreshChrome(ctx);
     ctx.ui.notify(next ? `RAF on — root ${routes?.root.spec ?? '(model set by /model)'}` : 'RAF off — standard pi agent', 'info');
@@ -212,24 +342,31 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
     const seconds = (Date.now() - startedAt) / 1000;
     const cost = run.roles.root.costUsd + run.roles.branch.costUsd + run.roles.llm_query.costUsd;
     pi.appendEntry(ENTRY_STATE, session.snapshot(status));
-    pi.appendEntry(ENTRY_RUN, {
-      version: 1,
-      status,
-      steps: run.steps,
-      folds: run.folds,
-      deepFolds: run.deepFolds,
-      formatErrors: run.formatErrors,
-      agents: run.agents,
-      queries: run.queries,
-      queryChunks: run.queryChunks,
-      cacheRoot: cacheRate([run.roles.root]) ?? null,
-      cacheBranch: cacheRate([run.roles.branch]) ?? null,
-      cacheReader: cacheRate([run.roles.llm_query]) ?? null,
-      costUsd: cost,
-      seconds,
-      answer: oneLine(result?.answer ?? '', 400),
-    } satisfies RunEntryData);
-    detachLiveWidget();
+    const emptyAbort =
+      status === 'aborted' &&
+      run.steps === 0 &&
+      run.roles.root.calls === 0 &&
+      run.agents === 0 &&
+      run.queries === 0;
+    if (!emptyAbort) {
+      pi.appendEntry(ENTRY_RUN, {
+        version: 1,
+        status,
+        steps: run.steps,
+        folds: run.folds,
+        deepFolds: run.deepFolds,
+        formatErrors: run.formatErrors,
+        agents: run.agents,
+        queries: run.queries,
+        queryChunks: run.queryChunks,
+        cacheRoot: cacheRate([run.roles.root]) ?? null,
+        cacheBranch: cacheRate([run.roles.branch]) ?? null,
+        cacheReader: cacheRate([run.roles.llm_query]) ?? null,
+        costUsd: cost,
+        seconds,
+        answer: oneLine(result?.answer ?? '', 400),
+      } satisfies RunEntryData);
+    }
     turn = undefined;
   }
 
@@ -291,7 +428,7 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
         getSubagentTools: () => bridgeableTools(pi.getAllTools(), pi.getActiveTools(), { forSubagent: true }),
         history,
       });
-      attachLiveWidget(ctx);
+      refreshChrome(ctx);
     } catch (error) {
       ctx.ui.notify(`RAF cannot start: ${error instanceof Error ? error.message : String(error)}`, 'error');
     }

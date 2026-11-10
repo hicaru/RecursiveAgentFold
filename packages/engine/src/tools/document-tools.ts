@@ -367,8 +367,13 @@ export function createGrepTool(opts: DocumentToolOptions = {}): Tool {
         pattern: { type: 'string', description: 'JavaScript regular expression.' },
         documents: { type: 'array', items: { type: 'string' }, description: 'Document ids (default: all).' },
         path: { type: 'string', description: 'Optional file or directory path/prefix to search (auto-loaded if needed).' },
+        glob: { type: 'string', description: 'Optional file glob filter for native workspace search.' },
         case_sensitive: { type: 'boolean', default: false },
+        ignoreCase: { type: 'boolean', description: 'Alias for !case_sensitive.' },
+        literal: { type: 'boolean', description: 'Treat pattern as literal text in native search.' },
+        context: { type: 'integer', description: 'Context lines around matches in native search.' },
         max_matches: { type: 'integer', description: `Max matching lines to list (default ${opts.maxGrepMatches ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxGrepMatches}, max 100).` },
+        limit: { type: 'integer', description: 'Alias for max_matches.' },
       },
       required: ['pattern'],
     },
@@ -379,11 +384,23 @@ export function createGrepTool(opts: DocumentToolOptions = {}): Tool {
       } catch (e) {
         throw new ToolArgumentError(`Invalid regex: ${(e as Error).message}`);
       }
-      const max = Math.min(100, argNumber(args, 'max_matches') ?? opts.maxGrepMatches ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxGrepMatches);
+      const max = Math.min(
+        100,
+        argNumber(args, 'max_matches') ??
+          argNumber(args, 'limit') ??
+          opts.maxGrepMatches ??
+          DEFAULT_DOCUMENT_TOOL_OPTIONS.maxGrepMatches,
+      );
       const docIds = await ensureTargetsFromArgs(args, ctx, opts.ingest);
+      const ignoreCase =
+        typeof args.case_sensitive === 'boolean'
+          ? !args.case_sensitive
+          : typeof args.ignoreCase === 'boolean'
+            ? args.ignoreCase
+            : true;
       const r = ctx.store.grep(pattern, {
         docIds,
-        ignoreCase: args.case_sensitive !== true,
+        ignoreCase,
         maxMatches: max,
       });
       const head = `grep /${pattern}/: ${r.total} matching lines — ${Object.entries(r.perDoc)

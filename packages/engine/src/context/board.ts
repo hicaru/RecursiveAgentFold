@@ -384,7 +384,10 @@ export class ResearchBoard {
       ) {
         return { result: targetSession.latestSummary, reused: true, scope: normScope };
       }
-      const isFollowUp = targetSession.state.blocks.length > 0 || targetSession.latestSummary !== '';
+      const hasPriorState = targetSession.state.blocks.length > 0;
+      const isFollowUp =
+        targetSession.latestSummary !== '' ||
+        (hasPriorState && normTask !== normalizeTaskKey(targetSession.initialTask));
       targetSession.status = 'running';
       targetSession.activeTask = task.trim();
       try {
@@ -393,7 +396,8 @@ export class ResearchBoard {
           out = await fn({
             isFollowUp,
             initialTask: targetSession.initialTask,
-            ...(isFollowUp ? { followUpQuestion: task.trim(), previousState: targetSession.state } : {}),
+            ...(isFollowUp ? { followUpQuestion: task.trim() } : {}),
+            ...(hasPriorState || isFollowUp ? { previousState: targetSession.state } : {}),
             initialBoardRev: targetSession.initialBoardRev,
             initialBoardCount: targetSession.initialBoardRev,
             ...(targetSession.initialBoardSnapshot !== undefined
@@ -411,11 +415,15 @@ export class ResearchBoard {
           };
         }
         if (out.failed === true) {
-          // Roll back a failed task atomically: no failure entry, no partial
-          // state, no cached answer. A prior successful summary stays intact.
+          // Remove any in-progress board entry on failure. Preserve partial folded blocks
+          // when an interrupted multi-step specialist already condensed work; otherwise roll back.
           if (targetSession.latestSummary === '') {
-            this._specialists.delete(normScope);
             this.removeBranchEntry(normScope);
+            if (out.state.blocks.length > 0) {
+              targetSession.state = out.state;
+            } else {
+              this._specialists.delete(normScope);
+            }
           }
           return { result: out.resultText, reused: false, scope: normScope, failed: true };
         }

@@ -13,11 +13,11 @@ export function spinnerFrame(now: number): string {
   return SPINNER[Math.floor(now / SPINNER_MS) % SPINNER.length] ?? '⠋';
 }
 
-/** `1234` → `1.2k`, `1234567` → `1.2M`. */
+/** `1234` → `1.2K`, `1234567` → `1.2M`. */
 export function tokens(n: number): string {
   const abs = Math.abs(n);
   if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(abs >= 10_000_000 ? 0 : 1)}M`;
-  if (abs >= 1_000) return `${(n / 1_000).toFixed(abs >= 10_000 ? 0 : 1)}k`;
+  if (abs >= 1_000) return `${(n / 1_000).toFixed(abs >= 10_000 ? 0 : 1)}K`;
   return String(Math.round(n));
 }
 

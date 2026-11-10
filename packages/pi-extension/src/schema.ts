@@ -137,11 +137,18 @@ export function geminiSafeSchema(input: unknown, depth = 0): Schema {
     }
   }
 
+  const declaredList = Array.isArray(source.type)
+    ? asStringArray(source.type).filter((entry) => entry !== 'null')
+    : [];
   const declared =
     typeof source.type === 'string'
       ? source.type
-      : Array.isArray(source.type)
-        ? asStringArray(source.type).find((entry) => entry !== 'null')
+      : declaredList.length > 0
+        ? Object.keys(properties).length > 0 && declaredList.includes('object')
+          ? 'object'
+          : source.items !== undefined && declaredList.includes('array')
+            ? 'array'
+            : declaredList[0]
         : undefined;
   const type = declared ?? (Object.keys(properties).length > 0 ? 'object' : undefined);
 

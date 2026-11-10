@@ -283,6 +283,76 @@ end_line: 20
       arguments: { document: 'ctx', start_line: 10, end_line: 20 },
     });
   });
+
+  it('handles session 01a1c76c regressions: multi-format branch tool_call, XML entity heredocs, Step-0 folding, and backticked protocol tags in <answer>', () => {
+    // 1. XML & TOML branch inside <tool_call>
+    const pBranchToml = parseAgentResponse(
+      `<motivation>Fan out across packages.</motivation>
+<tool_call name="branch">
+[[tasks]]
+scope = "packages/engine"
+task = "Inspect parser, board, and walk"
+
+[[tasks]]
+scope = "packages/pi-extension"
+task = "Inspect live widget and renderers"
+</tool_call>`,
+      { expectFolding: false },
+    );
+    expect(pBranchToml.errors).toEqual([]);
+    expect(pBranchToml.toolCall).toEqual({
+      name: 'branch',
+      arguments: {
+        tasks: [
+          { scope: 'packages/engine', task: 'Inspect parser, board, and walk' },
+          { scope: 'packages/pi-extension', task: 'Inspect live widget and renderers' },
+        ],
+      },
+    });
+
+    // 2. XML entity decoding in bash heredoc (&lt;&lt;'PY' and &amp;&amp;)
+    const pBashXml = parseAgentResponse(
+      `<motivation>Run python check.</motivation>
+<tool_call name="bash">
+<command>cd /tmp &amp;&amp; python3 - &lt;&lt;'PY'
+print(1 &lt; 2)
+PY</command>
+</tool_call>`,
+      { expectFolding: false },
+    );
+    expect(pBashXml.errors).toEqual([]);
+    expect(pBashXml.toolCall).toEqual({
+      name: 'bash',
+      arguments: {
+        command: "cd /tmp && python3 - <<'PY'\nprint(1 < 2)\nPY",
+      },
+    });
+
+    // 3. Non-empty <folding>none</folding> on Step 0 warns instead of throwing a fatal error
+    const pStep0Fold = parseAgentResponse(
+      '<folding>No prior step to fold.</folding><motivation>Read README.</motivation><tool_call>{"name":"read","arguments":{"path":"README.md"}}</tool_call>',
+      { expectFolding: false },
+    );
+    expect(pStep0Fold.errors).toEqual([]);
+    expect(pStep0Fold.warnings).toContain('unexpected <folding> when expectFolding=false');
+    expect(pStep0Fold.toolCall?.name).toBe('read');
+
+    // 4. <answer> containing inline backticked and fenced <folding>, <tool_call>, and </answer>
+    const answerText = [
+      'The parser handles `<folding>`, `<tool_call>`, and `</answer>` safely:',
+      '```xml',
+      '<folding range="0-0">example</folding>',
+      '<answer>nested example</answer>',
+      '```',
+      'Final conclusion reached.',
+    ].join('\n');
+    const pAnswer = parseAgentResponse(
+      `<folding range="0-0">Done.</folding><motivation>Deliver report.</motivation><answer>${answerText}</answer>`,
+      { expectFolding: true },
+    );
+    expect(pAnswer.errors).toEqual([]);
+    expect(pAnswer.answer).toBe(answerText);
+  });
 });
 
 describe('utils & CJK token estimation (B7)', () => {

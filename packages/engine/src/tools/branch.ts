@@ -5,7 +5,15 @@ import type { ContextStore } from '../context/store.js';
 import type { FoldStateSnapshot } from '../fold/state.js';
 import { defaultRateLimitGate } from '../llm/rate-limit-gate.js';
 import { defaultEstimator } from '../tokens.js';
+import {
+  normalizeBranchArguments,
+  parseFlexibleBranchTasks,
+  type NormalizedBranchArgs,
+  type SubTaskSpec,
+} from './branch-args.js';
 import { argNumber, argString, ToolArgumentError, type Tool } from './types.js';
+
+export { normalizeBranchArguments, parseFlexibleBranchTasks, type NormalizedBranchArgs, type SubTaskSpec };
 
 /** Prefix for full branch reports stored in ContextStore. Hosts may persist these docs. */
 export const BRANCH_REPORT_ID_PREFIX = 'branch_report_';
@@ -139,11 +147,6 @@ export interface BranchToolOptions {
   readonly maxSpecialists?: number;
 }
 
-export interface SubTaskSpec {
-  readonly scope?: string;
-  readonly task: string;
-}
-
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -172,46 +175,6 @@ export function inferScope(explicitScope: string | undefined, taskText: string, 
     }
   }
   return normalizeTaskKey(taskText);
-}
-
-function parseSubTasks(raw: unknown, fallbackScope: string | undefined): SubTaskSpec[] {
-  if (raw === undefined || raw === null || raw === '') return [];
-  if (Array.isArray(raw)) {
-    const out: SubTaskSpec[] = new Array(raw.length);
-    for (let i = 0; i < raw.length; i++) {
-      const item = raw[i];
-      if (typeof item === 'string') {
-        const t = item.trim();
-        if (!t) throw new ToolArgumentError('tasks array cannot contain empty strings');
-        out[i] = fallbackScope ? { scope: fallbackScope, task: t } : { task: t };
-      } else if (typeof item === 'object' && item !== null) {
-        const rec = item as Record<string, unknown>;
-        const rawTask =
-          typeof rec.task === 'string'
-            ? rec.task
-            : typeof rec.question === 'string'
-              ? rec.question
-              : typeof rec.query === 'string'
-                ? rec.query
-                : '';
-        const t = rawTask.trim();
-        if (!t) throw new ToolArgumentError('task objects in tasks array must contain a non-empty "task" string');
-        const s = typeof rec.scope === 'string' && rec.scope.trim() !== '' ? rec.scope.trim() : fallbackScope;
-        out[i] = s ? { scope: s, task: t } : { task: t };
-      } else {
-        throw new ToolArgumentError('elements of tasks array must be strings or {scope, task} objects');
-      }
-    }
-    return out;
-  }
-  if (typeof raw === 'string') {
-    return raw
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((t) => (fallbackScope ? { scope: fallbackScope, task: t } : { task: t }));
-  }
-  throw new ToolArgumentError('argument "tasks" must be a task list');
 }
 
 export function mergeSubTasksByScope(specs: readonly SubTaskSpec[], store: ContextStore): SubTaskSpec[] {
@@ -287,25 +250,30 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
         tasks: {
           type: 'array',
           items: {
-            type: ['string', 'object'],
+            type: 'object',
             properties: {
               scope: { type: 'string', description: 'Document id or module/library scope for this subtask.' },
               task: { type: 'string', description: 'Subtask instruction or follow-up question.' },
             },
           },
-          description: 'Optional: dispatch multiple independent subtasks in parallel (strings or {scope, task} objects; same scope is merged and deduplicated).',
+          description: 'Optional: dispatch multiple independent subtasks in parallel ({scope, task} objects or task strings; same scope is merged and deduplicated).',
         },
         max_steps: { type: 'integer', description: `Step budget (default ${opts.maxBranchSteps ?? 20}).` },
       },
       required: [],
     },
-    async execute(args, ctx) {
+    async execute(rawArgs, ctx) {
+      const rawScope = argString(rawArgs, 'scope', false);
+      if (rawArgs.tasks !== undefined && rawArgs.tasks !== null && rawArgs.tasks !== '') {
+        parseFlexibleBranchTasks(rawArgs.tasks, rawScope);
+      }
+      const args = normalizeBranchArguments(rawArgs);
       const explicitScope = argString(args, 'scope', false);
       const task =
         argString(args, 'task', false) ??
         argString(args, 'question', false) ??
         argString(args, 'query', false);
-      const tasks = parseSubTasks(args.tasks, explicitScope);
+      const tasks = parseFlexibleBranchTasks(args.tasks, explicitScope);
       if (!task && tasks.length === 0) {
         throw new ToolArgumentError('must provide "task" or "tasks"');
       }

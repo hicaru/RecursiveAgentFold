@@ -27,13 +27,6 @@ function foldLabel(attrs: string, body: string): string {
   return `> **${head}** · ${summary.replace(/\s+/g, ' ').trim()}\n\n`;
 }
 
-function toolName(attrs: string, body: string): string {
-  const attr = /name\s*=\s*["']([^"']+)["']/i.exec(attrs);
-  if (attr?.[1] !== undefined) return attr[1];
-  const json = /"name"\s*:\s*"([^"]+)"/.exec(body);
-  return json?.[1] ?? 'tool';
-}
-
 /** Rewrite protocol tags into readable Markdown. Text without tags is returned as is. */
 export function renderProtocolMarkdown(text: string): string {
   if (!PROTOCOL_TAG.test(text)) return text;
@@ -49,10 +42,8 @@ export function renderProtocolMarkdown(text: string): string {
     (_m, attrs: string, body: string) => `${foldLabel(attrs, body).trimEnd()} …\n\n`,
   );
   out = out.replace(/<\s*(?:motivation|explanation)\b[^>]*>([\s\S]*?)(?:<\s*\/\s*(?:motivation|explanation)\s*>|$)/gi, (_m, body: string) => `${body.trim()}\n\n`);
-  out = out.replace(
-    /<\s*tool_call\b([^>]*)>([\s\S]*?)(?:<\s*\/\s*tool_call\s*>|$)/gi,
-    (_m, attrs: string, body: string) => `→ \`${toolName(attrs, body)}\`\n`,
-  );
+  out = out.replace(/<\s*tool_call\b[^>]*>[\s\S]*?<\s*\/\s*tool_call\s*>/gi, '');
+  out = out.replace(/<\s*tool_call\b[\s\S]*$/i, '');
   out = out.replace(/<\s*\/?\s*answer\b[^>]*>/gi, '');
-  return out.replace(/\n{3,}/g, '\n\n').trimStart();
+  return out.replace(/\n{3,}/g, '\n\n').trim();
 }

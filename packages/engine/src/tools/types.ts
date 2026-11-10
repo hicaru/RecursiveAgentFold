@@ -3,6 +3,8 @@ import type { ContextStore } from '../context/store.js';
 import type { ResearchBoard } from '../context/board.js';
 import type { UsageTracker } from '../llm/usage.js';
 import type { JSONSchema } from '../types.js';
+import { parseLooseJSON } from '../util/json.js';
+import { parseFlexibleBranchTasks } from './branch-args.js';
 
 export interface ToolContext {
   readonly store: ContextStore;
@@ -70,7 +72,13 @@ export function coerceToolArguments(
   for (const [key, val] of Object.entries(out)) {
     const prop = props[key];
     if (!prop || val === undefined || val === null) continue;
-    const expectedType = Array.isArray(prop.type) ? prop.type[0] : prop.type;
+    const expectedType = Array.isArray(prop.type)
+      ? prop.properties !== undefined && Object.keys(prop.properties).length > 0 && prop.type.includes('object')
+        ? 'object'
+        : prop.items !== undefined && prop.type.includes('array')
+          ? 'array'
+          : prop.type[0]
+      : prop.type;
     if (expectedType === 'string' && typeof val !== 'string' && !Array.isArray(val)) {
       out[key] = String(val);
     } else if ((expectedType === 'number' || expectedType === 'integer') && typeof val === 'string') {
@@ -84,6 +92,26 @@ export function coerceToolArguments(
         out[key] = trimmed === 'true';
       }
     } else if (expectedType === 'array' && typeof val === 'string') {
+      if (key === 'tasks') {
+        try {
+          out[key] = parseFlexibleBranchTasks(val, typeof out.scope === 'string' ? out.scope : undefined);
+        } catch {
+          // Leave raw string so the tool validator reports a clear error.
+        }
+        continue;
+      }
+      const trimmed = val.trim();
+      if (trimmed.startsWith('[')) {
+        try {
+          const parsed: unknown = parseLooseJSON(trimmed);
+          if (Array.isArray(parsed)) {
+            out[key] = parsed;
+            continue;
+          }
+        } catch {
+          // Fall through to delimiter split.
+        }
+      }
       out[key] = val
         .split(/[\n,]+/)
         .map((s) => s.trim())

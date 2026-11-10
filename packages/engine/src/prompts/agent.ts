@@ -56,13 +56,13 @@ export const TOOL_GUIDANCE: Record<string, string> = Object.freeze({
   outline:
     '- **outline**: Free structural skeleton (headings, sections, definitions with line numbers). Use to map document boundaries before reading.',
   grep: '- **grep**: Exact string/regex search across stored documents or workspace paths; returns total matching lines per doc and top matches. Set `<max_matches>5</max_matches>` (or 10) when probing or counting.',
-  read: '- **read**: Read a small, exact line window (15-40 lines) from a document ID or file path to verify a located region (auto-loads workspace files if needed). Never use `read` to browse large documents from line 1.',
+  read: '- **read**: Read a line window from a document ID or workspace file path (auto-loads workspace files if needed). Use focused windows (15-80 lines) when verifying located regions; never use `bash` (`cat`, `nl`, `sed`, `head`, `tail`, `awk`) to read files.',
   tally:
     '- **tally**: Deterministic exact regex/capture-group frequency counter. Never count regex matches by hand. When a task asks for frequencies of exact given terms (e.g. lowercase words), use the exact-case counts (or set `<case_sensitive>true</case_sensitive>`) rather than adding capitalized sentence-start variants.',
   branch:
     '- **branch**: Delegate deep document, module, or external-tool research to a persistent scoped specialist sub-agent, or ask a follow-up to an existing specialist. Always pass `scope` (`<tool_call name="branch"><scope>doc_1</scope><task>...</task></tool_call>`, or multiple `<task scope="doc_1">...</task>` tags for parallel tasks): (1) each specialist owns its `scope` and can use all available tools; (2) pass the same `scope` to ask follow-up questions (reusing its folded state and KV cache); (3) never spawn duplicate scans for the same scope or use `branch` for a single grep/read; (4) for document or codebase scopes, use a loaded document id or manifest prefix (load unindexed paths with `add_document` first); for external tool or web research, use a clear topic scope.',
   calculator: '- **calculator**: Exact arithmetic evaluation (+ - * / % ^, sum, min, max, avg, round, floor, ceil, abs, sqrt). Never do mental math.',
-  bash: '- **bash**: Execute shell commands, scripts, builds, tests, or renderers directly in the workspace using the declared parameters in `# Tools`.',
+  bash: '- **bash**: Execute builds, tests, compilers, git commands, or runtime scripts in the workspace. Never use `bash` (`cat`, `nl`, `sed`, `awk`, `head`, `tail`, `grep`, `rg`) to read or search files; always use `read`, `grep`, `search`, or `outline` instead.',
   write: '- **write**: Create or overwrite a workspace file with complete content using the declared parameters in `# Tools`.',
   edit: '- **edit**: Replace exact text in a workspace file using the declared parameters in `# Tools`.',
   glob: '- **glob**: Match workspace files by glob pattern using the declared parameters in `# Tools`.',
@@ -100,7 +100,7 @@ export function buildAgentSystemPrompt(toolNames: string[]): string {
       '  2. **Semantic Scan (`llm_query`)**: Use `llm_query` ONLY when no literal keyword/regex or BM25 window search applies (e.g. full-document abstract category classification with `<mode>extract</mode>` and `<categories>`, or after free search/grep tools return 0 matches).',
       ...(toolNames.includes('bash') || toolNames.includes('pwsh') || toolNames.includes('write') || toolNames.includes('edit')
         ? [
-            '  3. **Workspace & Shell Tools (`bash` / `write` / `edit` / `glob`)**: Use `search`, `outline`, `grep`, `tally`, `read`, `branch`, and `llm_query` first when inspecting or searching documents in ContextStore. Use `bash`, `write`, `edit`, and `glob` directly and without restriction whenever creating or modifying files, running scripts/builds/tests/renderers, or inspecting live filesystem state. Never emit `<answer>` while requested files, artifacts, builds, or verifications are still incomplete — keep executing steps until all deliverables exist and are verified.',
+            '  3. **Workspace & Shell Tools (`bash` / `write` / `edit` / `glob`)**: Always use `read`, `grep`, `search`, `outline`, `tally`, and `branch` when reading or searching files and documents; never spawn `bash` (`cat`, `nl`, `sed`, `awk`, `head`, `tail`) to inspect text. Use `write` and `edit` for file changes, `glob` for path matching, and `bash` for builds, tests, git commands, and runtime scripts. Never emit `<answer>` while requested files, builds, or verifications are still incomplete.',
           ]
         : []),
     );
@@ -137,7 +137,7 @@ export const FORMAT_REPAIR = (
     : '') +
   `Your previous response could not be parsed: ${errors.join('; ')}.\n` +
   `Re-emit the complete Step ${step} response using the exact required XML tags. ` +
-  `Never put <folding>, <motivation>, or <tool_call> inside <answer>; close </answer> before any other tag.` +
+  `Never put raw <folding>, <motivation>, or <tool_call> blocks inside <answer> (wrap literal tag names in backticks if citing code); close </answer> at the end.` +
   (latest === undefined
     ? ' (no unfolded interaction: do NOT output <folding>, not even an empty tag).'
     : ` (<folding range="${latest}-${latest}"> range end MUST be ${latest}; put plain-text summary inside <folding> and tool arguments inside <param>...</param> tags under <tool_call name="...">).`);

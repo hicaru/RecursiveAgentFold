@@ -60,7 +60,11 @@ describe('state', () => {
     first.board.record({ agent: 'root', kind: 'tool', scope: 'doc', key: 'k', summary: 'found' });
     first.docs.set('branch_report_x', { title: 'report', text: 'body', persist: true });
     first.docs.set('packages/a', { title: 'a', text: 'code', persist: false });
+    first.initialManifest = 'huge manifest that must stay out of jsonl';
+    first.docSeq = 7;
     const saved = first.snapshot('done');
+    expect(saved.initialManifest).toBeUndefined();
+    expect(saved.docSeq).toBe(7);
 
     const second = new SessionState();
     second.restore(asPersistedState(saved));
@@ -72,6 +76,7 @@ describe('state', () => {
     expect(second.workspaceIngested).toBe(false);
     expect(second.initialManifest).toBeUndefined();
     expect(second.initialDocIds).toBeUndefined();
+    expect(second.docSeq).toBe(7);
 
     const withoutReports = new SessionState();
     withoutReports.restore(asPersistedState({ version: 1, status: 'aborted' }));

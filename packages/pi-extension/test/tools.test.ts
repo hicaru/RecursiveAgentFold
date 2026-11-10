@@ -140,6 +140,40 @@ describe('tool surface', () => {
       const safe = geminiSafeSchema(engineTool.parameters);
       expect(safe.type).toBe('object');
       assertSafe(safe);
+      if (engineTool.name === 'branch') {
+        const props = safe.properties as Record<string, Record<string, unknown>>;
+        const items = props.tasks?.items as Record<string, unknown>;
+        expect(items.type).toBe('object');
+      }
     }
+  });
+
+  it('normalizes multi-format branch arguments inside fitArguments', () => {
+    const branchSchema = {
+      type: 'object',
+      properties: {
+        scope: { type: 'string' },
+        task: { type: 'string' },
+        tasks: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { scope: { type: 'string' }, task: { type: 'string' } },
+          },
+        },
+      },
+    };
+    const fitted = fitArguments(
+      {
+        tasks: '<task scope="packages/engine">Audit engine, parser, and board</task><task scope="packages/pi-extension">Audit UI, live widget</task>',
+      },
+      branchSchema,
+    );
+    expect(fitted).toEqual({
+      tasks: [
+        { scope: 'packages/engine', task: 'Audit engine, parser, and board' },
+        { scope: 'packages/pi-extension', task: 'Audit UI, live widget' },
+      ],
+    });
   });
 });
