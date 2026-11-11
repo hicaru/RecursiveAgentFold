@@ -44,6 +44,8 @@ export interface RecursiveAgentFoldOptions {
   maxDepth?: number;
   rootMaxSteps?: number;
   branchMaxSteps?: number;
+  /** Maximum branch specialists that run concurrently per branch call. */
+  readonly branchConcurrency?: number;
   /** Prefix applied to every agent's built-in tools (host-native tool names). */
   readonly toolNamePrefix?: string;
   /** Which tools to expose. Default: all available. */
@@ -138,6 +140,7 @@ export class RecursiveAgentFold {
           maxBranchSteps: this.opts.branchMaxSteps ?? 20,
           consultOnly: depth === maxDepth,
           ...(ownScope !== undefined ? { ownScope } : {}),
+          ...(this.opts.branchConcurrency !== undefined ? { concurrency: this.opts.branchConcurrency } : {}),
         }),
       );
     }

@@ -415,4 +415,35 @@ tasks:
       { scope: 'packages/pi-extension', task: 'Audit extension, schema, and live widget thoroughly' },
     ]);
   });
+
+  it('bounds concurrent specialist execution when concurrency is set', async () => {
+    const store = new ContextStore();
+    let inFlight = 0;
+    let peak = 0;
+    const tool = createBranchTool(
+      async (task, opts) => {
+        inFlight += 1;
+        if (inFlight > peak) peak = inFlight;
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        inFlight -= 1;
+        return answer(`Completed specialist report for ${opts.scope ?? 'unknown'}: ${task}. Verified all details.`);
+      },
+      { concurrency: 2 },
+    );
+    const out = await tool.execute(
+      {
+        tasks: [
+          { scope: 'docs', task: 'Study docs thoroughly' },
+          { scope: 'packages/engine', task: 'Study engine thoroughly' },
+          { scope: 'packages/benchmarks', task: 'Study benchmarks thoroughly' },
+          { scope: 'packages/pi-extension', task: 'Study extension thoroughly' },
+          { scope: 'packages/dsh-plugin', task: 'Study dsh plugin thoroughly' },
+        ],
+      },
+      contextFor(store),
+    );
+    expect(peak).toBe(2);
+    expect(out).toContain('[scope=docs]');
+    expect(out).toContain('[scope=packages/dsh-plugin]');
+  });
 });

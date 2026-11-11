@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type {
@@ -80,7 +81,7 @@ interface Harness {
   readonly runShortcut: (key: string) => Promise<void>;
 }
 
-function createHarness(cwd: string, configPath: string): Harness {
+function createHarness(cwd: string, configPath: string, factory: typeof rafExtension = rafExtension): Harness {
   const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => Promise<unknown> | unknown>>();
   const tools = new Map<string, ToolDefinition>();
   const commands = new Map<string, { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }>();
@@ -177,7 +178,7 @@ function createHarness(cwd: string, configPath: string): Harness {
     },
   } as unknown as ExtensionAPI;
 
-  rafExtension(pi, { configPath });
+  factory(pi, { configPath });
 
   return {
     pi,
@@ -401,5 +402,148 @@ describe('rafExtension integration', () => {
     // Navigate `/tree` (`session_tree`) and verify state restores cleanly without errors.
     await harness.emit('session_tree', { type: 'session_tree' });
     expect(harness.getWidgetLines('raf-live')?.[0]).toContain('RAF ctr+sh+S');
+  });
+
+  it('loads raf.ts via pi jiti loader and converts XML branch tasks into a native toolUse step', async () => {
+    const testDir = dirname(fileURLToPath(import.meta.url));
+    const jitiLoaderUrl = pathToFileURL(
+      resolve(testDir, '../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/jiti-loader.js'),
+    ).href;
+    const jitiMod = (await import(jitiLoaderUrl)) as {
+      createJiti: (baseUrl: string, opts: { moduleCache: boolean }) => {
+        import: (id: string, opts?: { default?: boolean }) => Promise<unknown>;
+      };
+    };
+    const jiti = jitiMod.createJiti(jitiLoaderUrl, { moduleCache: false });
+    const entryPath = resolve(testDir, '../raf.ts');
+    const loadedFactory = (await jiti.import(entryPath, { default: true })) as typeof rafExtension;
+    expect(typeof loadedFactory).toBe('function');
+
+    const cwd = createTempDir();
+    writeFileSync(join(cwd, 'README.md'), '# Project\n', 'utf8');
+    const configPath = join(cwd, 'raf.json');
+    writeFileSync(configPath, JSON.stringify({ enabledByDefault: true, deepStudy: true }), 'utf8');
+    const harness = createHarness(cwd, configPath, loadedFactory);
+
+    await harness.emit('session_start', { type: 'session_start' });
+    const userMsg: AgentMessage = {
+      role: 'user',
+      content: [{ type: 'text', text: 'deeply dive this project!' }],
+      timestamp: Date.now(),
+    };
+    harness.messages.push(userMsg);
+    await harness.emit('before_agent_start', {
+      type: 'before_agent_start',
+      messageType: 'user',
+      prompt: 'deeply dive this project!',
+    });
+    await harness.emit('context_with_system', {
+      type: 'context_with_system',
+      messages: [...harness.messages],
+    });
+
+    const assistantXml: AssistantMessage = {
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'Dispatch parallel scoped specialists.' },
+        {
+          type: 'text',
+          text: [
+            '<motivation>Dispatch parallel scoped specialists now.</motivation>',
+            '<tool_call name="branch">',
+            '<task scope="docs">Deeply study docs.</task>',
+            '<task scope="packages/engine">Deeply study packages/engine.</task>',
+            '</tool_call>',
+          ].join('\n'),
+        },
+      ],
+      api: MODEL.api,
+      provider: MODEL.provider,
+      model: MODEL.id,
+      usage: emptyUsage(),
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+
+    const end = (await harness.emit('message_end', {
+      type: 'message_end',
+      message: assistantXml,
+    })) as { message: AssistantMessage } | undefined;
+    expect(end?.message.stopReason).toBe('toolUse');
+    const toolBlock = end?.message.content.find((b) => b.type === 'toolCall');
+    expect(toolBlock).toMatchObject({
+      type: 'toolCall',
+      name: 'branch',
+      arguments: {
+        tasks: [
+          { scope: 'docs', task: 'Deeply study docs.' },
+          { scope: 'packages/engine', task: 'Deeply study packages/engine.' },
+        ],
+      },
+    });
+    expect(
+      harness.tools.get('branch')?.prepareArguments?.({
+        tasks: [
+          { scope: 'docs', task: 'Deeply study docs.' },
+          { scope: 'packages/engine', task: 'Deeply study packages/engine.' },
+        ],
+      }),
+    ).toEqual({
+      tasks: [
+        { scope: 'docs', task: 'Deeply study docs.' },
+        { scope: 'packages/engine', task: 'Deeply study packages/engine.' },
+      ],
+    });
+  });
+
+  it('records error details on raf-run when a turn terminates with an error', async () => {
+    const cwd = createTempDir();
+    const configPath = join(cwd, 'raf.json');
+    const harness = createHarness(cwd, configPath);
+
+    await harness.emit('session_start', { type: 'session_start' });
+    await harness.runCommand('raf', 'on');
+
+    const userMsg: AgentMessage = {
+      role: 'user',
+      content: [{ type: 'text', text: 'Explain architecture.' }],
+      timestamp: Date.now(),
+    };
+    harness.messages.push(userMsg);
+    await harness.emit('before_agent_start', {
+      type: 'before_agent_start',
+      messageType: 'user',
+      prompt: 'Explain architecture.',
+    });
+    await harness.emit('context_with_system', {
+      type: 'context_with_system',
+      messages: [...harness.messages],
+    });
+
+    // Invalid protocol output triggers a live format-repair call that fails in the mock registry.
+    const badAssistant: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'unstructured response with no tags' }],
+      api: MODEL.api,
+      provider: MODEL.provider,
+      model: MODEL.id,
+      usage: emptyUsage(),
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+
+    const end = (await harness.emit('message_end', {
+      type: 'message_end',
+      message: badAssistant,
+    })) as { message: AssistantMessage } | undefined;
+    expect(end?.message.stopReason).toBe('stop');
+    const textBlock = end?.message.content.find((b) => b.type === 'text');
+    expect(textBlock?.type === 'text' ? textBlock.text : '').toContain('Unexpected streamSimple call');
+
+    const runEntry = harness.entries.find((e) => e.customType === ENTRY_RUN);
+    expect(runEntry?.data).toMatchObject({
+      status: 'error',
+      error: 'Unexpected streamSimple call',
+    });
   });
 });

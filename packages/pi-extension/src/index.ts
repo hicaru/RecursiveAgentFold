@@ -17,7 +17,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { Text } from '@earendil-works/pi-tui';
 import type { TSchema } from 'typebox';
-import { ContextStore, normalizeBranchArguments, RecursiveAgentFold, type LLMClient, type Tool } from '@raf/engine';
+import { ContextStore, normalizeBranchArguments, RecursiveAgentFold, type LLMClient, type Tool } from '@raf/engine/source';
 import { loadConfig, saveConfig, type RafConfig } from './config.js';
 import { fallbackExecute, normalizeGrepArgs, normalizeReadArgs } from './native-fallback.js';
 import { renderProtocolMarkdown } from './protocol-view.js';
@@ -90,6 +90,7 @@ interface RunEntryData {
   readonly costUsd: number;
   readonly seconds: number;
   readonly answer: string;
+  readonly error?: string;
 }
 
 let cachedEngineTools: ReadonlyMap<string, Tool> | undefined;
@@ -337,6 +338,7 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
   function finalizeTurn(status: TurnStatus, result: { answer: string | null } | undefined, startedAt: number): void {
     const current = turn;
     if (current === undefined || current.done) return;
+    const errorText = status === 'error' && current.error !== undefined ? oneLine(current.error, 400) : '';
     current.finish(status);
     const run = tracker.runTotals();
     const seconds = (Date.now() - startedAt) / 1000;
@@ -365,6 +367,7 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
         costUsd: cost,
         seconds,
         answer: oneLine(result?.answer ?? '', 400),
+        ...(errorText !== '' ? { error: errorText } : {}),
       } satisfies RunEntryData);
     }
     turn = undefined;
@@ -451,17 +454,43 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
     if (event.message.role !== 'assistant') return;
     const current = turn;
     if (current === undefined || current.done) return;
-    const outcome = await current.acceptResponse(event.message, ctx.signal);
-    if (outcome === undefined) return;
-    if (outcome.kind === 'final') finalizeTurn(outcome.status, outcome.result, current.startedAt);
-    return { message: outcome.replacement };
+    try {
+      const outcome = await current.acceptResponse(event.message, ctx.signal);
+      if (outcome === undefined) return;
+      if (outcome.kind === 'final') {
+        if (outcome.status === 'error' && current.error !== undefined) {
+          ctx.ui.notify(`RAF step failed: ${current.error}`, 'error');
+        }
+        finalizeTurn(outcome.status, outcome.result, current.startedAt);
+      }
+      return { message: outcome.replacement };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      ctx.ui.notify(`RAF step failed: ${msg}`, 'error');
+      finalizeTurn('error', undefined, current.startedAt);
+      return {
+        message: {
+          ...event.message,
+          content: [{ type: 'text', text: `RAF stopped without a final answer: ${msg}` }],
+          stopReason: 'stop',
+        },
+      };
+    }
   });
 
   pi.on('agent_settled', async (event, ctx) => {
     const current = turn;
     if (current === undefined || current.done) return;
+    const detail = current.error;
     finalizeTurn(event.aborted ? 'aborted' : 'error', undefined, current.startedAt);
-    if (!event.aborted) ctx.ui.notify('RAF run ended early; the turn was saved', 'warning');
+    if (!event.aborted) {
+      ctx.ui.notify(
+        detail !== undefined && detail !== ''
+          ? `RAF run ended early: ${detail}`
+          : 'RAF run ended early; the turn was saved',
+        detail !== undefined && detail !== '' ? 'error' : 'warning',
+      );
+    }
   });
 
   pi.on('session_before_compact', async () => {
@@ -488,7 +517,8 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
       `cache r ${percent(data.cacheRoot ?? undefined)} / br ${percent(data.cacheBranch ?? undefined)} / q ${percent(data.cacheReader ?? undefined)} · ` +
       `${usd(data.costUsd)} · ${duration(data.seconds * 1000)}`;
     const lines = [head];
-    if (expanded && data.answer !== '') lines.push(theme.fg('dim', oneLine(data.answer, 400)));
+    if (data.error !== undefined && data.error !== '') lines.push(theme.fg('error', oneLine(data.error, 400)));
+    else if (expanded && data.answer !== '') lines.push(theme.fg('dim', oneLine(data.answer, 400)));
     return new Text(lines.join('\n'), 0, 0);
   });
 

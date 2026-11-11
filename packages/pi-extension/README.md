@@ -14,7 +14,7 @@ or add the local path to `~/.pi/agent/settings.json`:
 { "packages": ["./packages/pi-extension"] }
 ```
 
-The package imports `@raf/engine` from this workspace. Build it first: `pnpm --filter @raf/engine build`.
+The package loads `@raf/engine/source` directly from this workspace via pi's `jiti` loader.
 
 ## Enable
 
@@ -83,7 +83,7 @@ An empty subagent or reader setting inherits the root model. Reader and branch c
 |---|---|
 | `depth` | max `branch` recursion (1–3) |
 | `reserve` | reader window fraction kept free (0.10–0.50) |
-| `concurrency` | parallel `llm_query` chunk calls (1–8) |
+| `concurrency` | parallel `branch` specialist and `llm_query` chunk calls (1–8) |
 | `branchModel` / `branchThinking` | specialist tier |
 | `readerModel` | `llm_query` tier |
 | `deepStudy` | delegate repository-wide studies to scoped specialists |

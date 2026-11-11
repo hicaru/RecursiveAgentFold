@@ -7,7 +7,7 @@ import {
   type LLMQueryCache,
   type ResearchBoardSnapshot,
   type ToolAction,
-} from '@raf/engine';
+} from '@raf/engine/source';
 
 /** Custom entry types this extension appends to the session. */
 export const ENTRY_STATE = 'raf-state';

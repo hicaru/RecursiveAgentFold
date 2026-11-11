@@ -5,6 +5,7 @@ import type { ContextStore } from '../context/store.js';
 import type { FoldStateSnapshot } from '../fold/state.js';
 import { defaultRateLimitGate } from '../llm/rate-limit-gate.js';
 import { defaultEstimator } from '../tokens.js';
+import { createLimiter } from '../util/concurrency.js';
 import {
   normalizeBranchArguments,
   parseFlexibleBranchTasks,
@@ -145,6 +146,8 @@ export interface BranchToolOptions {
   readonly ownScope?: string;
   /** Maximum independent tasks in one branch call. Default 200. */
   readonly maxSpecialists?: number;
+  /** Maximum branch specialists that execute concurrently. Omit for unlimited. */
+  readonly concurrency?: number;
 }
 
 function escapeRegExp(s: string): string {
@@ -433,7 +436,13 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
             `too many branch tasks: ${mergedTasks.length} (max ${maxTasks}); split the call into smaller batches`,
           );
         }
-        const outcomes = await Promise.all(mergedTasks.map((t) => runSingle(t.task, t.scope)));
+        const limit =
+          opts.concurrency !== undefined && Number.isFinite(opts.concurrency) && opts.concurrency >= 1
+            ? createLimiter(Math.floor(opts.concurrency))
+            : undefined;
+        const outcomes = await Promise.all(
+          mergedTasks.map((t) => (limit !== undefined ? limit(() => runSingle(t.task, t.scope)) : runSingle(t.task, t.scope))),
+        );
         return buildReportIndex(outcomes, mergedTasks, ctx.store, opts.maxResultTokens ?? 6000);
       }
       const single = await runSingle(task ?? '', explicitScope);

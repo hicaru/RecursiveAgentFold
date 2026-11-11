@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentEvent } from '@raf/engine';
+import type { AgentEvent } from '@raf/engine/source';
 import { cacheRate, mergeTotals, emptyTotals, RunTracker } from '../src/tracker.js';
 
 function applyAll(tracker: RunTracker, events: readonly AgentEvent[]): void {

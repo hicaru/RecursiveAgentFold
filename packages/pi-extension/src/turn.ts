@@ -17,7 +17,7 @@ import {
   type IngestResult,
   type JSONSchema,
   type Tool,
-} from '@raf/engine';
+} from '@raf/engine/source';
 import type { RafConfig } from './config.js';
 import { addUsage, ModelClient, PrefetchedRootClient, reasoningOf, toEngineResponse, toPiMessages } from './llm.js';
 import type { AgentMessage } from './pi-types.js';
@@ -489,6 +489,7 @@ export class RafTurn {
       },
       rootMaxSteps: ROOT_MAX_STEPS,
       branchMaxSteps: BRANCH_MAX_STEPS,
+      branchConcurrency: init.config.concurrency,
       extraTools: (depth) => (depth === 0 ? rootTools : resolveSubagentTools()),
       signal: this.controller.signal,
       onEvent: (event) => this.onEvent(event),
@@ -777,48 +778,50 @@ export class RafTurn {
     if (this.prepared !== undefined) this.root.prefetch(this.prepared, toEngineResponse(message));
     this.prepared = undefined;
     this.extraRootUsage = [];
-    let step: Awaited<ReturnType<RecursiveAgentFold['next']>>;
+    let usage: Usage = message.usage;
     try {
-      step = await this.engine.next();
+      const step = await this.engine.next();
+      usage = this.extraRootUsage.reduce(addUsage, message.usage);
+      for (const extra of this.extraRootUsage) this.tracker.addCost('root', extra.cost.total);
+      const thinking = thinkingBlocks(message, step.kind === 'done' ? undefined : step.reasoning);
+      if (step.kind === 'tool') {
+        this.step = step.step;
+        const name = piToolName(step.action.name);
+        const schema = this.tools.get(step.action.name)?.parameters;
+        const args = fitArguments(toJsonObject(step.action.arguments), schema);
+        const callId = newCallId();
+        this.pendingCallId = callId;
+        this.session.pending = { callId, step: step.step, motivation: step.motivation, action: step.action };
+        const motivation = step.motivation.trim();
+        return {
+          kind: 'tool',
+          replacement: {
+            ...message,
+            content: [
+              ...thinking,
+              ...(motivation !== '' ? [{ type: 'text' as const, text: motivation }] : []),
+              { type: 'toolCall', id: callId, name, arguments: args },
+            ],
+            stopReason: 'toolUse',
+            usage,
+          },
+        };
+      }
+      if (step.kind === 'answer') {
+        return this.final({ ...message, usage }, step.answer, 'done', step.result, thinking);
+      }
+      const answer = step.result.answer ?? '';
+      if (answer !== '') return this.final({ ...message, usage }, answer, 'done', step.result);
+      this.lastError = step.result.error ?? 'RAF engine returned no answer';
+      const fallback = this.controller.signal.aborted ? undefined : this.fallbackAnswer();
+      return this.final({ ...message, usage }, fallback ?? this.failureText(this.lastError), fallback === undefined ? 'error' : 'done', step.result);
     } catch (error) {
+      this.pendingCallId = undefined;
+      this.session.pending = undefined;
       this.lastError = error instanceof Error ? error.message : String(error);
       if (this.controller.signal.aborted) return undefined;
-      return this.final(message, this.failureText(this.lastError), 'error', undefined);
+      return this.final({ ...message, usage }, this.failureText(this.lastError), 'error', undefined);
     }
-    const usage = this.extraRootUsage.reduce(addUsage, message.usage);
-    for (const extra of this.extraRootUsage) this.tracker.addCost('root', extra.cost.total);
-    const thinking = thinkingBlocks(message, step.kind === 'done' ? undefined : step.reasoning);
-    if (step.kind === 'tool') {
-      this.step = step.step;
-      const callId = newCallId();
-      this.pendingCallId = callId;
-      const name = piToolName(step.action.name);
-      const schema = this.tools.get(step.action.name)?.parameters;
-      const args = fitArguments(toJsonObject(step.action.arguments), schema);
-      this.session.pending = { callId, step: step.step, motivation: step.motivation, action: step.action };
-      const motivation = step.motivation.trim();
-      return {
-        kind: 'tool',
-        replacement: {
-          ...message,
-          content: [
-            ...thinking,
-            ...(motivation !== '' ? [{ type: 'text' as const, text: motivation }] : []),
-            { type: 'toolCall', id: callId, name, arguments: args },
-          ],
-          stopReason: 'toolUse',
-          usage,
-        },
-      };
-    }
-    if (step.kind === 'answer') {
-      return this.final({ ...message, usage }, step.answer, 'done', step.result, thinking);
-    }
-    const answer = step.result.answer ?? '';
-    if (answer !== '') return this.final({ ...message, usage }, answer, 'done', step.result);
-    this.lastError = step.result.error ?? 'RAF engine returned no answer';
-    const fallback = this.controller.signal.aborted ? undefined : this.fallbackAnswer();
-    return this.final({ ...message, usage }, fallback ?? this.failureText(this.lastError), fallback === undefined ? 'error' : 'done', step.result);
   }
 
   private final(

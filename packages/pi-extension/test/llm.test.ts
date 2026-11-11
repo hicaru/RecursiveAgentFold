@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ChatMessage, LLMResponse } from '@raf/engine';
+import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
+import type { ChatMessage, LLMResponse } from '@raf/engine/source';
 import {
   addUsage,
   emptyUsage,
+  ModelClient,
   modelSpec,
-  type ModelClient,
   PrefetchedRootClient,
   reasoningOf,
   toEngineResponse,
@@ -131,5 +132,32 @@ describe('llm mappers', () => {
     const clonedFirst: ChatMessage = { role: 'user', content: 'Q' };
     await expect(client.complete({ messages: [clonedFirst] })).resolves.toBe(liveResponse);
     expect(live.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces the AbortSignal timeout reason instead of generic fetch abort strings', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('step timeout after 300000 ms'));
+    const registry = {
+      find: () => undefined,
+      getAvailable: () => [],
+      streamSimple: () => ({
+        result: async () =>
+          assistant({
+            stopReason: 'aborted',
+            errorMessage: 'This operation was aborted',
+          }),
+      }),
+    } as unknown as ModelRegistry;
+    const client = new ModelClient({
+      registry,
+      model: model as never,
+      maxOutputTokens: 1024,
+    });
+    await expect(
+      client.complete({
+        messages: [{ role: 'user', content: 'Study scope' }],
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow('step timeout after 300000 ms');
   });
 });

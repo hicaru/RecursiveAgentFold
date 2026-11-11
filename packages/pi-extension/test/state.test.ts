@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ResearchBoard } from '@raf/engine';
+import { ResearchBoard } from '@raf/engine/source';
 import {
   asPersistedState,
   contentText,

@@ -12,13 +12,14 @@ import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import {
   defaultRateLimitGate,
   isRateLimitError,
+  sleep,
   type ChatMessage,
   type LLMClient,
   type LLMRequest,
   type LLMResponse,
   type LLMUsage,
   type ModelProfile,
-} from '@raf/engine';
+} from '@raf/engine/source';
 
 export type ChatModel = Model<Api>;
 
@@ -151,23 +152,29 @@ const MAX_TRANSIENT_RETRIES = 4;
 const RETRY_BASE_MS = 2000;
 const RETRY_MAX_MS = 60_000;
 
-/** Wait without ignoring an abort. */
-function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'));
-      return;
+const GENERIC_ABORT_MESSAGES: ReadonlySet<string> = new Set(
+  Object.freeze([
+    '',
+    'aborted',
+    'request aborted',
+    'operation aborted',
+    'this operation was aborted',
+    'the operation was aborted',
+    'the operation was aborted.',
+  ]),
+);
+
+/** Prefer the specific AbortSignal reason over generic fetch abort strings. */
+function abortReason(signal: AbortSignal | undefined, fallback: string): string {
+  if (signal?.aborted === true) {
+    const raw: unknown = signal.reason;
+    const fromSignal =
+      raw instanceof Error ? raw.message.trim() : typeof raw === 'string' ? raw.trim() : '';
+    if (fromSignal !== '' && GENERIC_ABORT_MESSAGES.has(fallback.trim().toLowerCase())) {
+      return fromSignal;
     }
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal?.reason instanceof Error ? signal.reason : new Error('aborted'));
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
+  }
+  return fallback;
 }
 
 /**
@@ -221,7 +228,9 @@ export class ModelClient implements LLMClient {
         return toEngineResponse(message);
       }
       const reason = message.errorMessage ?? `request ${message.stopReason}`;
-      if (message.stopReason === 'aborted' || req.signal?.aborted === true) throw new Error(reason);
+      if (message.stopReason === 'aborted' || req.signal?.aborted === true) {
+        throw new Error(abortReason(req.signal, reason));
+      }
       if (isRateLimitError(undefined, undefined, reason)) {
         gate.noteRateLimit();
         if (solo) {

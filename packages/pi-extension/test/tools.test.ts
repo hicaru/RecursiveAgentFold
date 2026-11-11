@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ToolInfo } from '@earendil-works/pi-coding-agent';
-import { ContextStore, RecursiveAgentFold, type LLMClient } from '@raf/engine';
+import { ContextStore, RecursiveAgentFold, type LLMClient } from '@raf/engine/source';
 import { geminiSafeSchema } from '../src/schema.js';
 import { bridgeableTools, fitArguments, piToolName, RAF_TOOL_NAMES } from '../src/turn.js';
 

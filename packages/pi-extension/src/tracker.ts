@@ -1,4 +1,4 @@
-import type { AgentEvent } from '@raf/engine';
+import type { AgentEvent } from '@raf/engine/source';
 
 /** Usage roles that RAF reports separately. */
 export const ROLES = Object.freeze(['root', 'branch', 'llm_query'] as const);
