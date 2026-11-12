@@ -5,23 +5,29 @@ import {
   type Message,
   type Model,
   type ModelThinkingLevel,
+  type TextContent,
   type ThinkingLevel,
   type Usage,
 } from '@earendil-works/pi-ai';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import {
-  defaultRateLimitGate,
+  defaultRateLimitRegistry,
   isRateLimitError,
+  parseRetryAfterMs,
   sleep,
+  type ChatContentSegment,
   type ChatMessage,
   type LLMClient,
   type LLMRequest,
   type LLMResponse,
   type LLMUsage,
   type ModelProfile,
+  type RateLimitCoordinator,
 } from '@raf/engine/source';
 
 export type ChatModel = Model<Api>;
+
+const MAX_ANTHROPIC_CACHE_BLOCKS = 4;
 
 /** Format a model as `provider/id`. */
 export function modelSpec(model: ChatModel): string {
@@ -71,11 +77,7 @@ export function addUsage(a: Usage, b: Usage): Usage {
   };
 }
 
-/**
- * Convert a native assistant message to an engine response. The engine reads
- * the protocol from text. A native tool call (not expected: RAF requests declare
- * no tools) is re-encoded as a protocol tool call, so no output is lost.
- */
+/** Convert a native assistant message to an engine response. */
 export function toEngineResponse(message: AssistantMessage): LLMResponse {
   const text: string[] = [];
   const reasoning: string[] = [];
@@ -98,29 +100,156 @@ export function toEngineResponse(message: AssistantMessage): LLMResponse {
   };
 }
 
+/** Return true when the model API uses explicit block-level cache_control markers. */
+export function supportsExplicitCacheBlocks(model: ChatModel): boolean {
+  if (model.api === 'anthropic-messages' || model.api === 'bedrock-converse-stream') return true;
+  return model.provider === 'openrouter' && /anthropic|claude/i.test(model.id);
+}
+
+function effectiveUserSegments(message: ChatMessage): readonly ChatContentSegment[] {
+  if (message.segments && message.segments.length > 0) {
+    return message.segments.filter((seg) => seg.text.trim().length > 0);
+  }
+  if (message.content.trim().length === 0) return [];
+  return [{ text: message.content, ...(message.cacheBreakpoint ? { cacheBreakpoint: true } : {}) }];
+}
+
 /** Convert engine chat messages to a pi transcript. */
 export function toPiMessages(messages: readonly ChatMessage[], model: ChatModel): Message[] {
   const timestamp = Date.now();
-  const out: Message[] = new Array(messages.length);
+  const explicitBlocks = supportsExplicitCacheBlocks(model);
+  const out: Message[] = [];
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
     if (m === undefined) continue;
-    if (m.role === 'system') out[i] = { role: 'system', content: m.content, timestamp };
-    else if (m.role === 'user') out[i] = { role: 'user', content: m.content, timestamp };
-    else {
-      out[i] = {
-        role: 'assistant',
-        content: [{ type: 'text', text: m.content }],
-        api: model.api,
-        provider: model.provider,
-        model: model.id,
-        usage: emptyUsage(),
-        stopReason: 'stop',
-        timestamp,
-      };
+    if (m.role === 'system') {
+      out.push({ role: 'system', content: m.content, timestamp });
+      continue;
     }
+    if (m.role === 'user') {
+      if (explicitBlocks) {
+        const blocks: TextContent[] = [];
+        let j = i;
+        while (j < messages.length && messages[j]?.role === 'user') {
+          const u = messages[j];
+          if (u !== undefined) {
+            const segs = effectiveUserSegments(u);
+            for (let k = 0; k < segs.length; k++) {
+              const seg = segs[k];
+              if (seg) blocks.push({ type: 'text', text: seg.text });
+            }
+          }
+          j++;
+        }
+        i = j - 1;
+        if (blocks.length > 1) {
+          out.push({ role: 'user', content: blocks, timestamp });
+        } else {
+          out.push({ role: 'user', content: blocks[0]?.text ?? m.content, timestamp });
+        }
+      } else {
+        out.push({ role: 'user', content: m.content, timestamp });
+      }
+      continue;
+    }
+    out.push({
+      role: 'assistant',
+      content: [{ type: 'text', text: m.content }],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: emptyUsage(),
+      stopReason: 'stop',
+      timestamp,
+    });
   }
   return out;
+}
+
+function countBlockBreakpoints(value: unknown): number {
+  if (!Array.isArray(value)) return 0;
+  let count = 0;
+  for (const item of value) {
+    if (item !== null && typeof item === 'object' && 'cache_control' in item && item.cache_control !== undefined) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/**
+ * Align provider-level `cache_control` markers with RAF's 4-zone segments so
+ * volatile tail blocks do not consume or bust prompt cache entries.
+ */
+export function applyCacheBreakpointsToPayload(
+  payload: unknown,
+  messages: readonly ChatMessage[],
+  model: ChatModel,
+): unknown {
+  if (!supportsExplicitCacheBlocks(model) || payload === null || typeof payload !== 'object') {
+    return undefined;
+  }
+  const rec = payload as Record<string, unknown>;
+  const wireMessages = rec.messages;
+  if (!Array.isArray(wireMessages)) return undefined;
+
+  const userSegmentFlags: boolean[] = [];
+  for (const m of messages) {
+    if (m.role !== 'user') continue;
+    for (const seg of effectiveUserSegments(m)) {
+      userSegmentFlags.push(seg.cacheBreakpoint === true);
+    }
+  }
+  if (userSegmentFlags.length === 0) return undefined;
+
+  const wireUserBlocks: Array<Record<string, unknown>> = [];
+  for (const wm of wireMessages) {
+    if (wm === null || typeof wm !== 'object') continue;
+    const msgRec = wm as Record<string, unknown>;
+    if (msgRec.role !== 'user' || !Array.isArray(msgRec.content)) continue;
+    for (const block of msgRec.content) {
+      if (block !== null && typeof block === 'object' && (block as { type?: unknown }).type === 'text') {
+        wireUserBlocks.push(block as Record<string, unknown>);
+      }
+    }
+  }
+  if (wireUserBlocks.length !== userSegmentFlags.length) return undefined;
+
+  let reserved = countBlockBreakpoints(rec.system) + countBlockBreakpoints(rec.tools);
+  for (const wm of wireMessages) {
+    if (wm === null || typeof wm !== 'object') continue;
+    const msgRec = wm as Record<string, unknown>;
+    if (msgRec.role === 'user') continue;
+    reserved += countBlockBreakpoints(msgRec.content);
+  }
+
+  for (const block of wireUserBlocks) {
+    delete block.cache_control;
+  }
+
+  const budget = Math.max(0, MAX_ANTHROPIC_CACHE_BLOCKS - reserved);
+  if (budget === 0) return payload;
+
+  const desired: number[] = [];
+  for (let i = 0; i < userSegmentFlags.length; i++) {
+    if (userSegmentFlags[i]) desired.push(i);
+  }
+  if (desired.length === 0) return payload;
+
+  const chosen =
+    desired.length <= budget
+      ? desired
+      : budget === 1
+        ? [desired[desired.length - 1] ?? 0]
+        : [desired[0] ?? 0, ...desired.slice(desired.length - (budget - 1))];
+
+  for (const idx of chosen) {
+    const target = wireUserBlocks[idx];
+    if (target !== undefined) {
+      target.cache_control = { type: 'ephemeral' };
+    }
+  }
+  return payload;
 }
 
 /** A zero usage record. */
@@ -141,6 +270,8 @@ export interface ModelClientOptions {
   readonly reasoning?: ThinkingLevel;
   readonly maxOutputTokens: number;
   readonly sessionId?: string;
+  readonly disableContinuation?: boolean;
+  readonly rateLimitGate?: RateLimitCoordinator;
   /** Receives the native usage (with cost) of every completed call. */
   readonly onUsage?: (usage: Usage, request: LLMRequest) => void;
   /** Called when a logical call starts and ends (retries included). */
@@ -164,12 +295,10 @@ const GENERIC_ABORT_MESSAGES: ReadonlySet<string> = new Set(
   ]),
 );
 
-/** Prefer the specific AbortSignal reason over generic fetch abort strings. */
 function abortReason(signal: AbortSignal | undefined, fallback: string): string {
   if (signal?.aborted === true) {
     const raw: unknown = signal.reason;
-    const fromSignal =
-      raw instanceof Error ? raw.message.trim() : typeof raw === 'string' ? raw.trim() : '';
+    const fromSignal = raw instanceof Error ? raw.message.trim() : typeof raw === 'string' ? raw.trim() : '';
     if (fromSignal !== '' && GENERIC_ABORT_MESSAGES.has(fallback.trim().toLowerCase())) {
       return fromSignal;
     }
@@ -178,20 +307,23 @@ function abortReason(signal: AbortSignal | undefined, fallback: string): string 
 }
 
 /**
- * Engine LLM client over pi's model registry. pi resolves auth and provider
- * transport. The engine rate-limit gate coordinates parallel branch and
- * reader calls; other transient failures retry with exponential backoff.
+ * Engine LLM client over pi's model registry.
  */
 export class ModelClient implements LLMClient {
   readonly profile: ModelProfile;
   private readonly opts: ModelClientOptions;
+  private readonly gate: RateLimitCoordinator;
 
   constructor(opts: ModelClientOptions) {
     this.opts = opts;
+    this.gate = opts.rateLimitGate ?? defaultRateLimitRegistry.get(opts.model.provider);
     this.profile = {
       name: modelSpec(opts.model),
       contextWindow: opts.model.contextWindow,
-      maxOutputTokens: Math.min(opts.maxOutputTokens, opts.model.maxTokens > 0 ? opts.model.maxTokens : opts.maxOutputTokens),
+      maxOutputTokens: Math.min(
+        opts.maxOutputTokens,
+        opts.model.maxTokens > 0 ? opts.model.maxTokens : opts.maxOutputTokens,
+      ),
     };
   }
 
@@ -209,15 +341,20 @@ export class ModelClient implements LLMClient {
   }
 
   private async completeWithRetry(req: LLMRequest): Promise<LLMResponse> {
-    const gate = defaultRateLimitGate;
+    const gate = this.gate;
+    const priority = req.priority ?? 1;
     let transient = 0;
     let soloStreak = 0;
+    let totalRateLimits = 0;
     for (;;) {
-      const lease = await gate.acquire(req.signal);
+      const lease = await gate.acquire(req.signal, priority);
       let message: AssistantMessage;
+      let retryAfterMs: number | undefined;
       let solo = true;
       try {
-        message = await this.once(req);
+        const res = await this.once(req);
+        message = res.message;
+        retryAfterMs = res.retryAfterMs;
         solo = lease.isSolo();
       } finally {
         lease.release();
@@ -232,12 +369,16 @@ export class ModelClient implements LLMClient {
         throw new Error(abortReason(req.signal, reason));
       }
       if (isRateLimitError(undefined, undefined, reason)) {
-        gate.noteRateLimit();
+        totalRateLimits += 1;
+        gate.noteRateLimit(retryAfterMs);
         if (solo) {
           soloStreak += 1;
           if (gate.shouldTerminateSolo(soloStreak)) throw gate.createSoloExhaustedError(soloStreak, reason);
         } else {
           soloStreak = 0;
+        }
+        if (gate.shouldTerminateTotal(totalRateLimits)) {
+          throw gate.createExhaustedError(totalRateLimits, reason);
         }
         continue;
       }
@@ -248,9 +389,18 @@ export class ModelClient implements LLMClient {
     }
   }
 
-  private once(req: LLMRequest): Promise<AssistantMessage> {
-    const { registry, model, reasoning, sessionId } = this.opts;
-    return registry
+  private async once(req: LLMRequest): Promise<{ message: AssistantMessage; retryAfterMs?: number }> {
+    const { registry, model, reasoning, sessionId, disableContinuation } = this.opts;
+    const scopedSession =
+      sessionId === undefined
+        ? undefined
+        : req.cacheKey
+          ? `${sessionId}:${req.cacheKey}`
+          : req.purpose
+            ? `${sessionId}:${req.purpose}`
+            : sessionId;
+    let retryAfterMs: number | undefined;
+    const message = await registry
       .streamSimple(
         model,
         { messages: toPiMessages(req.messages, model) },
@@ -259,22 +409,27 @@ export class ModelClient implements LLMClient {
           ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
           ...(reasoning !== undefined ? { reasoning } : {}),
           ...(req.signal !== undefined ? { signal: req.signal } : {}),
-          ...(sessionId !== undefined ? { sessionId } : {}),
+          ...(scopedSession !== undefined ? { sessionId: scopedSession } : {}),
+          ...(disableContinuation === true ? { disableContinuation: true } : {}),
+          onPayload: (payload) => applyCacheBreakpointsToPayload(payload, req.messages, model),
+          onResponse: (response) => {
+            const parsed = parseRetryAfterMs(response.headers["retry-after"]);
+            if (parsed !== undefined) retryAfterMs = parsed;
+          },
         },
       )
       .result();
+    return { message, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) };
   }
 }
 
 /**
- * Root client for native steps. pi already sent the first attempt of a step
- * as a native request; `next()` receives that response here. Any other call
- * (format repair, forced answer) goes to the live model.
+ * Root client for native steps.
  */
 export class PrefetchedRootClient implements LLMClient {
   readonly profile: ModelProfile;
   private readonly live: ModelClient;
-  private prefetched: { readonly messages: readonly ChatMessage[]; readonly response: LLMResponse } | undefined;
+  private prefetched?: { readonly messages: readonly ChatMessage[]; readonly response: LLMResponse };
 
   constructor(live: ModelClient) {
     this.live = live;

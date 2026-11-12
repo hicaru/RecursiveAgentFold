@@ -1,0 +1,67 @@
+{
+  "bench": "longbench",
+  "method": "raf",
+  "n": 6,
+  "meanScore": 0,
+  "correct": 0,
+  "meanOfficial": 0,
+  "meanLenient": 0,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 0,
+  "meanSteps": 3,
+  "meanWallSec": 0.0755,
+  "formatIssues": 0,
+  "folds": {
+    "granular": 12,
+    "deep": 0,
+    "corrected": 6
+  },
+  "llmQueryCalls": 6,
+  "tokens": {
+    "prompt": 3360813,
+    "cached": 206144,
+    "completion": 10116,
+    "rootCacheHitRate": 0.8027641247749282,
+    "branchCacheHitRate": 0,
+    "cacheHitRate": 0.061337539458458414
+  },
+  "byRole": {
+    "root": {
+      "calls": 18,
+      "promptTokens": 82196,
+      "completionTokens": 966,
+      "cachedTokens": 65984,
+      "reasoningTokens": 0,
+      "latencyMs": 0,
+      "errors": 0,
+      "cacheHitRate": 0.8027641247749282
+    },
+    "llm_query": {
+      "calls": 366,
+      "promptTokens": 3278617,
+      "completionTokens": 9150,
+      "cachedTokens": 140160,
+      "reasoningTokens": 0,
+      "latencyMs": 0,
+      "errors": 0,
+      "cacheHitRate": 0.04274973258541635
+    }
+  },
+  "byTask": {
+    "Multi-Document QA": {
+      "n": 4,
+      "score": 0
+    },
+    "Code Repository Understanding": {
+      "n": 2,
+      "score": 0
+    }
+  },
+  "byAnswerType": {
+    "?": {
+      "n": 6,
+      "score": 0
+    }
+  }
+}

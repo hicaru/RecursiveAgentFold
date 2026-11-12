@@ -11,17 +11,41 @@ export function evaluateExpression(src: string): number {
     while (s[i] === ' ' || s[i] === '\t' || s[i] === '\n') i++;
     return s[i];
   };
-  const fns: Record<string, (xs: number[]) => number> = {
-    sum: (xs) => xs.reduce((a, b) => a + b, 0),
-    min: (xs) => Math.min(...xs),
-    max: (xs) => Math.max(...xs),
-    avg: (xs) => xs.reduce((a, b) => a + b, 0) / xs.length,
-    round: (xs) => (xs.length > 1 ? Number(xs[0]!.toFixed(xs[1])) : Math.round(xs[0]!)),
-    floor: (xs) => Math.floor(xs[0]!),
-    ceil: (xs) => Math.ceil(xs[0]!),
-    abs: (xs) => Math.abs(xs[0]!),
-    sqrt: (xs) => Math.sqrt(xs[0]!),
+  const requireArg = (fnName: string, xs: readonly number[]): number => {
+    const first = xs[0];
+    if (first === undefined) throw new Error(`${fnName}() requires at least 1 argument`);
+    return first;
   };
+  const fns: Readonly<Record<string, (xs: number[]) => number>> = Object.freeze({
+    sum: (xs) => xs.reduce((a, b) => a + b, 0),
+    min: (xs) => {
+      requireArg('min', xs);
+      return Math.min(...xs);
+    },
+    max: (xs) => {
+      requireArg('max', xs);
+      return Math.max(...xs);
+    },
+    avg: (xs) => {
+      requireArg('avg', xs);
+      return xs.reduce((a, b) => a + b, 0) / xs.length;
+    },
+    round: (xs) => {
+      const val = requireArg('round', xs);
+      const digitsRaw = xs[1];
+      if (digitsRaw === undefined) return Math.round(val);
+      const digits = Math.max(0, Math.min(100, Math.trunc(digitsRaw)));
+      return Number(val.toFixed(digits));
+    },
+    floor: (xs) => Math.floor(requireArg('floor', xs)),
+    ceil: (xs) => Math.ceil(requireArg('ceil', xs)),
+    abs: (xs) => Math.abs(requireArg('abs', xs)),
+    sqrt: (xs) => {
+      const val = requireArg('sqrt', xs);
+      if (val < 0) throw new Error('sqrt() domain error: negative input');
+      return Math.sqrt(val);
+    },
+  });
   function primary(): number {
     const c = peek();
     if (c === '(') {
@@ -82,6 +106,7 @@ export function evaluateExpression(src: string): number {
       if (c === '*' || c === '/' || c === '%') {
         i++;
         const r = power();
+        if ((c === '/' || c === '%') && r === 0) throw new Error('division by zero');
         v = c === '*' ? v * r : c === '/' ? v / r : v % r;
       } else return v;
     }
@@ -98,7 +123,8 @@ export function evaluateExpression(src: string): number {
     }
   }
   const v = expr();
-  if (peek() !== undefined) throw new Error(`unexpected "${s[i]}" at ${i}`);
+  if (peek() !== undefined) throw new Error(`unexpected "${s[i] ?? ''}" at ${i}`);
+  if (!Number.isFinite(v)) throw new Error('expression evaluated to non-finite number');
   return v;
 }
 
@@ -111,8 +137,9 @@ export function createCalculatorTool(): Tool {
       properties: { expression: { type: 'string' } },
       required: ['expression'],
     },
+    isConcurrencySafe: () => true,
     async execute(args) {
-      const expression = argString(args, 'expression')!;
+      const expression = argString(args, 'expression') ?? '';
       try {
         const v = evaluateExpression(expression);
         return `${expression} = ${Number.isInteger(v) ? v : Number(v.toPrecision(12))}`;

@@ -1,0 +1,32 @@
+{
+  "bench": "ruler",
+  "method": "raf",
+  "startedAt": "2026-11-11T00:56:13.260Z",
+  "tasks": 11,
+  "taskIds": [
+    "ruler-131072-niah_single_1-0",
+    "ruler-131072-niah_single_2-0",
+    "ruler-131072-niah_single_3-0",
+    "ruler-131072-niah_multikey_1-0",
+    "ruler-131072-niah_multikey_2-0",
+    "ruler-131072-niah_multikey_3-0",
+    "ruler-131072-niah_multiquery-0",
+    "ruler-131072-niah_multivalue-0",
+    "ruler-131072-vt-0",
+    "ruler-131072-cwe-0",
+    "ruler-131072-fwe-0"
+  ],
+  "argv": [
+    "ruler",
+    "--mock",
+    "--max-depth",
+    "2"
+  ],
+  "tools": "all",
+  "models": {
+    "mock": true,
+    "llmQuery": {
+      "reserveRatio": 0.3
+    }
+  }
+}

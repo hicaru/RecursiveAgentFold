@@ -102,9 +102,9 @@ export async function openRafSettings(
       {
         id: 'concurrency',
         label: 'readers',
-        description: 'Parallel llm_query chunk calls.',
+        description: 'Parallel branch and llm_query calls.',
         currentValue: String(config.concurrency),
-        values: ['1', '2', '3', '4', '5', '6', '7', '8'],
+        values: ['1', '2', '4', '8', '12', '16', '24', '32'],
       },
       {
         id: 'deepStudy',

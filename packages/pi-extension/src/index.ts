@@ -348,7 +348,7 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
       status === 'aborted' &&
       run.steps === 0 &&
       run.roles.root.calls === 0 &&
-      run.agents === 0 &&
+      run.agents <= 1 &&
       run.queries === 0;
     if (!emptyAbort) {
       pi.appendEntry(ENTRY_RUN, {
@@ -408,17 +408,13 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
     if (routes === undefined) return;
     if (turn !== undefined && !turn.done) return;
     if (event.messageType !== 'user') return;
-    const messages = ctx.sessionManager.buildSessionProjection().messages;
-    let index = -1;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]?.role === 'user') {
-        index = i;
-        break;
-      }
-    }
-    const prompt = index >= 0 ? messageText(messages[index]) : event.prompt;
-    const history = index >= 0 ? messages.slice(0, index) : [];
+    const prompt = event.prompt;
     if (prompt.trim() === '') return;
+    const projected = ctx.sessionManager.buildSessionProjection().messages;
+    let end = projected.length;
+    const tail = projected[end - 1];
+    if (tail?.role === 'user' && messageText(tail).trim() === prompt.trim()) end -= 1;
+    const history = projected.slice(0, end);
     try {
       turn = await RafTurn.create({
         ctx,
@@ -493,17 +489,22 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
     }
   });
 
-  pi.on('session_before_compact', async () => {
+  pi.on('session_before_compact', async (event) => {
     if (turn !== undefined && !turn.done) return { cancel: true };
+    if (enabled && event.reason !== 'manual') return { cancel: true };
   });
 
-  pi.on('cache_warming_decision', async () => {
-    if (enabled && (turn !== undefined || session.rootState !== undefined)) return { action: 'stop' };
-  });
+  pi.registerMarkdownTransformer(
+    (markdown, { isStreaming }) => {
+      if (!isStreaming || turn === undefined || turn.done) return markdown;
+      return renderProtocolMarkdown(markdown);
+    },
+    { messageTypes: ['assistant'] },
+  );
 
-  pi.registerMarkdownTransformer((markdown, { isStreaming }) => {
-    if (!isStreaming || turn === undefined || turn.done) return markdown;
-    return renderProtocolMarkdown(markdown);
+  pi.on('before_provider_request', async (event) => {
+    if (!enabled || turn === undefined || turn.done) return undefined;
+    return turn.decorateProviderPayload(event.payload);
   });
 
   pi.registerEntryRenderer(ENTRY_RUN, (entry, { expanded }, theme: Theme) => {

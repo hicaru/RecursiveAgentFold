@@ -4,7 +4,7 @@ import { isAncestorEcho, normalizeScopeKey, normalizeTaskKey } from '../context/
 import type { ContextStore } from '../context/store.js';
 import type { FoldStateSnapshot } from '../fold/state.js';
 import { defaultRateLimitGate } from '../llm/rate-limit-gate.js';
-import { defaultEstimator } from '../tokens.js';
+import { defaultEstimator, truncateToTokens } from '../tokens.js';
 import { createLimiter } from '../util/concurrency.js';
 import {
   normalizeBranchArguments,
@@ -31,15 +31,21 @@ function storeReport(
     id: `${BRANCH_REPORT_ID_PREFIX}${randomUUID()}`,
     title: `branch report: ${label}`.slice(0, 160),
     manifest: false,
+    transient: true,
   });
   return { id: doc.id, tokens: doc.tokens, lines: doc.lines.length };
 }
 
-/** Head-only excerpt. The full report stays in ContextStore. */
-function excerptText(text: string, maxTokens: number): string {
-  const chars = defaultEstimator.chars(Math.max(1, maxTokens));
-  if (text.length <= chars) return text;
-  return `${text.slice(0, chars).trimEnd()}\n…[excerpt truncated; full report is stored]`;
+/** Token-bounded excerpt. Returns whether truncation occurred. */
+function excerptText(text: string, maxTokens: number): { readonly text: string; readonly truncated: boolean } {
+  const res = truncateToTokens(text, Math.max(16, maxTokens), defaultEstimator);
+  if (!res.truncated) return { text, truncated: false };
+  const budget = Math.max(16, maxTokens);
+  const chars = defaultEstimator.prefixChars(text, budget);
+  return {
+    text: `${text.slice(0, chars).trimEnd()}\n…[excerpt truncated; full report is stored]`,
+    truncated: true,
+  };
 }
 
 /**
@@ -98,9 +104,9 @@ function buildReportIndex(
     index = records
       .map(({ outcome, report }, i) => {
         const header = headers[i] ?? '';
-        return report === undefined || effectiveBudget === 0
-          ? header
-          : `${header}\nExcerpt:\n${excerptText(outcome.text, effectiveBudget)}`;
+        if (report === undefined || effectiveBudget === 0) return header;
+        const ex = excerptText(outcome.text, effectiveBudget);
+        return ex.truncated ? `${header}\nExcerpt:\n${ex.text}` : `${header}\nComplete report:\n${ex.text}`;
       })
       .join('\n\n');
     if (defaultEstimator.count(index) <= maxTokens || effectiveBudget === 0) break;
@@ -168,12 +174,12 @@ export function inferScope(explicitScope: string | undefined, taskText: string, 
       return normalizeScopeKey(matchedDocs[0].id);
     }
   }
-  const modMatches = [...taskText.matchAll(/\b((?:lib|mod|dep|service|pkg|doc|app|spec)[_-][a-z0-9_-]+)\b/gi)];
-  if (modMatches.length > 0) {
-    const uniqueMods = new Set(modMatches.map((m) => normalizeScopeKey(m[1] ?? '')));
-    uniqueMods.delete('');
-    if (uniqueMods.size === 1) {
-      const first = [...uniqueMods][0];
+  const structMatches = [...taskText.matchAll(/\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_./-]+|[a-z][a-z0-9]*_[a-z0-9_-]+)\b/g)];
+  if (structMatches.length > 0) {
+    const uniqueIds = new Set(structMatches.map((m) => normalizeScopeKey(m[1] ?? '')));
+    uniqueIds.delete('');
+    if (uniqueIds.size === 1) {
+      const first = [...uniqueIds][0];
       if (first) return first;
     }
   }
@@ -219,7 +225,7 @@ interface BranchSubtaskResult {
 
 const RESEARCH_TASK =
   /\b(?:deeply|study|analy[sz]e|research|report|extract|list every|enumerate|summari[sz]e|compare|include|cite|citations|key facts|architecture|components?|tests?|benchmarks?|risks?)\b/i;
-const MIN_RESEARCH_ANSWER_CHARS = 120;
+const MIN_RESEARCH_ANSWER_CHARS = 12;
 
 /** A branch subtask is usable only when the child finished with a real answer and no error. */
 function isCompleteBranchRun(result: BranchRunnerResult, task: string): boolean {
@@ -265,6 +271,7 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
       },
       required: [],
     },
+    isConcurrencySafe: () => true,
     async execute(rawArgs, ctx) {
       const rawScope = argString(rawArgs, 'scope', false);
       if (rawArgs.tasks !== undefined && rawArgs.tasks !== null && rawArgs.tasks !== '') {
@@ -436,9 +443,10 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
             `too many branch tasks: ${mergedTasks.length} (max ${maxTasks}); split the call into smaller batches`,
           );
         }
+        const effectiveConcurrency = opts.concurrency ?? 8;
         const limit =
-          opts.concurrency !== undefined && Number.isFinite(opts.concurrency) && opts.concurrency >= 1
-            ? createLimiter(Math.floor(opts.concurrency))
+          Number.isFinite(effectiveConcurrency) && effectiveConcurrency >= 1
+            ? createLimiter(Math.floor(effectiveConcurrency))
             : undefined;
         const outcomes = await Promise.all(
           mergedTasks.map((t) => (limit !== undefined ? limit(() => runSingle(t.task, t.scope)) : runSingle(t.task, t.scope))),
@@ -453,10 +461,11 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
         }
         throw new Error(`branch aborted: ${single.scope}: ${single.error ?? 'incomplete result'}`);
       }
-      const maxTokens = opts.maxResultTokens ?? 3000;
+      const maxTokens = opts.maxResultTokens ?? 6000;
       const report =
         single.report ?? storeReport(ctx.store, single.text, explicitScope ?? single.scope, task ?? 'branch task');
-      return `${excerptText(single.text, maxTokens)}\n\nFull report: \`${report.id}\` (${report.lines} lines, ~${report.tokens} tokens)`;
+      const ex = excerptText(single.text, maxTokens);
+      return `${ex.text}\n\nFull report: \`${report.id}\` (${report.lines} lines, ~${report.tokens} tokens)`;
     },
   };
 }

@@ -1,7 +1,9 @@
 packages:
   - "packages/*"
 allowBuilds:
+  '@google/genai': true
   esbuild: true
+  protobufjs: true
 minimumReleaseAgeExclude:
   - '@earendil-works/pi-agent-core@1.5.2'
   - '@earendil-works/pi-ai@1.5.2'

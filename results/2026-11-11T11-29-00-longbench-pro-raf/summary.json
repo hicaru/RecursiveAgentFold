@@ -1,0 +1,100 @@
+{
+  "bench": "longbench-pro",
+  "method": "raf",
+  "n": 20,
+  "meanScore": 0.425,
+  "correct": 8,
+  "meanOfficial": 0.425,
+  "meanLenient": 0.425,
+  "errors": 1,
+  "filtered": 0,
+  "meanScoreAnswered": 0.4473684210526316,
+  "meanSteps": 4.6,
+  "meanWallSec": 676.8198000000001,
+  "formatIssues": 6,
+  "folds": {
+    "granular": 82,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 0,
+  "tokens": {
+    "prompt": 532019,
+    "cached": 407360,
+    "completion": 269567,
+    "rootCacheHitRate": 0.7714179835018068,
+    "branchCacheHitRate": 0.724639459957042,
+    "cacheHitRate": 0.7656869397521517
+  },
+  "byRole": {
+    "root": {
+      "calls": 93,
+      "promptTokens": 466839,
+      "completionTokens": 259227,
+      "cachedTokens": 360128,
+      "reasoningTokens": 226192,
+      "latencyMs": 4414112,
+      "errors": 1,
+      "cacheHitRate": 0.7714179835018068
+    },
+    "branch": {
+      "calls": 11,
+      "promptTokens": 65180,
+      "completionTokens": 10340,
+      "cachedTokens": 47232,
+      "reasoningTokens": 5490,
+      "latencyMs": 168303,
+      "errors": 0,
+      "cacheHitRate": 0.724639459957042
+    }
+  },
+  "byTask": {
+    "T1. Retrieval & Ranking": {
+      "n": 3,
+      "score": 0
+    },
+    "T2. Sequencing & Structure Reconstruction": {
+      "n": 3,
+      "score": 0.5
+    },
+    "T5. Attribution & Citation Alignment": {
+      "n": 2,
+      "score": 0.5
+    },
+    "T6. Aggregation & Clustering": {
+      "n": 7,
+      "score": 0.5714285714285714
+    },
+    "T9. Version & Code Diff Analysis": {
+      "n": 1,
+      "score": 1
+    },
+    "T3. Evidence-Grounded QA": {
+      "n": 1,
+      "score": 0
+    },
+    "T10. Rule Induction & In-Context Learning": {
+      "n": 1,
+      "score": 1
+    },
+    "T7. Consistency & Compliance Checking": {
+      "n": 2,
+      "score": 0
+    }
+  },
+  "byAnswerType": {
+    "?": {
+      "n": 20,
+      "score": 0.425
+    }
+  },
+  "cost": {
+    "totalUsd": 1.466531,
+    "perTaskUsd": 0.073327,
+    "cacheSavedUsd": 0.46439,
+    "byRoleUsd": {
+      "root": 1.383627,
+      "branch": 0.082904
+    }
+  }
+}

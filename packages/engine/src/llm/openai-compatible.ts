@@ -1,34 +1,46 @@
-import type { LLMClient, LLMRequest, LLMResponse, ModelProfile } from '../types.js';
+import type { ChatMessage, LLMClient, LLMRequest, LLMResponse, ModelProfile } from '../types.js';
 import { sleep } from '../util/concurrency.js';
-import { defaultRateLimitGate, isRateLimitError, type RateLimitCoordinator } from './rate-limit-gate.js';
+import {
+  defaultRateLimitRegistry,
+  isRateLimitError,
+  parseRetryAfterMs,
+  type RateLimitCoordinator,
+} from './rate-limit-gate.js';
+
 export interface OpenAICompatibleConfig {
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  contextWindow: number;
-  maxOutputTokens: number;
-  temperature?: number;
+  readonly baseUrl: string;
+  readonly apiKey: string;
+  readonly model: string;
+  readonly contextWindow: number;
+  readonly maxOutputTokens: number;
+  readonly temperature?: number;
   /**
    * Z.ai / GLM style `thinking` switch. `undefined` = do not send the param.
    * Some models (e.g. glm-5.3*) refuse `disabled`; use `extraBody` for effort.
    */
-  thinking?: 'enabled' | 'disabled';
+  readonly thinking?: 'enabled' | 'disabled';
   /** Extra fields merged into the request body (e.g. reasoning_effort). */
-  extraBody?: Record<string, unknown>;
-  headers?: Record<string, string>;
-  timeoutMs?: number;
-  maxRetries?: number;
-  retryBaseMs?: number;
+  readonly extraBody?: Record<string, unknown>;
+  readonly headers?: Record<string, string>;
+  readonly timeoutMs?: number;
+  /** Stream tokens via SSE to keep long reasoning connections alive. Default true. */
+  readonly stream?: boolean;
+  /** Emit Anthropic-style cache_control blocks when ChatMessage.segments are present. */
+  readonly cacheControl?: 'ephemeral';
+  /** Forward LLMRequest.cacheKey as OpenAI prompt_cache_key. */
+  readonly sendPromptCacheKey?: boolean;
+  readonly maxRetries?: number;
+  readonly retryBaseMs?: number;
   /** Upper bound for a single retry delay. Default 60s. */
-  retryMaxMs?: number;
-  /** Attempts for HTTP 429 rate limits. Default 10. */
-  rateLimitRetries?: number;
-  /** Fixed wait between rate-limit retries. Default 10s. */
-  rateLimitDelayMs?: number;
+  readonly retryMaxMs?: number;
+  /** Attempts for HTTP 429 rate limits. */
+  readonly rateLimitRetries?: number;
+  /** Fixed wait between rate-limit retries. */
+  readonly rateLimitDelayMs?: number;
   /** Attempts for provider content-filter refusals (code 1301). Default 1. */
-  filterRetries?: number;
-  fetchImpl?: typeof fetch;
-  rateLimitGate?: RateLimitCoordinator;
+  readonly filterRetries?: number;
+  readonly fetchImpl?: typeof fetch;
+  readonly rateLimitGate?: RateLimitCoordinator;
 }
 
 export class LLMError extends Error {
@@ -56,28 +68,42 @@ const NON_RETRYABLE_CODES: Readonly<Record<string, true>> = Object.freeze({
   '1004': true, // auth
 });
 
-/** Parse a Retry-After header (seconds or HTTP date) into milliseconds. */
-function retryAfterMs(raw: string | null): number | undefined {
-  if (!raw) return undefined;
-  const secs = Number(raw);
-  if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
-  const at = Date.parse(raw);
-  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
+interface ChatCompletionUsage {
+  readonly prompt_tokens?: number;
+  readonly completion_tokens?: number;
+  readonly prompt_tokens_details?: { readonly cached_tokens?: number };
+  readonly cache_read_input_tokens?: number;
+  readonly completion_tokens_details?: { readonly reasoning_tokens?: number };
 }
 
 interface ChatCompletionResponse {
-  model?: string;
-  choices?: Array<{
-    message?: { content?: string | null; reasoning_content?: string | null };
-    finish_reason?: string;
+  readonly model?: string;
+  readonly choices?: ReadonlyArray<{
+    readonly message?: { readonly content?: string | null; readonly reasoning_content?: string | null };
+    readonly delta?: { readonly content?: string | null; readonly reasoning_content?: string | null };
+    readonly finish_reason?: string | null;
   }>;
-  usage?: {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-    prompt_tokens_details?: { cached_tokens?: number };
-    completion_tokens_details?: { reasoning_tokens?: number };
-  };
-  error?: { code?: string | number; message?: string };
+  readonly usage?: ChatCompletionUsage;
+  readonly error?: { readonly code?: string | number; readonly message?: string };
+}
+
+function serializeMessage(m: ChatMessage, useCacheControl: boolean): Record<string, unknown> {
+  if (useCacheControl && m.segments && m.segments.length > 0) {
+    const blocks: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < m.segments.length; i++) {
+      const seg = m.segments[i];
+      if (!seg || seg.text.length === 0) continue;
+      blocks.push({
+        type: 'text',
+        text: seg.text,
+        ...(seg.cacheBreakpoint ? { cache_control: { type: 'ephemeral' } } : {}),
+      });
+    }
+    if (blocks.length > 0) {
+      return { role: m.role, content: blocks };
+    }
+  }
+  return { role: m.role, content: m.content };
 }
 
 /**
@@ -88,15 +114,17 @@ export class OpenAICompatibleClient implements LLMClient {
   readonly profile: ModelProfile;
   private readonly fetchImpl: typeof fetch;
   private readonly gate: RateLimitCoordinator;
+  private _streamOptionsUnsupported = false;
+  private _streamUnsupported = false;
 
   constructor(private readonly cfg: OpenAICompatibleConfig) {
-    this.profile = {
+    this.profile = Object.freeze({
       name: cfg.model,
       contextWindow: cfg.contextWindow,
       maxOutputTokens: cfg.maxOutputTokens,
-    };
+    });
     this.fetchImpl = cfg.fetchImpl ?? fetch;
-    this.gate = cfg.rateLimitGate ?? defaultRateLimitGate;
+    this.gate = cfg.rateLimitGate ?? defaultRateLimitRegistry.get(cfg.baseUrl);
   }
 
   async complete(req: LLMRequest): Promise<LLMResponse> {
@@ -108,7 +136,7 @@ export class OpenAICompatibleClient implements LLMClient {
     const used = { rateLimit: 0, filter: 0, other: 0 };
     let soloStreak = 0;
     for (;;) {
-      const lease = await this.gate.acquire(req.signal);
+      const lease = await this.gate.acquire(req.signal, req.priority ?? 1);
       let soloAtAttempt = false;
       try {
         const res = await this.once(req);
@@ -121,17 +149,22 @@ export class OpenAICompatibleClient implements LLMClient {
         const rateLimited =
           !(req.signal?.aborted ?? false) && isRateLimitError(err?.code, err?.status, msg);
         if (rateLimited) {
+          used.rateLimit += 1;
           this.gate.noteRateLimit(err?.retryAfterMs ?? this.cfg.rateLimitDelayMs);
           if (this.cfg.rateLimitRetries !== undefined) {
-            used.rateLimit += 1;
             if (used.rateLimit > this.cfg.rateLimitRetries) throw e;
-          } else if (soloAtAttempt) {
-            soloStreak += 1;
-            if (this.gate.shouldTerminateSolo(soloStreak)) {
-              throw this.gate.createSoloExhaustedError(soloStreak, msg);
-            }
           } else {
-            soloStreak = 0;
+            if (soloAtAttempt) {
+              soloStreak += 1;
+              if (this.gate.shouldTerminateSolo(soloStreak)) {
+                throw this.gate.createSoloExhaustedError(soloStreak, msg);
+              }
+            } else {
+              soloStreak = 0;
+            }
+            if (this.gate.shouldTerminateTotal(used.rateLimit)) {
+              throw this.gate.createExhaustedError(used.rateLimit, msg);
+            }
           }
           continue;
         }
@@ -151,12 +184,22 @@ export class OpenAICompatibleClient implements LLMClient {
   }
 
   private async once(req: LLMRequest): Promise<LLMResponse> {
+    const useCacheControl =
+      this.cfg.cacheControl === 'ephemeral' ||
+      (/openrouter\.ai/i.test(this.cfg.baseUrl) && /claude|anthropic/i.test(this.cfg.model));
+    const useStream = (this.cfg.stream ?? true) && !this._streamUnsupported;
     const body: Record<string, unknown> = {
       model: this.cfg.model,
-      messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
+      messages: req.messages.map((m) => serializeMessage(m, useCacheControl)),
       max_tokens: req.maxTokens ?? this.cfg.maxOutputTokens,
-      stream: false,
+      stream: useStream,
     };
+    if (useStream && !this._streamOptionsUnsupported) {
+      body.stream_options = { include_usage: true };
+    }
+    if (req.cacheKey && (this.cfg.sendPromptCacheKey === true || /api\.openai\.com/i.test(this.cfg.baseUrl))) {
+      body.prompt_cache_key = req.cacheKey;
+    }
     const temperature = req.temperature ?? this.cfg.temperature;
     if (temperature !== undefined) body.temperature = temperature;
     if (req.stop?.length) body.stop = req.stop;
@@ -181,18 +224,35 @@ export class OpenAICompatibleClient implements LLMClient {
         signal,
       });
     } catch (e) {
-      throw new LLMError(`network error: ${(e as Error).message}`, undefined, undefined, !req.signal?.aborted);
+      const errMsg = e instanceof Error ? e.message : String(e);
+      throw new LLMError(`network error: ${errMsg}`, undefined, undefined, !(req.signal?.aborted ?? false));
     }
+
+    const contentType = res.headers.get('content-type') ?? '';
+    if (res.ok && contentType.includes('text/event-stream') && res.body !== null) {
+      return this.consumeEventStream(res, started, signal, req);
+    }
+
     const raw = await res.text();
     let json: ChatCompletionResponse | undefined;
     try {
       json = JSON.parse(raw) as ChatCompletionResponse;
     } catch {
-      /* non-JSON body */
+      if (res.ok && raw.includes('data:')) {
+        return this.parseRawSseBody(raw, started);
+      }
     }
     if (!res.ok || json?.error) {
       const code = json?.error?.code !== undefined ? String(json.error.code) : undefined;
       const msg = json?.error?.message ?? raw.slice(0, 500);
+      if (useStream && (res.status === 400 || code === '1210') && /stream_options|include_usage/i.test(msg)) {
+        this._streamOptionsUnsupported = true;
+        return this.once(req);
+      }
+      if (useStream && (res.status === 400 || code === '1210') && /\bstream\b/i.test(msg)) {
+        this._streamUnsupported = true;
+        return this.once(req);
+      }
       const isRateLimited = isRateLimitError(code, res.status, msg);
       const retryable =
         !(code && NON_RETRYABLE_CODES[code] === true) &&
@@ -202,7 +262,7 @@ export class OpenAICompatibleClient implements LLMClient {
         res.status,
         code,
         retryable,
-        retryAfterMs(res.headers.get('retry-after')),
+        parseRetryAfterMs(res.headers.get('retry-after')),
       );
     }
     const choice = json?.choices?.[0];
@@ -212,12 +272,150 @@ export class OpenAICompatibleClient implements LLMClient {
       text: choice.message.content ?? '',
       reasoning: choice.message.reasoning_content ?? undefined,
       model: json?.model ?? this.cfg.model,
-      finishReason: choice.finish_reason,
+      finishReason: choice.finish_reason ?? undefined,
       latencyMs: Date.now() - started,
       usage: {
         promptTokens: usage.prompt_tokens ?? 0,
         completionTokens: usage.completion_tokens ?? 0,
-        cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? 0,
+        cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? usage.cache_read_input_tokens ?? 0,
+        reasoningTokens: usage.completion_tokens_details?.reasoning_tokens,
+      },
+    };
+  }
+
+  private async consumeEventStream(
+    res: Response,
+    started: number,
+    signal: AbortSignal | undefined,
+    req: LLMRequest,
+  ): Promise<LLMResponse> {
+    if (!res.body) {
+      throw new LLMError('empty event stream body', res.status, undefined, true);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    const contentParts: string[] = [];
+    const reasoningParts: string[] = [];
+    let buffer = '';
+    let model = this.cfg.model;
+    let finishReason: string | undefined;
+    let usage: ChatCompletionUsage = {};
+
+    const processLine = (rawLine: string) => {
+      const line = rawLine.trim();
+      if (!line.startsWith('data:')) return;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]') return;
+      let chunk: ChatCompletionResponse;
+      try {
+        chunk = JSON.parse(payload) as ChatCompletionResponse;
+      } catch {
+        return;
+      }
+      if (chunk.error) {
+        const code = chunk.error.code !== undefined ? String(chunk.error.code) : undefined;
+        const msg = chunk.error.message ?? 'stream error';
+        const isRateLimited = isRateLimitError(code, res.status, msg);
+        const retryable = !(code && NON_RETRYABLE_CODES[code] === true) && (isRateLimited || code === '1301' || !code);
+        throw new LLMError(`[stream${code ? `/${code}` : ''}] ${msg}`, res.status, code, retryable);
+      }
+      if (chunk.model) model = chunk.model;
+      if (chunk.usage) usage = chunk.usage;
+      const choice = chunk.choices?.[0];
+      if (choice) {
+        const delta = choice.delta ?? choice.message;
+        if (delta?.content) contentParts.push(delta.content);
+        if (delta?.reasoning_content) reasoningParts.push(delta.reasoning_content);
+        if (choice.finish_reason) finishReason = choice.finish_reason;
+      }
+    };
+
+    try {
+      for (;;) {
+        if (signal?.aborted) {
+          throw new LLMError('stream aborted', undefined, undefined, !(req.signal?.aborted ?? false));
+        }
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl = buffer.indexOf('\n');
+        while (nl >= 0) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          processLine(line);
+          nl = buffer.indexOf('\n');
+        }
+      }
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        const trailing = buffer.split('\n');
+        for (let i = 0; i < trailing.length; i++) {
+          processLine(trailing[i] ?? '');
+        }
+      }
+    } catch (e) {
+      if (e instanceof LLMError) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new LLMError(`stream read error: ${msg}`, undefined, undefined, !(req.signal?.aborted ?? false));
+    } finally {
+      reader.releaseLock();
+    }
+
+    const text = contentParts.join('');
+    const reasoning = reasoningParts.length > 0 ? reasoningParts.join('') : undefined;
+    return {
+      text,
+      ...(reasoning !== undefined ? { reasoning } : {}),
+      model,
+      ...(finishReason !== undefined ? { finishReason } : {}),
+      latencyMs: Date.now() - started,
+      usage: {
+        promptTokens: usage.prompt_tokens ?? 0,
+        completionTokens: usage.completion_tokens ?? 0,
+        cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? usage.cache_read_input_tokens ?? 0,
+        reasoningTokens: usage.completion_tokens_details?.reasoning_tokens,
+      },
+    };
+  }
+
+  private parseRawSseBody(raw: string, started: number): LLMResponse {
+    const contentParts: string[] = [];
+    const reasoningParts: string[] = [];
+    let model = this.cfg.model;
+    let finishReason: string | undefined;
+    let usage: ChatCompletionUsage = {};
+    const lines = raw.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const line = (lines[i] ?? '').trim();
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      try {
+        const chunk = JSON.parse(payload) as ChatCompletionResponse;
+        if (chunk.model) model = chunk.model;
+        if (chunk.usage) usage = chunk.usage;
+        const choice = chunk.choices?.[0];
+        if (choice) {
+          const delta = choice.delta ?? choice.message;
+          if (delta?.content) contentParts.push(delta.content);
+          if (delta?.reasoning_content) reasoningParts.push(delta.reasoning_content);
+          if (choice.finish_reason) finishReason = choice.finish_reason;
+        }
+      } catch {
+        // Ignore non-JSON SSE comments or heartbeats.
+      }
+    }
+    const reasoning = reasoningParts.length > 0 ? reasoningParts.join('') : undefined;
+    return {
+      text: contentParts.join(''),
+      ...(reasoning !== undefined ? { reasoning } : {}),
+      model,
+      ...(finishReason !== undefined ? { finishReason } : {}),
+      latencyMs: Date.now() - started,
+      usage: {
+        promptTokens: usage.prompt_tokens ?? 0,
+        completionTokens: usage.completion_tokens ?? 0,
+        cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? usage.cache_read_input_tokens ?? 0,
         reasoningTokens: usage.completion_tokens_details?.reasoning_tokens,
       },
     };

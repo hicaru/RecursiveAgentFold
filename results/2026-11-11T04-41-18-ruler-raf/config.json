@@ -1,0 +1,84 @@
+{
+  "bench": "ruler",
+  "method": "raf",
+  "startedAt": "2026-11-11T04:41:19.292Z",
+  "tasks": 11,
+  "taskIds": [
+    "ruler-131072-niah_single_1-0",
+    "ruler-131072-niah_single_2-0",
+    "ruler-131072-niah_single_3-0",
+    "ruler-131072-niah_multikey_1-0",
+    "ruler-131072-niah_multikey_2-0",
+    "ruler-131072-niah_multikey_3-0",
+    "ruler-131072-niah_multiquery-0",
+    "ruler-131072-niah_multivalue-0",
+    "ruler-131072-vt-0",
+    "ruler-131072-cwe-0",
+    "ruler-131072-fwe-0"
+  ],
+  "argv": [
+    "ruler",
+    "--max-depth",
+    "2"
+  ],
+  "tools": "all",
+  "models": {
+    "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+    "root": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16000,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        }
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "branch": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16000,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        }
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "query": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "model": "glm-5.3-flash",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 16384,
+      "extraBody": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        },
+        "reasoning_effort": "low"
+      },
+      "temperature": 0,
+      "maxRetries": 8,
+      "retryBaseMs": 5000,
+      "retryMaxMs": 30000,
+      "timeoutMs": 900000
+    },
+    "llmQuery": {
+      "reserveRatio": 0.3,
+      "concurrency": 4
+    }
+  }
+}

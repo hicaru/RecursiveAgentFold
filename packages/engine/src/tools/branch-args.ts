@@ -138,7 +138,8 @@ export function decodeXmlText(raw: string, options?: { readonly preserveHtmlEnti
     return `\u0000CDATA_${idx}\u0000`;
   });
   const skipDecode =
-    options?.preserveHtmlEntitiesWhenRawTagsPresent === true && /<[a-zA-Z/!]/.test(masked);
+    options?.preserveHtmlEntitiesWhenRawTagsPresent === true &&
+    /<([a-zA-Z][a-zA-Z0-9-]*)(?:\s[^>]*)?>[\s\S]*<\s*\/\s*\1\s*>/.test(masked);
   const decoded = skipDecode
     ? masked
     : masked.replace(XML_ENTITY_RE, (full, dec?: string, hex?: string, named?: string) => {
@@ -339,8 +340,8 @@ function parseXmlBranchTasks(raw: string, fallbackScope?: string): SubTaskSpec[]
     const lower = el.tag.toLowerCase();
 
     if (XML_WRAPPER_TAGS.has(lower)) {
-      const nested = parseXmlBranchTasks(el.body, fallbackScope);
-      if (nested !== undefined && nested.length > 0) out.push(...nested);
+      const nested = parseFlexibleBranchTasks(el.body, fallbackScope);
+      if (nested.length > 0) out.push(...nested);
       continue;
     }
 

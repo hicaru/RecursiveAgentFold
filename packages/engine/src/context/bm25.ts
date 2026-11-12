@@ -4,7 +4,7 @@ export const BM25_K1 = 1.2;
 export const BM25_B = 0.75;
 export const WINDOW_LINES = 40;
 export const WINDOW_STRIDE = 20;
-export const MAX_WINDOWS = 20_000;
+export const MAX_WINDOWS = 250_000;
 export const PRF_FEEDBACK_DOCS = 3;
 export const PRF_EXPANSION_TERMS = 8;
 export const PRF_EXPANSION_WEIGHT = 0.4;
@@ -133,6 +133,52 @@ interface IndexedWindow {
   readonly dl: number;
 }
 
+const DOC_WINDOW_CACHE = new WeakMap<StoredDocument, readonly IndexedWindow[]>();
+
+function getDocumentWindows(doc: StoredDocument): readonly IndexedWindow[] {
+  const cached = DOC_WINDOW_CACHE.get(doc);
+  if (cached !== undefined) return cached;
+  const nLines = doc.lines.length;
+  if (nLines === 0) {
+    const empty: readonly IndexedWindow[] = Object.freeze([]);
+    DOC_WINDOW_CACHE.set(doc, empty);
+    return empty;
+  }
+  const docWindows: IndexedWindow[] = [];
+  for (let start = 0; start < nLines; start += WINDOW_STRIDE) {
+    const end = Math.min(nLines, start + WINDOW_LINES);
+    const slice = doc.lines.slice(start, end);
+    const tokens = bm25Tokenize(slice.join('\n'));
+    if (tokens.length === 0) {
+      if (end >= nLines) break;
+      continue;
+    }
+    const tf = new Map<string, number>();
+    const bigrams = new Set<string>();
+    for (let i = 0; i < tokens.length; i++) {
+      const tok = tokens[i];
+      if (!tok) continue;
+      tf.set(tok, (tf.get(tok) ?? 0) + 1);
+      const next = tokens[i + 1];
+      if (next) bigrams.add(`${tok}\u0000${next}`);
+    }
+    docWindows.push({
+      docId: doc.id,
+      startLine: start + 1,
+      endLine: end,
+      lines: slice,
+      tokens,
+      tf,
+      bigrams,
+      dl: tokens.length,
+    });
+    if (end >= nLines) break;
+  }
+  const frozen = Object.freeze(docWindows);
+  DOC_WINDOW_CACHE.set(doc, frozen);
+  return frozen;
+}
+
 /** Deterministic Okapi BM25 V2 index with Rocchio PRF and adjacent phrase bonus. */
 export class Bm25DocumentIndex {
   private readonly windows: readonly IndexedWindow[];
@@ -147,39 +193,15 @@ export class Bm25DocumentIndex {
     for (let d = 0; d < docs.length && windows.length < MAX_WINDOWS; d++) {
       const doc = docs[d];
       if (!doc || doc.lines.length === 0) continue;
-      const nLines = doc.lines.length;
-      for (let start = 0; start < nLines && windows.length < MAX_WINDOWS; start += WINDOW_STRIDE) {
-        const end = Math.min(nLines, start + WINDOW_LINES);
-        const slice = doc.lines.slice(start, end);
-        const tokens = bm25Tokenize(slice.join('\n'));
-        if (tokens.length === 0) {
-          if (end >= nLines) break;
-          continue;
-        }
-        const tf = new Map<string, number>();
-        const bigrams = new Set<string>();
-        for (let i = 0; i < tokens.length; i++) {
-          const tok = tokens[i];
-          if (!tok) continue;
-          tf.set(tok, (tf.get(tok) ?? 0) + 1);
-          const next = tokens[i + 1];
-          if (next) bigrams.add(`${tok}\u0000${next}`);
-        }
-        for (const term of tf.keys()) {
+      const docWindows = getDocumentWindows(doc);
+      for (let w = 0; w < docWindows.length && windows.length < MAX_WINDOWS; w++) {
+        const win = docWindows[w];
+        if (!win) continue;
+        for (const term of win.tf.keys()) {
           df.set(term, (df.get(term) ?? 0) + 1);
         }
-        totalTokens += tokens.length;
-        windows.push({
-          docId: doc.id,
-          startLine: start + 1,
-          endLine: end,
-          lines: slice,
-          tokens,
-          tf,
-          bigrams,
-          dl: tokens.length,
-        });
-        if (end >= nLines) break;
+        totalTokens += win.dl;
+        windows.push(win);
       }
     }
 

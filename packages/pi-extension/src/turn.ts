@@ -1,42 +1,58 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
-import type { AssistantMessage, JsonObject, JsonValue, Message, ThinkingContent, Usage } from '@earendil-works/pi-ai';
-import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext, ExtensionToolContext, ToolInfo } from '@earendil-works/pi-coding-agent';
+import type { AssistantMessage, JsonObject, JsonValue, Message, ThinkingContent, ToolCall, Usage } from '@earendil-works/pi-ai';
+import type {
+  AgentToolResult,
+  AgentToolUpdateCallback,
+  ExtensionContext,
+  ExtensionToolContext,
+  ToolInfo,
+} from '@earendil-works/pi-coding-agent';
 import {
   BRANCH_REPORT_ID_PREFIX,
   ContextStore,
-  defaultRateLimitGate,
+  defaultRateLimitRegistry,
+  extractPromptPaths,
   normalizeBranchArguments,
   RecursiveAgentFold,
-  extractPromptPaths,
   sanitizeDocId,
   type AgentEvent,
   type AgentRunResult,
   type ChatMessage,
   type IngestResult,
   type JSONSchema,
+  type RateLimitCoordinator,
   type Tool,
 } from '@raf/engine/source';
 import type { RafConfig } from './config.js';
-import { addUsage, ModelClient, PrefetchedRootClient, reasoningOf, toEngineResponse, toPiMessages } from './llm.js';
+import {
+  addUsage,
+  applyCacheBreakpointsToPayload,
+  ModelClient,
+  PrefetchedRootClient,
+  reasoningOf,
+  toEngineResponse,
+  toEngineUsage,
+  toPiMessages,
+} from './llm.js';
 import type { AgentMessage } from './pi-types.js';
 import type { Routes } from './routes.js';
 import { geminiSafeSchema } from './schema.js';
 import { contentText, renderTranscript, seedPriorTurns, type SessionState, type TurnStatus } from './state.js';
 import type { CallSnapshot, RunTracker } from './tracker.js';
 
-/** Engine limits. They match the tuned DSH host settings. */
+/** Engine limits. Synthetic wall-clock step/tool timeouts are intentionally absent. */
 const ROOT_MAX_STEPS = 100;
-const BRANCH_MAX_STEPS = 20;
+const BRANCH_MAX_STEPS = 30;
 const ROOT_MAX_OUTPUT = 16_000;
 const READER_MAX_OUTPUT = 16_384;
-const PROMPT_BUDGET_RATIO = 0.6;
+const PROMPT_BUDGET_RATIO = 0.8;
 const MAX_INVALID_STEPS = 3;
 const MAX_INVALID_TOTAL = 6;
 const MAX_REASONING_TOKENS = 32_000;
 const MAX_OBSERVATION_TOKENS = 6400;
-const MAX_STEP_MS = 300_000;
 const WORKSPACE_MAX_FILES = 1200;
 const WORKSPACE_MAX_FILE_BYTES = 8 * 1024 * 1024;
 /** Native tool results longer than this are indexed as documents. */
@@ -45,13 +61,22 @@ const UPDATE_INTERVAL_MS = 150;
 /** Bound extra callable tools exposed dynamically to branch subagents. */
 const MAX_EXTRA_CALLABLE_TOOLS = 24;
 
+/** Provider native tool-call rejection errors that can recover via live FORMAT_REPAIR. */
+const RECOVERABLE_TOOL_CALL_ERROR =
+  /unexpected[_\s-]*tool|malformed[_\s-]*function|invalid[_\s-]*tool[_\s-]*(?:call|use)|tool[_\s-]*use[_\s-]*not[_\s-]*supported/i;
+
+/** Read-only native tools that can execute concurrently inside specialist waves. */
+const CONCURRENCY_SAFE_NATIVE: ReadonlySet<string> = new Set(
+  Object.freeze(['find', 'ls', 'glob', 'web_search', 'google_search', 'websearch', 'fetch', 'webfetch']),
+);
+
 export const RAF_DOC_TOOL_OPTIONS = Object.freeze({
   maxReadLines: 500,
   maxReadTokens: 12_000,
   maxGrepMatches: 100,
 });
 
-/** RAF built-in tools. They register under these bare names and replace the pi tool of the same name. */
+/** RAF built-in tools. They register under bare names and shadow matching pi tools. */
 export const RAF_TOOL_NAMES = Object.freeze([
   'llm_query',
   'add_document',
@@ -66,7 +91,7 @@ export const RAF_TOOL_NAMES = Object.freeze([
 ] as const);
 export type RafToolName = (typeof RAF_TOOL_NAMES)[number];
 
-/** Native pi tools that RAF never bridges into the engine: competing sub-agent tooling would recurse. */
+/** Competing sub-agent orchestration tools that must not recurse inside RAF. */
 const BLOCKED_BRIDGE_TOOLS: ReadonlySet<string> = new Set(
   Object.freeze([
     'subagent',
@@ -87,21 +112,16 @@ const BLOCKED_BRIDGE_TOOLS: ReadonlySet<string> = new Set(
 
 const RAF_NAME_SET: ReadonlySet<string> = new Set(RAF_TOOL_NAMES);
 
-/** pi tool name for an engine tool name. RAF tools keep the native name, so pi's tool is replaced. */
+/** Return the pi tool name for an engine tool name. */
 export function piToolName(engineName: string): string {
   return engineName;
 }
 
 export interface BridgeableToolsOptions {
-  /** True when resolving tools callable by branch subagents through `ctx.executeTool()`. */
   readonly forSubagent?: boolean;
 }
 
-/**
- * Native pi tools exposed to RAF agents.
- * Root may emit active `direct` and `model-only` tools natively; branch subagents
- * run inside `ctx.executeTool()` and therefore exclude `model-only` tools.
- */
+/** Return native pi tools exposed to RAF agents. */
 export function bridgeableTools(
   all: readonly ToolInfo[],
   active: readonly string[],
@@ -118,12 +138,10 @@ export function bridgeableTools(
   });
 }
 
-/** Tool-call id accepted by every provider when the transcript is replayed natively. */
 function newCallId(): string {
   return `call_${randomBytes(12).toString('hex')}`;
 }
 
-/** JSON copy of tool arguments. Engine arguments come from parsed model text. */
 function toJsonObject(args: Readonly<Record<string, unknown>>): JsonObject {
   const value: unknown = JSON.parse(JSON.stringify(args));
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as JsonObject) : {};
@@ -189,11 +207,7 @@ function normalizeEditEntry(entry: JsonValue): JsonValue {
   return next;
 }
 
-/**
- * Normalize parsed protocol arguments to match a native tool's JSON Schema:
- * resolve common parameter aliases, coerce XML-stringified scalars/JSON, and
- * strip undeclared keys when `additionalProperties` is `false`.
- */
+/** Normalize parsed protocol arguments to match a native tool JSON Schema. */
 export function fitArguments(args: JsonObject, schema: unknown): JsonObject {
   if (!isPlainRecord(schema)) return args;
   const props = isPlainRecord(schema.properties) ? schema.properties : undefined;
@@ -219,9 +233,13 @@ export function fitArguments(args: JsonObject, schema: unknown): JsonObject {
     consumedAliases.add('path');
   }
 
-  if ('offset' in props && working.offset === undefined && working.start_line !== undefined) {
-    working.offset = working.start_line;
-    consumedAliases.add('start_line');
+  if ('offset' in props && working.offset === undefined) {
+    if (working.start_line !== undefined) {
+      working.offset = working.start_line;
+      consumedAliases.add('start_line');
+    } else if (working.end_line !== undefined) {
+      working.offset = 1;
+    }
   }
 
   if ('limit' in props && working.limit === undefined) {
@@ -288,14 +306,12 @@ export function fitArguments(args: JsonObject, schema: unknown): JsonObject {
   return out;
 }
 
-/** Text of a tool result for the engine. Errors carry a prefix so the model sees the failure. */
 function resultText(content: readonly { readonly type: string }[], isError: boolean): string {
   const text = contentText(content);
   if (!isError) return text === '' ? '(completed with no output)' : text;
   return `Tool error: ${text === '' ? 'tool failed' : text}`;
 }
 
-/** Last compaction summary on the branch, used when RAF starts without a fold state. */
 function latestCheckpoint(ctx: ExtensionContext): string {
   const branch = ctx.sessionManager.getBranch();
   for (let i = branch.length - 1; i >= 0; i--) {
@@ -303,37 +319,6 @@ function latestCheckpoint(ctx: ExtensionContext): string {
     if (entry?.type === 'compaction' && entry.summary.trim() !== '') return entry.summary.trim();
   }
   return '';
-}
-
-const STUDY_INTENT =
-  /(?:\b(?:study|explore|investigate|research|deep[- ]?dive|thorough(?:ly)?|deep(?:ly)?)\b|изучи|изуча|исследуй|глубок|досконал|досканал)/iu;
-const PROJECT_INTENT = /(?:\b(?:project|repo(?:sitory)?|codebase|workspace)\b|проект|репозитор|воркспейс)/iu;
-const STUDY_SCOPE_ROOTS: ReadonlySet<string> = new Set(Object.freeze(['docs', 'scripts']));
-
-/** Workspace scopes (top-level packages and doc folders) from the store manifest. */
-function studyScopes(store: ContextStore): string[] {
-  const scopes = new Set<string>();
-  for (const doc of store.list()) {
-    const parts = doc.id.split('/');
-    const head = parts[0] ?? '';
-    if (head === 'packages' && parts.length > 2 && parts[1] !== undefined) scopes.add(`packages/${parts[1]}`);
-    else if (STUDY_SCOPE_ROOTS.has(head)) scopes.add(head);
-  }
-  return [...scopes].sort().slice(0, 6);
-}
-
-/** Opt-in brief that asks the root to delegate a repository study to scoped specialists. */
-function studyBrief(question: string, store: ContextStore): string {
-  if (!STUDY_INTENT.test(question) || !PROJECT_INTENT.test(question)) return '';
-  const scopes = studyScopes(store);
-  if (scopes.length < 2) return '';
-  const tasks = scopes
-    .map(
-      (scope) =>
-        `{"scope":${JSON.stringify(scope)},"task":"Deeply study ${scope}: purpose, key components, exact file paths and line references, tests/benchmarks/results, and risks."}`,
-    )
-    .join(', ');
-  return `\n\n### Deep-study protocol (repository-wide)\nThis is a deep study of the repository, not a docs-only summary. Cover implementation, tests, benchmarks/results, docs, and risks.\nIf the branch tool is available, you MUST delegate each independent scope to a specialist now: branch(tasks=[${tasks}]). Synthesize their reports in the final answer.\nFor each scope, use outline/search/grep/tally for exact code and facts; use llm_query for long documents that need semantic scanning; use read only for targeted verification windows. Do not read every file serially in root.\nFinal answer: purpose, architecture/mechanism, implementation with paths/lines, tests/benchmarks/results, risks.`;
 }
 
 export interface TurnInit {
@@ -344,13 +329,10 @@ export interface TurnInit {
   readonly tracker: RunTracker;
   readonly prompt: string;
   readonly nativeTools: readonly ToolInfo[];
-  /** Dynamic callable tool resolver for branch subagents (`depth >= 1`). */
   readonly getSubagentTools?: () => readonly ToolInfo[];
-  /** Conversation before the current prompt. */
   readonly history: readonly AgentMessage[];
 }
 
-/** Details stored on every RAF tool result. */
 export interface RafToolDetails {
   readonly tool: string;
   readonly call?: CallSnapshot;
@@ -367,10 +349,10 @@ interface ActiveToolCall {
   usage: Usage | undefined;
 }
 
+const activeCallStorage = new AsyncLocalStorage<ActiveToolCall>();
+
 /**
- * One RAF turn: from a user prompt to the final answer. Each root step is one
- * native pi request. pi sends the AgentFold context built here, the engine
- * parses and folds the response, and pi executes the resulting tool natively.
+ * One RAF turn: from a user prompt to the final answer.
  */
 export class RafTurn {
   readonly question: string;
@@ -386,13 +368,14 @@ export class RafTurn {
   private readonly linked = new WeakSet<AbortSignal>();
   private readonly workspace: string;
   private readonly detachRateLimit: () => void;
-  private prepared: ChatMessage[] | undefined;
+  private prepared?: ChatMessage[];
+  private lastPrepared?: readonly ChatMessage[];
   private awaiting = false;
-  private pendingCallId: string | undefined;
+  private pendingCallIds: readonly string[] = [];
   private step = 0;
-  private readonly toolCallStack: ActiveToolCall[] = [];
+  private readonly fallbackToolCalls: ActiveToolCall[] = [];
   private extraRootUsage: Usage[] = [];
-  private lastError: string | undefined;
+  private lastError?: string;
   private finished = false;
 
   private constructor(
@@ -409,51 +392,67 @@ export class RafTurn {
     this.store = store;
     this.workspace = init.ctx.cwd;
 
+    const { root, branch, reader } = init.routes;
+    const rootGate = defaultRateLimitRegistry.get(root.model.provider);
+    const branchGate = defaultRateLimitRegistry.get(branch.model.provider);
+    const readerGate = defaultRateLimitRegistry.get(reader.model.provider);
+    const uniqueGates = new Set<RateLimitCoordinator>([rootGate, branchGate, readerGate]);
+
     const onRateLimited = (ev: { readonly rateLimitUntil?: number }) => {
       if (typeof ev.rateLimitUntil === 'number') this.tracker.setRateLimit(ev.rateLimitUntil);
     };
     const onRateResumed = () => {
       this.tracker.setRateLimit(0);
     };
-    defaultRateLimitGate.on('rate:limited', onRateLimited);
-    defaultRateLimitGate.on('rate:resumed', onRateResumed);
+    for (const gate of uniqueGates) {
+      gate.on('rate:limited', onRateLimited);
+      gate.on('rate:resumed', onRateResumed);
+    }
     this.detachRateLimit = () => {
-      defaultRateLimitGate.off('rate:limited', onRateLimited);
-      defaultRateLimitGate.off('rate:resumed', onRateResumed);
+      for (const gate of uniqueGates) {
+        gate.off('rate:limited', onRateLimited);
+        gate.off('rate:resumed', onRateResumed);
+      }
       this.tracker.setRateLimit(0);
     };
 
     const registry = init.ctx.modelRegistry;
     const sessionId = init.ctx.sessionManager.getSessionId();
-    const { root, branch, reader } = init.routes;
     const rootThinking = reasoningOf(root.thinking);
     const rootLive = new ModelClient({
       registry,
       model: root.model,
       maxOutputTokens: ROOT_MAX_OUTPUT,
       sessionId,
+      rateLimitGate: rootGate,
       ...(rootThinking !== undefined ? { reasoning: rootThinking } : {}),
       onUsage: (usage) => this.extraRootUsage.push(usage),
     });
     this.root = new PrefetchedRootClient(rootLive);
+
     const branchThinking = reasoningOf(branch.thinking);
     const branchLLM = new ModelClient({
       registry,
       model: branch.model,
       maxOutputTokens: ROOT_MAX_OUTPUT,
       sessionId,
+      disableContinuation: true,
+      rateLimitGate: branchGate,
       ...(branchThinking !== undefined ? { reasoning: branchThinking } : {}),
       onUsage: (usage) => {
         init.tracker.addCost('branch', usage.cost.total);
         this.recordNestedUsage(usage);
       },
     });
+
     const readerThinking = reasoningOf(reader.thinking);
     const queryLLM = new ModelClient({
       registry,
       model: reader.model,
       maxOutputTokens: READER_MAX_OUTPUT,
       sessionId,
+      disableContinuation: true,
+      rateLimitGate: readerGate,
       ...(readerThinking !== undefined ? { reasoning: readerThinking } : {}),
       onUsage: (usage) => {
         init.tracker.addCost('llm_query', usage.cost.total);
@@ -462,6 +461,7 @@ export class RafTurn {
       onStart: () => init.tracker.readerStarted(),
       onEnd: () => init.tracker.readerEnded(),
     });
+
     const contextWindow = root.model.contextWindow;
     this.engine = new RecursiveAgentFold({
       rootLLM: this.root,
@@ -469,6 +469,7 @@ export class RafTurn {
       queryLLM,
       store,
       board: init.session.board,
+      clearTransientOnRun: false,
       ingest: { cwd: this.workspace, onIngest: (res) => this.keepIngested(res, true) },
       documentTools: RAF_DOC_TOOL_OPTIONS,
       maxDepth: init.config.depth,
@@ -478,7 +479,6 @@ export class RafTurn {
         maxInvalidSteps: MAX_INVALID_STEPS,
         maxInvalidTotal: MAX_INVALID_TOTAL,
         maxReasoningTokens: MAX_REASONING_TOKENS,
-        maxStepMs: MAX_STEP_MS,
         ...(contextWindow > 0 ? { maxPromptTokens: Math.floor(contextWindow * PROMPT_BUDGET_RATIO) } : {}),
       },
       llmQuery: {
@@ -514,7 +514,8 @@ export class RafTurn {
     }
     for (const [id, doc] of session.docs) {
       try {
-        store.add(doc.text, { id, title: doc.title, manifest: !id.startsWith(BRANCH_REPORT_ID_PREFIX) });
+        const isReport = id.startsWith(BRANCH_REPORT_ID_PREFIX);
+        store.add(doc.text, { id, title: doc.title, manifest: !isReport, transient: isReport });
       } catch {
         session.docs.delete(id);
       }
@@ -566,23 +567,37 @@ export class RafTurn {
         session.rootState = seeded.rootState;
       }
     }
-    let effective = question;
-    if (config.deepStudy) effective += studyBrief(question, store);
-    session.initialQuestion ??= effective;
+    session.initialQuestion ??= question;
     if (session.initialManifest === undefined) {
       session.initialManifest = store.manifest();
-      session.initialDocIds = new Set(store.list().map((doc) => doc.id));
+      const docIds = new Set<string>();
+      const docRevs: Record<string, number> = {};
+      for (const doc of store.listManifest()) {
+        docIds.add(doc.id);
+        docRevs[doc.id] = doc.rev;
+      }
+      session.initialDocIds = docIds;
+      session.initialDocRevs = Object.freeze(docRevs);
     }
-    turn.begin(effective, init.history);
+    if (session.initialBoardRev === undefined) {
+      const rev = session.board.settledRev();
+      session.initialBoardRev = rev;
+      if (rev > 0) session.initialBoardSnapshot = session.board.renderSettled();
+    }
+    turn.begin(question, init.history);
     return turn;
   }
 
+  private currentActiveCall(): ActiveToolCall | undefined {
+    return activeCallStorage.getStore() ?? this.fallbackToolCalls[this.fallbackToolCalls.length - 1];
+  }
+
   private currentToolCtx(): ExtensionToolContext | undefined {
-    return this.toolCallStack[this.toolCallStack.length - 1]?.ctx;
+    return this.currentActiveCall()?.ctx;
   }
 
   private recordNestedUsage(usage: Usage): void {
-    const active = this.toolCallStack[this.toolCallStack.length - 1];
+    const active = this.currentActiveCall();
     if (active === undefined) return;
     active.usage = active.usage === undefined ? usage : addUsage(active.usage, usage);
   }
@@ -606,12 +621,15 @@ export class RafTurn {
         // An empty or unreadable workspace is not fatal.
       }
     }
-    for (const path of extractPromptPaths(this.question, this.workspace)) {
-      if (session.sources.has(path)) continue;
-      try {
-        const res = await this.store.addPath(path, { cwd: this.workspace, ...(signal !== undefined ? { signal } : {}) });
+    const promptPaths = extractPromptPaths(this.question, this.workspace).filter((p) => !session.sources.has(p));
+    if (promptPaths.length > 0) {
+      const results = await this.store.addPaths(promptPaths, {
+        cwd: this.workspace,
+        ...(signal !== undefined ? { signal } : {}),
+      });
+      for (const res of results) {
         this.keepIngested(res, true);
-        session.sources.add(path);
+        session.sources.add(res.resolvedPath);
         session.board.record({
           agent: 'root',
           kind: 'tool',
@@ -619,14 +637,14 @@ export class RafTurn {
           key: `add_document:${res.sourceId}`,
           summary: `Loaded ${res.files.length} document(s) (~${res.totalTokens.toLocaleString('en-US')} tokens) under prefix "${res.sourceId}" from ${res.resolvedPath}`,
         });
-      } catch {
-        // A path-like word that is not a readable path is ignored.
       }
     }
   }
 
   private keepIngested(res: IngestResult, persist: boolean): void {
-    for (const file of res.files) this.session.docs.set(file.id, { title: file.title, text: file.content, persist });
+    for (const file of res.files) {
+      this.session.docs.set(file.id, { title: file.title, text: file.content, persist });
+    }
   }
 
   private begin(question: string, history: readonly AgentMessage[]): void {
@@ -635,22 +653,44 @@ export class RafTurn {
     const frozen = {
       ...(session.initialManifest !== undefined ? { initialManifest: session.initialManifest } : {}),
       ...(session.initialDocIds !== undefined ? { initialDocIds: session.initialDocIds } : {}),
+      ...(session.initialDocRevs !== undefined ? { initialDocRevs: session.initialDocRevs } : {}),
+      ...(session.initialBoardRev !== undefined ? { initialBoardRev: session.initialBoardRev } : {}),
+      ...(session.initialBoardSnapshot !== undefined ? { initialBoardSnapshot: session.initialBoardSnapshot } : {}),
     };
     if (session.rootState !== undefined) {
-      this.engine.begin(session.initialQuestion ?? question, { initialState: session.rootState, followUpQuestion: question, ...frozen });
+      this.engine.begin(session.initialQuestion ?? question, {
+        initialState: session.rootState,
+        followUpQuestion: question,
+        ...frozen,
+      });
     } else {
       this.engine.begin(question, frozen);
     }
     const pending = session.pending;
     session.pending = undefined;
     if (pending === undefined || session.rootState === undefined) return;
-    const result = findToolResult(history, pending.callId);
-    if (result === undefined) return;
+    const callIds = pending.callIds && pending.callIds.length > 0 ? pending.callIds : [pending.callId];
+    const results: FoundResult[] = [];
+    for (const cid of callIds) {
+      const r = findToolResult(history, cid);
+      if (r === undefined) return;
+      results.push(r);
+    }
     try {
-      this.engine.restorePending({ step: pending.step, motivation: pending.motivation, action: pending.action });
-      this.engine.submit(result.text, result.isError ? { error: result.text } : undefined);
+      this.engine.restorePending({
+        step: pending.step,
+        motivation: pending.motivation,
+        action: pending.action,
+        ...(pending.actions !== undefined ? { actions: pending.actions } : {}),
+      });
+      const texts = results.map((r) => r.text);
+      const firstErr = results.find((r) => r.isError)?.text;
+      this.engine.submit(
+        texts.length === 1 ? (texts[0] ?? '') : texts,
+        firstErr !== undefined ? { error: firstErr } : undefined,
+      );
     } catch {
-      // A pending step that no longer matches the fold state is dropped; the tool never runs twice.
+      // Drop any pending step that no longer matches the fold state.
     }
   }
 
@@ -682,7 +722,13 @@ export class RafTurn {
     return this.step;
   }
 
-  /** True when ContextStore holds non-workspace virtual or external documents (`session`, `branch_report_*`, `tool_*`). */
+  /** Apply 4-zone Anthropic cache_control breakpoints to the native root payload. */
+  decorateProviderPayload(payload: unknown): unknown {
+    if (!this.awaiting || this.lastPrepared === undefined) return undefined;
+    return applyCacheBreakpointsToPayload(payload, this.lastPrepared, this.routes.root.model);
+  }
+
+  /** Return true when ContextStore holds virtual or external documents. */
   hasVirtualDocs(): boolean {
     for (const doc of this.store.list()) {
       if (doc.id === 'session' || doc.id.startsWith(BRANCH_REPORT_ID_PREFIX) || doc.id.startsWith('tool_')) {
@@ -693,27 +739,41 @@ export class RafTurn {
     return false;
   }
 
-  /**
-   * Replace the native request with the AgentFold context. Before that, the
-   * native result of the previous tool step (and any steering message) goes
-   * into the fold state.
-   */
+  /** Replace the native request with the AgentFold context. */
   prepareRequest(messages: readonly AgentMessage[]): Message[] {
-    if (this.pendingCallId !== undefined) this.submitObservation(messages, this.pendingCallId);
+    if (this.pendingCallIds.length > 0) this.submitObservations(messages, this.pendingCallIds);
     const prepared = this.engine.prepareRootMessages();
     this.prepared = prepared;
+    this.lastPrepared = prepared;
     this.awaiting = true;
     this.tracker.rootRequest();
     return toPiMessages(prepared, this.routes.root.model);
   }
 
-  private submitObservation(messages: readonly AgentMessage[], callId: string): void {
-    const found = findToolResult(messages, callId);
-    const steering = steeringAfter(messages, callId);
-    const base = found === undefined ? 'Error: tool result missing' : this.indexResult(found.toolName, found.args, found.text, found.isError);
-    const observation = steering === '' ? base : `${base}\n\n[User message during this step]\n${steering}`;
-    this.engine.submit(observation, found?.isError === true ? { error: found.text } : undefined);
-    this.pendingCallId = undefined;
+  private submitObservations(messages: readonly AgentMessage[], callIds: readonly string[]): void {
+    const observations: string[] = new Array(callIds.length);
+    const errors: string[] = [];
+    for (let i = 0; i < callIds.length; i++) {
+      const cid = callIds[i];
+      const found = cid !== undefined ? findToolResult(messages, cid) : undefined;
+      if (found === undefined) {
+        observations[i] = 'Error: tool result missing';
+      } else {
+        observations[i] = this.indexResult(found.toolName, found.args, found.text, found.isError);
+        if (found.isError) errors.push(found.text);
+      }
+    }
+    const lastId = callIds[callIds.length - 1];
+    const steering = lastId !== undefined ? steeringAfter(messages, lastId) : '';
+    if (steering !== '' && observations.length > 0) {
+      const lastIdx = observations.length - 1;
+      observations[lastIdx] = `${observations[lastIdx] ?? ''}\n\n[User message during this step]\n${steering}`;
+    }
+    this.engine.submit(
+      observations.length === 1 ? (observations[0] ?? '') : observations,
+      errors.length > 0 ? { error: errors.join('; ') } : undefined,
+    );
+    this.pendingCallIds = [];
   }
 
   private nextIndexedId(toolName: string): string {
@@ -724,11 +784,11 @@ export class RafTurn {
     }
   }
 
-  /**
-   * Keep large native results searchable: index them as documents, and
-   * re-read files that write/edit changed so RAF reads the new content.
-   */
+  /** Index large native results and synchronize workspace files after write, edit, or bash. */
   indexResult(toolName: string, args: Readonly<Record<string, unknown>>, text: string, isError: boolean): string {
+    if (toolName === 'bash') {
+      this.refreshModifiedWorkspaceFiles();
+    }
     if (isError) return text;
     if (toolName === 'write' || toolName === 'edit') {
       const target = args.path ?? args.file_path;
@@ -751,32 +811,83 @@ export class RafTurn {
   private refreshFile(target: string): void {
     try {
       const abs = isAbsolute(target) ? resolve(target) : resolve(this.workspace, target);
+      const st = statSync(abs, { throwIfNoEntry: false });
+      if (!st || !st.isFile()) return;
+      const existing = this.store.findByAbsPath(abs);
+      if (
+        existing !== undefined &&
+        existing.mtimeMs === st.mtimeMs &&
+        existing.byteSize === st.size &&
+        Math.abs(Date.now() - st.mtimeMs) >= 15
+      ) {
+        return;
+      }
       const rel = relative(this.workspace, abs);
-      const id = sanitizeDocId(rel !== '' && !rel.startsWith('..') && !isAbsolute(rel) ? rel : target);
+      const id =
+        existing?.id ?? sanitizeDocId(rel !== '' && !rel.startsWith('..') && !isAbsolute(rel) ? rel : target);
       const text = readFileSync(abs, 'utf8');
-      this.store.add(text, { id, title: target });
+      this.store.add(text, { id, title: target, absPath: abs, mtimeMs: st.mtimeMs, byteSize: st.size });
       this.session.docs.set(id, { title: target, text, persist: false });
     } catch {
-      // A file that cannot be read back is left to the next read call.
+      // Unreadable files wait for the next read call.
     }
   }
 
-  /**
-   * Turn the native response into one RAF step. Returns the replacement
-   * message: a native tool call, or the final answer.
-   */
+  private refreshModifiedWorkspaceFiles(): void {
+    for (const doc of this.store.listManifest()) {
+      if (doc.absPath === undefined) continue;
+      try {
+        const st = statSync(doc.absPath, { throwIfNoEntry: false });
+        if (!st || !st.isFile()) continue;
+        if (doc.mtimeMs === st.mtimeMs && doc.byteSize === st.size) continue;
+        const text = readFileSync(doc.absPath, 'utf8');
+        this.store.add(text, {
+          id: doc.id,
+          title: doc.title,
+          absPath: doc.absPath,
+          mtimeMs: st.mtimeMs,
+          byteSize: st.size,
+        });
+        this.session.docs.set(doc.id, { title: doc.title, text, persist: false });
+      } catch {
+        // Ignore deleted or binary files modified during shell commands.
+      }
+    }
+  }
+
+  /** Turn the native response into one RAF step (supporting parallel multi-tool batches). */
   async acceptResponse(message: AssistantMessage, signal: AbortSignal | undefined): Promise<StepOutcome | undefined> {
     if (!this.awaiting) return undefined;
     this.awaiting = false;
     this.link(signal);
-    if (message.stopReason === 'error' || message.stopReason === 'aborted') {
+    const recoverableToolErr =
+      message.stopReason === 'error' &&
+      signal?.aborted !== true &&
+      RECOVERABLE_TOOL_CALL_ERROR.test(message.errorMessage ?? '');
+
+    if ((message.stopReason === 'error' && !recoverableToolErr) || message.stopReason === 'aborted') {
       this.root.clear();
+      this.lastPrepared = undefined;
       if (message.stopReason === 'error') this.lastError = message.errorMessage;
       return undefined;
     }
+
     this.tracker.addCost('root', message.usage.cost.total);
-    if (this.prepared !== undefined) this.root.prefetch(this.prepared, toEngineResponse(message));
+    if (this.prepared !== undefined) {
+      if (recoverableToolErr) {
+        this.root.prefetch(this.prepared, {
+          text: '',
+          model: message.responseModel ?? message.model,
+          latencyMs: message.durationMs ?? 0,
+          usage: toEngineUsage(message.usage),
+          finishReason: 'error',
+        });
+      } else {
+        this.root.prefetch(this.prepared, toEngineResponse(message));
+      }
+    }
     this.prepared = undefined;
+    this.lastPrepared = undefined;
     this.extraRootUsage = [];
     let usage: Usage = message.usage;
     try {
@@ -786,12 +897,27 @@ export class RafTurn {
       const thinking = thinkingBlocks(message, step.kind === 'done' ? undefined : step.reasoning);
       if (step.kind === 'tool') {
         this.step = step.step;
-        const name = piToolName(step.action.name);
-        const schema = this.tools.get(step.action.name)?.parameters;
-        const args = fitArguments(toJsonObject(step.action.arguments), schema);
-        const callId = newCallId();
-        this.pendingCallId = callId;
-        this.session.pending = { callId, step: step.step, motivation: step.motivation, action: step.action };
+        const actions = step.actions.length > 0 ? step.actions : [step.action];
+        const callBlocks: ToolCall[] = new Array(actions.length);
+        const callIds: string[] = new Array(actions.length);
+        for (let i = 0; i < actions.length; i++) {
+          const act = actions[i] ?? step.action;
+          const name = piToolName(act.name);
+          const schema = this.tools.get(act.name)?.parameters;
+          const args = fitArguments(toJsonObject(act.arguments), schema);
+          const cid = newCallId();
+          callIds[i] = cid;
+          callBlocks[i] = { type: 'toolCall', id: cid, name, arguments: args };
+        }
+        this.pendingCallIds = callIds;
+        this.session.pending = {
+          callId: callIds[0] ?? newCallId(),
+          callIds,
+          step: step.step,
+          motivation: step.motivation,
+          action: step.action,
+          actions,
+        };
         const motivation = step.motivation.trim();
         return {
           kind: 'tool',
@@ -800,7 +926,7 @@ export class RafTurn {
             content: [
               ...thinking,
               ...(motivation !== '' ? [{ type: 'text' as const, text: motivation }] : []),
-              { type: 'toolCall', id: callId, name, arguments: args },
+              ...callBlocks,
             ],
             stopReason: 'toolUse',
             usage,
@@ -814,9 +940,14 @@ export class RafTurn {
       if (answer !== '') return this.final({ ...message, usage }, answer, 'done', step.result);
       this.lastError = step.result.error ?? 'RAF engine returned no answer';
       const fallback = this.controller.signal.aborted ? undefined : this.fallbackAnswer();
-      return this.final({ ...message, usage }, fallback ?? this.failureText(this.lastError), fallback === undefined ? 'error' : 'done', step.result);
+      return this.final(
+        { ...message, usage },
+        fallback ?? this.failureText(this.lastError),
+        fallback === undefined ? 'error' : 'done',
+        step.result,
+      );
     } catch (error) {
-      this.pendingCallId = undefined;
+      this.pendingCallIds = [];
       this.session.pending = undefined;
       this.lastError = error instanceof Error ? error.message : String(error);
       if (this.controller.signal.aborted) return undefined;
@@ -834,7 +965,11 @@ export class RafTurn {
     this.session.pending = undefined;
     const snapshot = result?.state ?? this.engine.snapshot();
     if (snapshot !== undefined) this.session.rootState = snapshot;
-    const replacement: AssistantMessage = { ...message, content: [...thinking, { type: 'text', text }], stopReason: 'stop' };
+    const replacement: AssistantMessage = {
+      ...message,
+      content: [...thinking, { type: 'text', text }],
+      stopReason: 'stop',
+    };
     const finalResult: AgentRunResult = result ?? {
       answer: null,
       steps: this.step,
@@ -851,7 +986,6 @@ export class RafTurn {
     return `RAF stopped without a final answer: ${error}`;
   }
 
-  /** Last-resort answer built from completed specialist reports. Read-only. */
   private fallbackAnswer(): string | undefined {
     const sections: string[] = [];
     const seen = new Set<string>();
@@ -876,7 +1010,7 @@ export class RafTurn {
     return `# Final Report (Saved Branch Results)\n\nRoot did not produce a final answer; saved specialist reports are listed below.\n\n${sections.join('\n\n')}${gap}`;
   }
 
-  /** Execute a RAF built-in tool for a native pi tool call. */
+  /** Execute a RAF built-in tool inside an isolated AsyncLocalStorage frame. */
   async executeTool(
     name: RafToolName,
     params: Record<string, unknown>,
@@ -889,7 +1023,7 @@ export class RafTurn {
     if (tool === undefined) throw new Error(`RAF tool ${name} is not available in this turn`);
     this.link(signal);
     const frame: ActiveToolCall = { ctx, usage: undefined };
-    this.toolCallStack.push(frame);
+    this.fallbackToolCalls.push(frame);
     this.tracker.beginCall(toolCallId, name);
     let last = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -910,17 +1044,19 @@ export class RafTurn {
             timer = setTimeout(push, Math.max(0, UPDATE_INTERVAL_MS - (Date.now() - last)));
           });
     try {
-      const observation = await tool.execute(params, {
-        store: this.store,
-        usage: this.engine.usage,
-        depth: 0,
-        agentName: 'root',
-        step: this.step,
-        emit: (event) => this.onEvent(event),
-        signal: this.controller.signal,
-        board: this.session.board,
-        ancestorTasks: [this.question],
-      });
+      const observation = await activeCallStorage.run(frame, () =>
+        tool.execute(params, {
+          store: this.store,
+          usage: this.engine.usage,
+          depth: 0,
+          agentName: 'root',
+          step: this.step,
+          emit: (event) => this.onEvent(event),
+          signal: this.controller.signal,
+          board: this.session.board,
+          ancestorTasks: [this.question],
+        }),
+      );
       this.captureReports();
       this.tracker.endCall(toolCallId);
       const call = this.tracker.callSnapshot(toolCallId);
@@ -949,12 +1085,12 @@ export class RafTurn {
       unsubscribe();
       if (timer !== undefined) clearTimeout(timer);
       this.tracker.endCall(toolCallId);
-      const idx = this.toolCallStack.lastIndexOf(frame);
-      if (idx !== -1) this.toolCallStack.splice(idx, 1);
+      const idx = this.fallbackToolCalls.lastIndexOf(frame);
+      if (idx !== -1) this.fallbackToolCalls.splice(idx, 1);
     }
   }
 
-  /** Run a native pi tool for a branch sub-agent, through pi's validation and hooks. */
+  /** Run a native pi tool for a branch sub-agent through pi's validation and hooks. */
   async runNative(name: string, args: Record<string, unknown>, signal: AbortSignal | undefined): Promise<string> {
     const ctx = this.currentToolCtx();
     if (ctx === undefined) throw new Error(`${name} can run only inside a RAF tool call`);
@@ -963,16 +1099,22 @@ export class RafTurn {
     return this.indexResult(name, args, text, outcome.isError);
   }
 
-  /** End the turn. Unfinished work is aborted. */
+  /** End the turn and abort any unfinished background work. */
   finish(status: TurnStatus): void {
     if (this.finished) return;
     this.finished = true;
     this.detachRateLimit();
     const snapshot = this.engine.snapshot();
     if (snapshot !== undefined) this.session.rootState = snapshot;
-    if (status === 'done') this.session.pending = undefined;
+    if (status === 'done' || status === 'error') {
+      this.session.pending = undefined;
+    } else if (status === 'aborted') {
+      const hasProgress = (snapshot?.blocks.length ?? 0) > 0 || snapshot?.latest !== undefined;
+      if (!hasProgress) this.session.pending = undefined;
+    }
     this.captureReports();
     this.root.clear();
+    this.lastPrepared = undefined;
     if (!this.controller.signal.aborted) this.controller.abort(new Error(`RAF turn ${status}`));
     this.tracker.endRun();
   }
@@ -982,7 +1124,6 @@ export class RafTurn {
   }
 }
 
-/** Keep native thinking blocks. Without them, show the engine's reasoning text. */
 function thinkingBlocks(message: AssistantMessage, reasoning: string | undefined): ThinkingContent[] {
   const native = message.content.filter((block): block is ThinkingContent => block.type === 'thinking');
   if (native.length > 0) return native;
@@ -996,22 +1137,27 @@ interface FoundResult {
   readonly isError: boolean;
 }
 
-/** Find the native result of one tool call and the arguments it ran with. */
 function findToolResult(messages: readonly AgentMessage[], callId: string): FoundResult | undefined {
   let args: Readonly<Record<string, unknown>> = {};
   for (const message of messages) {
     if (message.role !== 'assistant') continue;
-    for (const block of message.content) if (block.type === 'toolCall' && block.id === callId) args = block.arguments;
+    for (const block of message.content) {
+      if (block.type === 'toolCall' && block.id === callId) args = block.arguments;
+    }
   }
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (message?.role !== 'toolResult' || message.toolCallId !== callId) continue;
-    return { toolName: message.toolName, args, text: resultText(message.content, message.isError), isError: message.isError };
+    return {
+      toolName: message.toolName,
+      args,
+      text: resultText(message.content, message.isError),
+      isError: message.isError,
+    };
   }
   return undefined;
 }
 
-/** Text of user messages that arrived after the assistant message with this tool call. */
 function steeringAfter(messages: readonly AgentMessage[], callId: string): string {
   const start = messages.findIndex(
     (message) => message.role === 'assistant' && message.content.some((block) => block.type === 'toolCall' && block.id === callId),
@@ -1034,12 +1180,13 @@ interface BridgeableShape {
   readonly parameters: unknown;
 }
 
-/** Engine tool that forwards a branch call to a native pi tool. */
 function bridgeTool(info: BridgeableShape, turn: () => RafTurn | undefined): Tool {
+  const safe = CONCURRENCY_SAFE_NATIVE.has(info.name.toLowerCase());
   return {
     name: info.name,
     description: info.description,
     parameters: geminiSafeSchema(info.parameters) as JSONSchema,
+    ...(safe ? { isConcurrencySafe: () => true } : {}),
     async execute(args, toolCtx) {
       const current = turn();
       if (current === undefined) throw new Error(`${info.name}: RAF turn is not active`);
@@ -1049,7 +1196,6 @@ function bridgeTool(info: BridgeableShape, turn: () => RafTurn | undefined): Too
   };
 }
 
-/** One progress line for a running RAF tool. */
 export function progressLine(call: CallSnapshot | undefined): string {
   if (call === undefined) return 'running…';
   const running = call.agents.filter((agent) => agent.status === 'running').length;

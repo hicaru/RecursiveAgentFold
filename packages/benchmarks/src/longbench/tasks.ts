@@ -48,9 +48,8 @@ export function splitContextIntoDocuments(context: string, maxDocs = 32): BenchD
 
 export function parseChoiceLetter(output: string): string | undefined {
   const trimmed = output.trim();
-  const explicit =
-    /(?:answer|choice|option)\s*(?:is|:)?\s*\(?([ABCD])\)?(?:\b|$)/i.exec(trimmed) ??
-    /^\(?([ABCD])\)?(?:[.\s:]|$)/i.exec(trimmed);
+  const lastExplicit = [...trimmed.matchAll(/(?:answer|choice|option)\s*(?:is|:)?\s*\(?([ABCD])\)?(?:\b|$)/gi)].pop();
+  const explicit = lastExplicit ?? /^\(?([ABCD])\)?(?:[.\s:]|$)/i.exec(trimmed);
   if (explicit && explicit[1]) return explicit[1].toUpperCase();
   const allMatches = [...trimmed.matchAll(/\b([ABCD])\b/g)];
   const last = allMatches[allMatches.length - 1];

@@ -194,7 +194,7 @@ async function main() {
 
   const oolongOpts = {
     // trec_coarse and spam only exist in the validation split (as used by RLM).
-    split: (values.split ?? (['trec_coarse', 'spam'].includes(values.dataset!) ? 'validation' : 'test')) as 'test' | 'validation',
+    split: (values.split ?? (values.dataset !== undefined && ['trec_coarse', 'spam'].includes(values.dataset) ? 'validation' : 'test')) as 'test' | 'validation',
     dataset: values.dataset,
     contextLen: Number(values['context-len']),
     cacheDir,

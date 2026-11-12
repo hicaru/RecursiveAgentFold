@@ -167,40 +167,57 @@ async function gitFiles(cwd: string, signal?: AbortSignal): Promise<readonly str
       if (p !== undefined && p !== '' && !isIgnoredRelPath(p)) out[n++] = p;
     }
     out.length = n;
+    out.sort();
     return Object.freeze(out);
   } catch {
     return undefined;
   }
 }
 
+const WALK_CONCURRENCY = 16;
+
 export async function walkFs(root: string, signal?: AbortSignal): Promise<readonly string[]> {
   const files: string[] = [];
-  const stack: string[] = [root];
-  while (stack.length > 0) {
+  let frontier: string[] = [root];
+  while (frontier.length > 0) {
     if (signal?.aborted) break;
-    const dir = stack.pop();
-    if (dir === undefined) break;
-    let entries: Dirent[];
-    try {
-      entries = await readdir(dir, { withFileTypes: true, encoding: 'utf8' });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const name = entry.name;
-      if (name === '.' || name === '..') continue;
-      const abs = join(dir, name);
-      if (entry.isDirectory()) {
-        if (FALLBACK_IGNORED[name]) continue;
-        if (name.startsWith('.') && !DOT_DIR_ALLOWED[name]) continue;
-        stack.push(abs);
-        continue;
+    const batch = frontier.length <= WALK_CONCURRENCY ? frontier : frontier.slice(0, WALK_CONCURRENCY);
+    const rest = frontier.length <= WALK_CONCURRENCY ? [] : frontier.slice(WALK_CONCURRENCY);
+    const results = await Promise.all(
+      batch.map(async (dir): Promise<Dirent[] | undefined> => {
+        if (signal?.aborted) return undefined;
+        try {
+          return await readdir(dir, { withFileTypes: true, encoding: 'utf8' });
+        } catch {
+          return undefined;
+        }
+      }),
+    );
+    const nextDirs: string[] = [];
+    for (let i = 0; i < batch.length; i++) {
+      const dir = batch[i];
+      const entries = results[i];
+      if (dir === undefined || entries === undefined) continue;
+      for (let j = 0; j < entries.length; j++) {
+        const entry = entries[j];
+        if (entry === undefined) continue;
+        const name = entry.name;
+        if (name === '.' || name === '..') continue;
+        const abs = join(dir, name);
+        if (entry.isDirectory()) {
+          if (FALLBACK_IGNORED[name]) continue;
+          if (name.startsWith('.') && !DOT_DIR_ALLOWED[name]) continue;
+          nextDirs.push(abs);
+          continue;
+        }
+        if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+        const rel = relative(root, abs).split(sep).join('/');
+        if (rel !== '' && !rel.startsWith('..')) files.push(rel);
       }
-      if (!entry.isFile() && !entry.isSymbolicLink()) continue;
-      const rel = relative(root, abs).split(sep).join('/');
-      if (rel !== '' && !rel.startsWith('..')) files.push(rel);
     }
+    frontier = rest.length > 0 ? [...rest, ...nextDirs] : nextDirs;
   }
+  files.sort();
   return Object.freeze(files);
 }
 

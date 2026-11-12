@@ -80,6 +80,13 @@ Shift focus.
     expect(a.answer).toBe('Label: location');
   });
 
+  it('unwraps an answer nested inside an outer answer wrapper', () => {
+    const text =
+      '<answer><folding range="0-0">s</folding><motivation>m</motivation><answer>\nAnswer: ACE\n</answer></answer>';
+    const p = parseAgentResponse(text, { expectFolding: true });
+    expect(p.answer).toBe('Answer: ACE');
+  });
+
   it('reports missing action', () => {
     const p = parseAgentResponse('just prose', { expectFolding: false });
     expect(p.errors.length).toBe(1);

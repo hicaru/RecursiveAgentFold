@@ -1,0 +1,91 @@
+{
+  "bench": "longbench-pro",
+  "method": "raf",
+  "n": 20,
+  "meanScore": 0,
+  "correct": 0,
+  "meanOfficial": 0,
+  "meanLenient": 0,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 0,
+  "meanSteps": 3,
+  "meanWallSec": 0.0056,
+  "formatIssues": 0,
+  "folds": {
+    "granular": 40,
+    "deep": 0,
+    "corrected": 20
+  },
+  "llmQueryCalls": 20,
+  "tokens": {
+    "prompt": 989591,
+    "cached": 283968,
+    "completion": 5620,
+    "rootCacheHitRate": 0.9125172557706508,
+    "branchCacheHitRate": 0,
+    "cacheHitRate": 0.28695491369666865
+  },
+  "byRole": {
+    "root": {
+      "calls": 60,
+      "promptTokens": 249192,
+      "completionTokens": 3220,
+      "cachedTokens": 227392,
+      "reasoningTokens": 0,
+      "latencyMs": 0,
+      "errors": 0,
+      "cacheHitRate": 0.9125172557706508
+    },
+    "llm_query": {
+      "calls": 96,
+      "promptTokens": 740399,
+      "completionTokens": 2400,
+      "cachedTokens": 56576,
+      "reasoningTokens": 0,
+      "latencyMs": 0,
+      "errors": 0,
+      "cacheHitRate": 0.07641285306976374
+    }
+  },
+  "byTask": {
+    "T1. Retrieval & Ranking": {
+      "n": 3,
+      "score": 0
+    },
+    "T2. Sequencing & Structure Reconstruction": {
+      "n": 3,
+      "score": 0
+    },
+    "T5. Attribution & Citation Alignment": {
+      "n": 2,
+      "score": 0
+    },
+    "T6. Aggregation & Clustering": {
+      "n": 7,
+      "score": 0
+    },
+    "T9. Version & Code Diff Analysis": {
+      "n": 1,
+      "score": 0
+    },
+    "T3. Evidence-Grounded QA": {
+      "n": 1,
+      "score": 0
+    },
+    "T10. Rule Induction & In-Context Learning": {
+      "n": 1,
+      "score": 0
+    },
+    "T7. Consistency & Compliance Checking": {
+      "n": 2,
+      "score": 0
+    }
+  },
+  "byAnswerType": {
+    "?": {
+      "n": 20,
+      "score": 0
+    }
+  }
+}

@@ -22,13 +22,13 @@ export interface RafConfig {
 
 export const DEPTH_RANGE = Object.freeze({ min: 1, max: 3 });
 export const RESERVE_RANGE = Object.freeze({ min: 0.1, max: 0.5, step: 0.05 });
-export const CONCURRENCY_RANGE = Object.freeze({ min: 1, max: 8 });
+export const CONCURRENCY_RANGE = Object.freeze({ min: 1, max: 32 });
 
 export const DEFAULT_CONFIG: RafConfig = Object.freeze({
   enabledByDefault: false,
   depth: 2,
   reserve: 0.3,
-  concurrency: 4,
+  concurrency: 8,
   branchModel: '',
   branchThinking: 'inherit',
   readerModel: '',

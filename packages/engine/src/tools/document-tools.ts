@@ -33,6 +33,15 @@ async function refreshLiveFileIfPresent(
   const candidate = isAbsolute(rawTarget) ? resolve(rawTarget) : resolve(ingest.cwd, rawTarget);
   const s = await stat(candidate).catch(() => undefined);
   if (!s || !s.isFile()) return undefined;
+  const existing = ctx.store.findByAbsPath(candidate);
+  if (
+    existing !== undefined &&
+    existing.mtimeMs === s.mtimeMs &&
+    existing.byteSize === s.size &&
+    Math.abs(Date.now() - s.mtimeMs) >= 15
+  ) {
+    return existing.id;
+  }
   try {
     const res = await ctx.store.addPath(rawTarget, {
       cwd: ingest.cwd,
@@ -109,12 +118,15 @@ async function ensureTargetsFromArgs(
     }
     return undefined;
   }
+  const perTarget = await Promise.all(
+    targets.map(async (t) => ({ target: t, ids: await ensureTargetIds(t, ctx, ingest) })),
+  );
   const seen = new Set<string>();
   const resolved: string[] = [];
-  for (let i = 0; i < targets.length; i++) {
-    const t = targets[i];
-    if (!t) continue;
-    const ids = await ensureTargetIds(t, ctx, ingest);
+  for (let i = 0; i < perTarget.length; i++) {
+    const entry = perTarget[i];
+    if (!entry) continue;
+    const { target: t, ids } = entry;
     if (ids.length === 0) {
       if (!seen.has(t)) {
         seen.add(t);
@@ -144,6 +156,7 @@ export function createListDocumentsTool(opts: DocumentToolOptions = {}): Tool {
         limit: { type: 'integer', description: 'Maximum number of documents to list (default 200).' },
       },
     },
+    isConcurrencySafe: () => true,
     async execute(args, ctx) {
       if (opts.ingest?.cwd !== undefined && ctx.store.listManifest().every((d) => d.id === 'session')) {
         await ensureTargetsFromArgs({}, ctx, opts.ingest);
@@ -198,6 +211,7 @@ export function createAddDocumentTool(opts: AddDocumentToolOptions = {}): Tool {
       },
       required: [],
     },
+    isConcurrencySafe: () => true,
     async execute(args, ctx) {
       const single =
         argString(args, 'path', false) ??
@@ -216,15 +230,23 @@ export function createAddDocumentTool(opts: AddDocumentToolOptions = {}): Tool {
         throw new ToolArgumentError('must provide "path" or "paths"');
       }
 
+      const ingestOpts = {
+        ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+        ...(idPrefix !== undefined ? { idPrefix } : {}),
+        ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
+      };
+      const results =
+        targets.length === 1
+          ? [await ctx.store.addPath(targets[0] ?? '', ingestOpts)]
+          : await ctx.store.addPaths(targets, ingestOpts);
+      if (results.length === 0) {
+        throw new ToolArgumentError(`add_document could not load any files from: ${targets.join(', ')}`);
+      }
+
       const blocks: string[] = [];
-      for (let t = 0; t < targets.length; t++) {
-        const target = targets[t];
-        if (!target) continue;
-        const res = await ctx.store.addPath(target, {
-          ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
-          ...(idPrefix !== undefined ? { idPrefix } : {}),
-          ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
-        });
+      for (let t = 0; t < results.length; t++) {
+        const res = results[t];
+        if (!res) continue;
         opts.onIngest?.(res);
         ctx.board?.record({
           agent: ctx.agentName,
@@ -287,6 +309,7 @@ export function createSearchTool(opts: DocumentToolOptions = {}): Tool {
       },
       required: ['query'],
     },
+    isConcurrencySafe: () => true,
     async execute(args, ctx) {
       const query = (argString(args, 'query') ?? '').trim();
       if (!query) throw new ToolArgumentError('search requires a non-empty "query" string.');
@@ -327,6 +350,7 @@ export function createOutlineTool(opts: DocumentToolOptions = {}): Tool {
         max_entries: { type: 'integer', description: 'Max structural entries to return (default 60, max 200).' },
       },
     },
+    isConcurrencySafe: () => true,
     async execute(args, ctx) {
       const targetIds = await ensureTargetsFromArgs(args, ctx, opts.ingest);
       const maxEntries = Math.max(1, Math.min(200, Math.floor(argNumber(args, 'max_entries') ?? 60)));
@@ -377,6 +401,7 @@ export function createGrepTool(opts: DocumentToolOptions = {}): Tool {
       },
       required: ['pattern'],
     },
+    isConcurrencySafe: () => true,
     async execute(args, ctx) {
       const pattern = argString(args, 'pattern') ?? '';
       try {
@@ -406,7 +431,7 @@ export function createGrepTool(opts: DocumentToolOptions = {}): Tool {
       const head = `grep /${pattern}/: ${r.total} matching lines — ${Object.entries(r.perDoc)
         .map(([d, n]) => `${d}: ${n}`)
         .join(', ')}`;
-      const body = r.matches.map((m) => `${m.docId}:${m.line}| ${m.text}`).join('\n');
+      const body = r.matches.map((m, idx) => `[${idx + 1}] ${m.docId}:${m.line}| ${m.text}`).join('\n');
       const more = r.total > r.matches.length ? `\n… ${r.total - r.matches.length} more matching lines omitted` : '';
       return truncateToTokens(`${head}${body ? `\n${body}` : ''}${more}`, opts.maxReadTokens ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxReadTokens).text;
     },
@@ -429,6 +454,7 @@ export function createTallyTool(opts: DocumentToolOptions = {}): Tool {
       },
       required: ['pattern'],
     },
+    isConcurrencySafe: () => true,
     async execute(args, ctx) {
       const pattern = argString(args, 'pattern') ?? '';
       try {
@@ -498,6 +524,7 @@ export function createReadTool(opts: DocumentToolOptions = {}): Tool {
       },
       required: [],
     },
+    isConcurrencySafe: () => true,
     async execute(args, ctx) {
       const rawDoc = (
         argString(args, 'document', false) ??

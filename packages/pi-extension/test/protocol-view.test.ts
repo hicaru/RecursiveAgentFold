@@ -37,6 +37,14 @@ describe('renderProtocolMarkdown', () => {
     expect(renderProtocolMarkdown('visible<think>partial reasoning')).toBe('visible');
   });
 
+  it('keeps protocol-looking tags inside markdown code spans and fences', () => {
+    const text = 'Use `<answer>` carefully.\n```xml\n<tool_call>{"name":"x"}</tool_call>\n```\n<answer>done</answer>';
+    const out = renderProtocolMarkdown(text);
+    expect(out).toContain('`<answer>`');
+    expect(out).toContain('<tool_call>{"name":"x"}</tool_call>');
+    expect(out.endsWith('done')).toBe(true);
+  });
+
   it('strips both closed and streaming unclosed tool_call blocks cleanly', () => {
     expect(renderProtocolMarkdown('<tool_call>{"name":"read","arguments":{"document":"doc_1"}}</tool_call>')).toBe('');
     expect(renderProtocolMarkdown('<motivation>Run check.</motivation>\n<tool_call name="bash"><command>ls')).toBe('Run check.');

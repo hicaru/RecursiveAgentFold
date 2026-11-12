@@ -21,13 +21,13 @@ export function normalizeItem(s: string): string {
 
 /** Payload after the LAST answer marker ([Answer]/Answer:), else the text. */
 export function extractAnswerPayload(out: string): string {
-  const bracketed = [...out.matchAll(/\[answer\]\s*:?/gi)];
+  const bracketed = [...out.matchAll(/\[(?:answer|答案)\]\s*[:：]?/gi)];
   const lastBracket = bracketed[bracketed.length - 1];
   if (lastBracket) {
     const tail = out.slice((lastBracket.index ?? 0) + lastBracket[0].length).trim();
-    return tail.replace(/\n\s*Answer\s*:[\s\S]*$/i, '').trim();
+    return tail.replace(/\n\s*(?:Answer|答案)\s*[:：][\s\S]*$/i, '').trim();
   }
-  const markers = [...out.matchAll(/answer\s*:?/gi)];
+  const markers = [...out.matchAll(/(?:answer|答案)\s*[:：]?/gi)];
   const last = markers[markers.length - 1];
   if (!last) return out.trim();
   return out.slice((last.index ?? 0) + last[0].length).trim();

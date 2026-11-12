@@ -1,4 +1,10 @@
-import { AgentFoldAgent, type AgentFoldConfig, type AgentRunResult, type AgentStep, type PendingAgentStep } from './agent/agent-fold.js';
+import {
+  AgentFoldAgent,
+  type AgentFoldConfig,
+  type AgentRunResult,
+  type AgentStep,
+  type PendingAgentStep,
+} from './agent/agent-fold.js';
 import type { EventSink } from './agent/events.js';
 import type { ContextStore } from './context/store.js';
 import { ResearchBoard } from './context/board.js';
@@ -22,34 +28,34 @@ import type { Tool } from './tools/types.js';
 import type { ChatMessage, LLMClient } from './types.js';
 
 export const DEFAULT_MAX_DEPTH = 2;
+export const DEFAULT_BRANCH_MAX_STEPS = 30;
 
 export interface RecursiveAgentFoldOptions {
-  /** Root agent model (e.g. a large thinking model). */
-  rootLLM: LLMClient;
-  /** Model for branch sub-agents (default: rootLLM). */
-  branchLLM?: LLMClient;
+  /** Root agent model. */
+  readonly rootLLM: LLMClient;
+  /** Specialist sub-agent model (defaults to rootLLM). */
+  readonly branchLLM?: LLMClient;
   /** Non-thinking reader model for llm_query. Omit to disable llm_query. */
-  queryLLM?: LLMClient;
-  /**
-   * Reuse an existing engine (shares the llm_query memo across runs over the
-   * same store, e.g. several questions about one context window).
-   */
-  queryEngine?: LLMQueryEngine;
-  store: ContextStore;
-  llmQuery?: LLMQueryOptions;
-  documentTools?: DocumentToolOptions;
-  /** Options for `add_document` file/directory ingestion. */
-  ingest?: AddDocumentToolOptions;
-  /** Max branch recursion depth (0 disables branching). Default 2. */
-  maxDepth?: number;
-  rootMaxSteps?: number;
-  branchMaxSteps?: number;
+  readonly queryLLM?: LLMClient;
+  /** Shared LLMQueryEngine across multiple runs on the same ContextStore. */
+  readonly queryEngine?: LLMQueryEngine;
+  readonly store: ContextStore;
+  readonly llmQuery?: LLMQueryOptions;
+  readonly documentTools?: DocumentToolOptions;
+  /** Options for file and directory ingestion. */
+  readonly ingest?: AddDocumentToolOptions;
+  /** Maximum branch recursion depth (0 disables branching, default 2). */
+  readonly maxDepth?: number;
+  readonly rootMaxSteps?: number;
+  readonly branchMaxSteps?: number;
   /** Maximum branch specialists that run concurrently per branch call. */
   readonly branchConcurrency?: number;
-  /** Prefix applied to every agent's built-in tools (host-native tool names). */
+  /** Prefix applied to built-in tool names. */
   readonly toolNamePrefix?: string;
-  /** Which tools to expose. Default: all available. */
-  enable?: Partial<
+  /** Clear transient reports from prior runs before starting a fresh `run()` (default true). */
+  readonly clearTransientOnRun?: boolean;
+  /** Toggle individual built-in tools. */
+  readonly enable?: Partial<
     Record<
       | 'add_document'
       | 'llm_query'
@@ -64,39 +70,34 @@ export interface RecursiveAgentFoldOptions {
       boolean
     >
   >;
-  extraTools?: readonly Tool[] | ((depth: number) => readonly Tool[]);
-  agent?: Partial<Omit<AgentFoldConfig, 'llm' | 'tools' | 'store' | 'depth' | 'name' | 'usage' | 'onEvent'>>;
-  onEvent?: EventSink;
-  usage?: UsageTracker;
-  signal?: AbortSignal;
-  board?: ResearchBoard;
+  readonly extraTools?: readonly Tool[] | ((depth: number) => readonly Tool[]);
+  readonly agent?: Partial<Omit<AgentFoldConfig, 'llm' | 'tools' | 'store' | 'depth' | 'name' | 'usage' | 'onEvent'>>;
+  readonly onEvent?: EventSink;
+  readonly usage?: UsageTracker;
+  readonly signal?: AbortSignal;
+  readonly board?: ResearchBoard;
 }
 
 export interface RootBeginOptions {
   readonly initialState?: FoldStateSnapshot;
   readonly followUpQuestion?: string;
+  readonly initialBoardRev?: number;
   readonly initialBoardCount?: number;
   readonly initialBoardSnapshot?: string;
   readonly initialManifest?: string;
   readonly initialDocIds?: Iterable<string>;
+  readonly initialDocRevs?: Readonly<Record<string, number>>;
 }
 
 /**
  * Recursive AgentFold runtime.
- *
- * - Root agent: the paper's AgentFold loop (fold every step).
- * - llm_query: a non-thinking reader fanned out over deterministic chunks
- *   (chunk = window × (1 − reserveRatio)), memoized and prefix-cache friendly.
- * - branch: recursive scoped specialist sub-agents with persistent folded
- *   contexts on ResearchBoard (depth ≤ maxDepth).
- * - grep/read: precise follow-up after llm_query located the evidence.
  */
 export class RecursiveAgentFold {
   readonly usage: UsageTracker;
   readonly queryEngine?: LLMQueryEngine;
   readonly board: ResearchBoard;
   private branchCounter = 0;
-  private rootAgent: AgentFoldAgent | undefined;
+  private rootAgent?: AgentFoldAgent;
 
   constructor(readonly opts: RecursiveAgentFoldOptions) {
     this.usage = opts.usage ?? new UsageTracker();
@@ -114,7 +115,7 @@ export class RecursiveAgentFold {
     this.board = opts.board ?? this.queryEngine?.board ?? new ResearchBoard();
   }
 
-  /** Tools for an agent at the given depth. */
+  /** Return tools exposed to an agent at the given depth. */
   toolsFor(depth: number, ownScope?: string): Tool[] {
     const en = this.opts.enable ?? {};
     const maxDepth = this.opts.maxDepth ?? DEFAULT_MAX_DEPTH;
@@ -130,14 +131,12 @@ export class RecursiveAgentFold {
     if (en.grep !== false) builtins.push(createGrepTool(docToolOpts));
     if (en.tally !== false) builtins.push(createTallyTool(docToolOpts));
     if (en.read !== false) builtins.push(createReadTool(docToolOpts));
-    if (en.list_documents !== false) {
-      builtins.push(createListDocumentsTool(docToolOpts));
-    }
+    if (en.list_documents !== false) builtins.push(createListDocumentsTool(docToolOpts));
     if (en.calculator !== false) builtins.push(createCalculatorTool());
     if (en.branch !== false && maxDepth > 0 && depth <= maxDepth) {
       builtins.push(
         createBranchTool((task, o) => this.runAgent(task, o), {
-          maxBranchSteps: this.opts.branchMaxSteps ?? 20,
+          maxBranchSteps: this.opts.branchMaxSteps ?? DEFAULT_BRANCH_MAX_STEPS,
           consultOnly: depth === maxDepth,
           ...(ownScope !== undefined ? { ownScope } : {}),
           ...(this.opts.branchConcurrency !== undefined ? { concurrency: this.opts.branchConcurrency } : {}),
@@ -148,7 +147,14 @@ export class RecursiveAgentFold {
     const tools =
       prefix === ''
         ? builtins
-        : builtins.map((tool) => ({ ...tool, name: `${prefix}${tool.name}`, execute: tool.execute.bind(tool) }));
+        : builtins.map((tool) => ({
+            ...tool,
+            name: `${prefix}${tool.name}`,
+            execute: tool.execute.bind(tool),
+            ...(tool.isConcurrencySafe !== undefined
+              ? { isConcurrencySafe: tool.isConcurrencySafe.bind(tool) }
+              : {}),
+          }));
     if (this.opts.extraTools !== undefined) {
       const extra = typeof this.opts.extraTools === 'function' ? this.opts.extraTools(depth) : this.opts.extraTools;
       tools.push(...extra);
@@ -158,8 +164,10 @@ export class RecursiveAgentFold {
 
   private createAgent(
     opts: BranchRunnerOptions & {
+      readonly initialBoardRev?: number;
       readonly initialManifest?: string;
       readonly initialDocIds?: Iterable<string>;
+      readonly initialDocRevs?: Readonly<Record<string, number>>;
     },
   ): AgentFoldAgent {
     const {
@@ -169,10 +177,12 @@ export class RecursiveAgentFold {
       scope,
       initialState,
       followUpQuestion,
+      initialBoardRev,
       initialBoardCount,
       initialBoardSnapshot,
       initialManifest,
       initialDocIds,
+      initialDocRevs,
       agentName,
       callStack,
       ancestorTasks,
@@ -180,31 +190,35 @@ export class RecursiveAgentFold {
     } = opts;
     const llm = depth === 0 ? this.opts.rootLLM : (this.opts.branchLLM ?? this.opts.rootLLM);
     const maxDepth = this.opts.maxDepth ?? DEFAULT_MAX_DEPTH;
-    const agent = new AgentFoldAgent({
+    const resolvedMaxSteps =
+      maxSteps ??
+      (depth === 0 ? (this.opts.rootMaxSteps ?? 100) : (this.opts.branchMaxSteps ?? DEFAULT_BRANCH_MAX_STEPS));
+    return new AgentFoldAgent({
       ...this.opts.agent,
       llm,
       tools: this.toolsFor(depth, scope),
       store: this.opts.store,
       depth,
       maxDepth,
-      parent,
+      ...(parent !== undefined ? { parent } : {}),
       ...(scope !== undefined ? { scope } : {}),
       name: agentName ?? (depth === 0 ? 'root' : `branch#${++this.branchCounter}@${depth}`),
-      maxSteps: maxSteps ?? (depth === 0 ? (this.opts.rootMaxSteps ?? 100) : (this.opts.branchMaxSteps ?? 20)),
+      maxSteps: resolvedMaxSteps,
       usage: this.usage,
-      onEvent: this.opts.onEvent,
-      signal: signal ?? this.opts.signal,
+      ...(this.opts.onEvent !== undefined ? { onEvent: this.opts.onEvent } : {}),
+      ...(signal !== undefined ? { signal } : this.opts.signal !== undefined ? { signal: this.opts.signal } : {}),
       board: this.board,
-      initialState,
-      followUpQuestion,
-      initialBoardCount,
-      initialBoardSnapshot,
+      ...(initialState !== undefined ? { initialState } : {}),
+      ...(followUpQuestion !== undefined ? { followUpQuestion } : {}),
+      ...(initialBoardRev !== undefined ? { initialBoardRev } : {}),
+      ...(initialBoardCount !== undefined ? { initialBoardCount } : {}),
+      ...(initialBoardSnapshot !== undefined ? { initialBoardSnapshot } : {}),
       ...(initialManifest !== undefined ? { initialManifest } : {}),
       ...(initialDocIds !== undefined ? { initialDocIds } : {}),
-      callStack,
-      ancestorTasks,
+      ...(initialDocRevs !== undefined ? { initialDocRevs } : {}),
+      ...(callStack !== undefined ? { callStack } : {}),
+      ...(ancestorTasks !== undefined ? { ancestorTasks } : {}),
     });
-    return agent;
   }
 
   private runAgent(question: string, opts: BranchRunnerOptions): Promise<AgentRunResult> {
@@ -213,19 +227,25 @@ export class RecursiveAgentFold {
 
   /** Prepare the root agent for externally driven steps. */
   begin(question: string, opts?: RootBeginOptions): void {
+    if (opts?.initialState === undefined && this.opts.clearTransientOnRun !== false) {
+      this.opts.store.clearTransient();
+    }
     this.rootAgent = this.createAgent({
       depth: 0,
       parent: 'user',
       ...(opts?.initialState !== undefined ? { initialState: opts.initialState } : {}),
       ...(opts?.followUpQuestion !== undefined ? { followUpQuestion: opts.followUpQuestion } : {}),
+      ...(opts?.initialBoardRev !== undefined ? { initialBoardRev: opts.initialBoardRev } : {}),
       ...(opts?.initialBoardCount !== undefined ? { initialBoardCount: opts.initialBoardCount } : {}),
       ...(opts?.initialBoardSnapshot !== undefined ? { initialBoardSnapshot: opts.initialBoardSnapshot } : {}),
       ...(opts?.initialManifest !== undefined ? { initialManifest: opts.initialManifest } : {}),
       ...(opts?.initialDocIds !== undefined ? { initialDocIds: opts.initialDocIds } : {}),
+      ...(opts?.initialDocRevs !== undefined ? { initialDocRevs: opts.initialDocRevs } : {}),
     });
     this.rootAgent.begin(question);
   }
-  /** Build and cache the root prompt messages for the next native step. */
+
+  /** Build and cache the root prompt messages for the next step. */
   prepareRootMessages(): ChatMessage[] {
     if (this.rootAgent === undefined) {
       throw new Error('RecursiveAgentFold.begin() must run before prepareRootMessages()');
@@ -233,35 +253,38 @@ export class RecursiveAgentFold {
     return this.rootAgent.prepareMessages();
   }
 
-  /** Produce one root step; a tool step waits for `submit()`. */
+  /** Produce one root step. */
   async next(): Promise<AgentStep> {
     if (this.rootAgent === undefined) throw new Error('RecursiveAgentFold.begin() must run before next()');
     return this.rootAgent.next();
   }
 
-  /** Current root fold state for host-side persistence. */
+  /** Snapshot the root fold state. */
   snapshot(): FoldStateSnapshot | undefined {
     return this.rootAgent?.snapshot();
   }
 
-  /** Detached pending root tool step for host-side crash recovery. */
+  /** Snapshot any pending root tool step. */
   snapshotPending(): PendingAgentStep | undefined {
     return this.rootAgent?.snapshotPending();
   }
 
-  /** Reattach a pending root tool step after restoring a snapshot. */
+  /** Restore a pending root tool step after a crash. */
   restorePending(pending: PendingAgentStep): void {
     if (!this.rootAgent) throw new Error('restorePending() called before begin()');
     this.rootAgent.restorePending(pending);
   }
 
-  /** Feed the root tool observation back into the fold state. */
-  submit(observation: string, meta?: { error?: string }): void {
+  /** Submit single or batched tool observations to the root agent. */
+  submit(observation: string | readonly string[], meta?: { readonly error?: string }): void {
     if (this.rootAgent === undefined) throw new Error('RecursiveAgentFold.begin() must run before submit()');
     this.rootAgent.submit(observation, meta);
   }
 
   run(question: string): Promise<AgentRunResult> {
+    if (this.opts.clearTransientOnRun !== false) {
+      this.opts.store.clearTransient();
+    }
     return this.runAgent(question, { depth: 0, parent: 'user' });
   }
 }

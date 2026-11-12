@@ -14,12 +14,14 @@ export const ENTRY_STATE = 'raf-state';
 export const ENTRY_MODE = 'raf-mode';
 export const ENTRY_RUN = 'raf-run';
 
-/** A root tool call that waits for its native result. */
+/** A root tool call (or parallel batch) that waits for native results. */
 export interface PendingCall {
   readonly callId: string;
+  readonly callIds?: readonly string[];
   readonly step: number;
   readonly motivation: string;
   readonly action: ToolAction;
+  readonly actions?: readonly ToolAction[];
 }
 
 export interface StoredDoc {
@@ -64,6 +66,9 @@ export class SessionState {
   initialQuestion?: string;
   initialManifest?: string;
   initialDocIds?: ReadonlySet<string>;
+  initialDocRevs?: Readonly<Record<string, number>>;
+  initialBoardSnapshot?: string;
+  initialBoardRev?: number;
   pending?: PendingCall;
 
   /** Replace the carried-over state with a persisted entry. Workspace files are re-indexed later. */
@@ -79,6 +84,9 @@ export class SessionState {
     this.initialQuestion = undefined;
     this.initialManifest = undefined;
     this.initialDocIds = undefined;
+    this.initialDocRevs = undefined;
+    this.initialBoardSnapshot = undefined;
+    this.initialBoardRev = undefined;
     this.pending = undefined;
     if (state === undefined) return;
     this.rootState = state.rootState;

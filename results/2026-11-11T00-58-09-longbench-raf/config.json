@@ -1,0 +1,27 @@
+{
+  "bench": "longbench",
+  "method": "raf",
+  "startedAt": "2026-11-11T00:58:09.594Z",
+  "tasks": 6,
+  "taskIds": [
+    "longbench-66f94f9ebb02136c067c4fde",
+    "longbench-66fa208bbb02136c067c5fc1",
+    "longbench-66ec0c4c821e116aacb1994a",
+    "longbench-66ec56dd821e116aacb1cd0e",
+    "longbench-66ed875e821e116aacb2023e",
+    "longbench-66f8c9febb02136c067c4511"
+  ],
+  "argv": [
+    "longbench",
+    "--mock",
+    "--max-depth",
+    "2"
+  ],
+  "tools": "all",
+  "models": {
+    "mock": true,
+    "llmQuery": {
+      "reserveRatio": 0.3
+    }
+  }
+}

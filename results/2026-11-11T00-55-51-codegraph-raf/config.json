@@ -1,0 +1,27 @@
+{
+  "bench": "codegraph",
+  "method": "raf",
+  "startedAt": "2026-11-11T00:55:51.908Z",
+  "tasks": 6,
+  "taskIds": [
+    "codegraph-120000-spec-0",
+    "codegraph-120000-diamond-1",
+    "codegraph-120000-chain-h3-2",
+    "codegraph-120000-spec-3",
+    "codegraph-120000-diamond-4",
+    "codegraph-120000-chain-h3-5"
+  ],
+  "argv": [
+    "codegraph",
+    "--mock",
+    "--max-depth",
+    "2"
+  ],
+  "tools": "all",
+  "models": {
+    "mock": true,
+    "llmQuery": {
+      "reserveRatio": 0.3
+    }
+  }
+}

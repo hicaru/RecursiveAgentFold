@@ -26,7 +26,7 @@ export type AgentEvent =
   | { type: 'llm_response'; agent: string; step: number; text: string; reasoning?: string }
   | { type: 'format_error'; agent: string; step: number; errors: string[]; attempt: number; raw: string }
   | { type: 'fold'; agent: string; step: number; outcome: FoldOutcome; requested?: FoldDirective }
-  | { type: 'tool_call'; agent: string; step: number; action: ToolAction; motivation: string }
+  | { type: 'tool_call'; agent: string; step: number; action: ToolAction; actions?: readonly ToolAction[]; motivation: string }
   | { type: 'tool_result'; agent: string; step: number; name: string; observation: string; tokens: number; error?: string }
   | { type: 'answer'; agent: string; step: number; answer: string }
   | { type: 'run_end'; agent: string; depth: number; steps: number; terminated: string }

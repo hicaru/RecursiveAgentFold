@@ -42,14 +42,15 @@ export function buildNeedleTasks(o: NeedleOptions): BenchTask[] {
   // scatter facts uniformly
   const positions = facts.map(() => Math.floor(r() * lines.length)).sort((a, b) => a - b);
   facts.forEach((f, i) => {
-    lines.splice(positions[i]! + i, 0, `Personnel note: ${f.name} transferred to the ${f.city} office; badge number ${f.badge}.`);
+    lines.splice((positions[i] ?? 0) + i, 0, `Personnel note: ${f.name} transferred to the ${f.city} office; badge number ${f.badge}.`);
   });
   const text = lines.join('\n');
   const doc = { id: 'haystack', title: `synthetic haystack (~${o.tokens} tokens)`, text, tokens: Math.round(text.length / 4) };
   const tasks: BenchTask[] = [];
   for (let i = 0; i < o.tasks; i++) {
     if (i % 2 === 0) {
-      const f = facts[Math.floor(r() * facts.length)]!;
+      const f = facts[Math.floor(r() * facts.length)];
+      if (f === undefined) break;
       tasks.push({
         id: `needle-${o.tokens}-lookup-${i}`,
         group: `needle-${o.tokens}-${o.seed ?? 42}`,

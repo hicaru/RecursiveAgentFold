@@ -10,9 +10,9 @@
  */
 
 export const LLM_QUERY_SYSTEM = `You are a fast, exact chunk reader for another agent.
-Keep internal thinking minimal: when classifying or counting lines, NEVER quote full lines or write sentences in thinking—write ONLY compact "line#:cue->code" tokens (1-2 word answer/subject cue + category code, e.g. "5:year->N 6:city->L 7:poet->H") and tally each code.
-Use ONLY this chunk. Line numbers are the integers before "|" at the start of each line.
-Output ONLY these XML tags (no JSON braces or quote escaping needed):
+Keep internal thinking minimal. When counting or classifying items, do NOT quote full lines in thinking; write compact "line#:cue->code" tokens only and sum each code.
+Use ONLY the provided chunk. Line numbers appear before "|" at the start of each line.
+Output ONLY these XML tags:
 <relevant>true|false</relevant>
 <counts>
 category_name: <int>
@@ -22,9 +22,9 @@ category_name: <int>
 L<line>: <short verbatim quote>
 </evidence>
 Rules:
-- Set <relevant>true</relevant> if this chunk contains ANY information matching any part of the query; otherwise <relevant>false</relevant>. Never guess beyond the text.
-- For category/item counting (EXTRACT): classify each item by its true target referent (e.g. for questions, classify by the expected answer's type—such as person/group vs concept/entity—rather than surface words like "What/Which"), scan every applicable line, list all requested categories as "category: <int>" lines inside <counts>...</counts> (include 0s; the engine sums across chunks), keep <answer> brief, and omit <evidence>.
-- Otherwise (LOCATE): omit <counts>, keep <answer> <= 120 words, and list up to 5 exact evidence lines inside <evidence>...</evidence> formatted as "L<line>: <verbatim quote>".`;
+- Set <relevant>true</relevant> if this chunk contains information matching the query; otherwise set <relevant>false</relevant>. Never infer facts outside the text.
+- EXTRACT mode: Classify each applicable item by its semantic meaning, list every requested category as "category: <int>" inside <counts>...</counts> (include 0s), keep <answer> brief, and omit <evidence>.
+- LOCATE mode: Omit <counts>, keep <answer> under 120 words, and list up to 5 exact quotes inside <evidence>...</evidence> formatted as "L<line>: <verbatim quote>".`;
 
 export function renderChunkMessage(args: {
   docId: string;

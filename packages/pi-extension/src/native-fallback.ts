@@ -36,8 +36,8 @@ export function normalizeReadArgs(raw: unknown): Record<string, unknown> {
   const rec: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
   const path = str(rec.path) ?? str(rec.file_path) ?? str(rec.document);
   if (path !== undefined && rec.path === undefined) rec.path = path;
-  const start = num(rec.offset) ?? num(rec.start_line);
   const end = num(rec.end_line);
+  const start = num(rec.offset) ?? num(rec.start_line) ?? (end !== undefined ? 1 : undefined);
   if (start !== undefined && rec.offset === undefined) rec.offset = start;
   if (rec.limit === undefined && start !== undefined && end !== undefined && end >= start) {
     rec.limit = end - start + 1;
@@ -78,8 +78,8 @@ export async function fallbackExecute(
     if (path === undefined) {
       throw new Error('read: missing "path" argument (or "document" / "file_path")');
     }
-    const start = num(args.offset) ?? num(args.start_line);
     const end = num(args.end_line);
+    const start = num(args.offset) ?? num(args.start_line) ?? (end !== undefined ? 1 : undefined);
     const limit = num(args.limit) ?? (start !== undefined && end !== undefined && end >= start ? end - start + 1 : undefined);
     const native = await createReadToolDefinition(cwd).execute(
       toolCallId,

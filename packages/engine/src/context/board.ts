@@ -50,6 +50,7 @@ export interface SpecialistSessionSnapshot {
 /** JSON-safe board snapshot for host-side persistence. */
 export interface ResearchBoardSnapshot {
   readonly rev: number;
+  readonly entryIdSeq?: number;
   readonly specialistCounter: number;
   readonly entries: readonly BoardEntry[];
   readonly specialists: readonly SpecialistSessionSnapshot[];
@@ -92,8 +93,8 @@ const TASK_NOISE_WORDS: Readonly<Record<string, true>> = Object.freeze({
 });
 
 const TASK_TOK_RE = /[a-z0-9_.\-/]{2,}|\p{Script=Han}{2,}/gu;
-const TARGET_ID_RE =
-  /\b(?:(?:lib|mod|dep|service|pkg|doc|app|spec)[_-][a-z0-9_-]+|[A-Z][A-Z0-9_]{2,}|doc[_-]?\d+|[A-Za-z0-9_.\-]+(?:\/[A-Za-z0-9_.\-]+)+)\b/g;
+const STRUCTURAL_ID_RE =
+  /\b(?:[A-Za-z0-9_.\-]*[_/.\-0-9][A-Za-z0-9_.\-/]*|[A-Z][A-Z0-9]{2,}|[a-z]+[A-Z][A-Za-z0-9]*)\b/g;
 
 /** Extract normalized content tokens from a task string for echo detection. */
 export function taskTokenSet(text: string): ReadonlySet<string> {
@@ -108,10 +109,10 @@ export function taskTokenSet(text: string): ReadonlySet<string> {
   return out;
 }
 
-/** Extract target module, document, or constant identifiers from a task string. */
+/** Extract structured code, path, or numeric identifiers from a task string. */
 export function targetTokenSet(text: string): ReadonlySet<string> {
   const out = new Set<string>();
-  for (const m of text.matchAll(TARGET_ID_RE)) {
+  for (const m of text.matchAll(STRUCTURAL_ID_RE)) {
     const tok = m[0];
     if (tok) out.add(tok.toLowerCase());
   }
@@ -188,6 +189,7 @@ export class ResearchBoard {
   private readonly _entries: BoardEntry[] = [];
   private readonly _specialists = new Map<string, SpecialistSession>();
   private _specialistCounter = 0;
+  private _entryIdSeq = 0;
   private _rev = 0;
 
   currentRev(): number {
@@ -225,7 +227,7 @@ export class ResearchBoard {
       }
     }
     const created: BoardEntry = {
-      id: this._entries.length + 1,
+      id: ++this._entryIdSeq,
       rev,
       agent: entry.agent,
       kind: entry.kind,
@@ -513,6 +515,7 @@ export class ResearchBoard {
     }
     return {
       rev: this._rev,
+      entryIdSeq: this._entryIdSeq,
       specialistCounter: this._specialistCounter,
       entries: this._entries.map((e) => ({ ...e, ...(e.counts !== undefined ? { counts: { ...e.counts } } : {}) })),
       specialists,
@@ -523,6 +526,7 @@ export class ResearchBoard {
     if (snapshot === null || typeof snapshot !== 'object') throw new Error('invalid research board snapshot');
     const board = new ResearchBoard();
     let rev = Number.isInteger(snapshot.rev) && snapshot.rev >= 0 ? snapshot.rev : 0;
+    let entryIdSeq = Number.isInteger(snapshot.entryIdSeq) && (snapshot.entryIdSeq ?? 0) >= 0 ? (snapshot.entryIdSeq ?? 0) : 0;
     for (const e of snapshot.entries) {
       const entry: BoardEntry = {
         id: e.id,
@@ -537,8 +541,10 @@ export class ResearchBoard {
       };
       board._entries.push(entry);
       if (entry.rev > rev) rev = entry.rev;
+      if (entry.id > entryIdSeq) entryIdSeq = entry.id;
     }
     board._rev = rev;
+    board._entryIdSeq = entryIdSeq;
     board._specialistCounter = Number.isInteger(snapshot.specialistCounter) && snapshot.specialistCounter >= 0 ? snapshot.specialistCounter : 0;
     for (const s of snapshot.specialists) {
       const scope = normalizeScopeKey(s.scope);

@@ -51,7 +51,7 @@ function norm(s: string): string {
 
 /** Parse the payload after the last 'Answer:' marker, split on separators. */
 export function parseAnswerList(out: string): string[] {
-  const m = /answer\s*[:：]\s*(.+)$/is.exec(out);
+  const m = /answer\s*[:：]((?:(?!answer\s*[:：]).)*)$/is.exec(out);
   const raw = (m?.[1] ?? out).trim();
   return raw
     .split(/[,;\n]+/)

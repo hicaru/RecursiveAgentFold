@@ -1,0 +1,72 @@
+{
+  "bench": "mrcr",
+  "method": "raf",
+  "n": 6,
+  "meanScore": 0.8333333333333334,
+  "correct": 5,
+  "meanOfficial": 0.8333333333333334,
+  "meanLenient": 0.8333333333333334,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 0.8333333333333334,
+  "meanSteps": 4.166666666666667,
+  "meanWallSec": 194.38266666666667,
+  "formatIssues": 0,
+  "folds": {
+    "granular": 19,
+    "deep": 0,
+    "corrected": 0
+  },
+  "llmQueryCalls": 1,
+  "tokens": {
+    "prompt": 239982,
+    "cached": 92928,
+    "completion": 80947,
+    "rootCacheHitRate": 0.8238005744477146,
+    "branchCacheHitRate": 0,
+    "cacheHitRate": 0.38722904217816334
+  },
+  "byRole": {
+    "root": {
+      "calls": 25,
+      "promptTokens": 112804,
+      "completionTokens": 71995,
+      "cachedTokens": 92928,
+      "reasoningTokens": 62983,
+      "latencyMs": 1123227,
+      "errors": 0,
+      "cacheHitRate": 0.8238005744477146
+    },
+    "llm_query": {
+      "calls": 5,
+      "promptTokens": 127178,
+      "completionTokens": 8952,
+      "cachedTokens": 0,
+      "reasoningTokens": 3209,
+      "latencyMs": 127033,
+      "errors": 0,
+      "cacheHitRate": 0
+    }
+  },
+  "byTask": {
+    "mrcr_coref": {
+      "n": 6,
+      "score": 0.8333333333333334
+    }
+  },
+  "byAnswerType": {
+    "ANSWER_TYPE.STRING": {
+      "n": 6,
+      "score": 0.8333333333333334
+    }
+  },
+  "cost": {
+    "totalUsd": 0.392318,
+    "perTaskUsd": 0.065386,
+    "cacheSavedUsd": 0.105938,
+    "byRoleUsd": {
+      "root": 0.368766,
+      "llm_query": 0.023553
+    }
+  }
+}

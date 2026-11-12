@@ -22,11 +22,23 @@ export function isRateLimitError(
   return RATE_LIMIT_MESSAGE_RE.test(message);
 }
 
+/** Parse an HTTP Retry-After header (seconds or HTTP-date) into milliseconds. */
+export function parseRetryAfterMs(raw: string | null | undefined): number | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const secs = Number(trimmed);
+  if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+  const at = Date.parse(trimmed);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
+}
+
 export interface RateLimitCoordinatorOptions {
   readonly baseDelayMs?: number;
   readonly maxDelayMs?: number;
   readonly staggerMs?: number;
   readonly maxSoloRetries?: number;
+  readonly maxTotalRetries?: number;
 }
 
 export interface RateLimitLease {
@@ -35,6 +47,7 @@ export interface RateLimitLease {
 }
 
 interface QueuedWaiter {
+  readonly priority: number;
   readonly resolve: (lease: RateLimitLease) => void;
   readonly reject: (err: unknown) => void;
   readonly cleanup: () => void;
@@ -45,6 +58,7 @@ export class RateLimitCoordinator extends EventEmitter {
   readonly maxDelayMs: number;
   readonly staggerMs: number;
   readonly maxSoloRetries: number;
+  readonly maxTotalRetries: number;
 
   private _activeWorkers = 0;
   private _inFlight = 0;
@@ -62,6 +76,7 @@ export class RateLimitCoordinator extends EventEmitter {
     this.maxDelayMs = options.maxDelayMs ?? 300_000;
     this.staggerMs = options.staggerMs ?? 350;
     this.maxSoloRetries = options.maxSoloRetries ?? 8;
+    this.maxTotalRetries = options.maxTotalRetries ?? Math.max(this.maxSoloRetries * 3, 24);
   }
 
   get activeWorkers(): number {
@@ -106,9 +121,21 @@ export class RateLimitCoordinator extends EventEmitter {
     return this.isSolo() && soloStreak >= this.maxSoloRetries;
   }
 
+  shouldTerminateTotal(totalRetries: number): boolean {
+    return totalRetries >= this.maxTotalRetries;
+  }
+
   createSoloExhaustedError(soloStreak: number, lastErrorMessage: string): Error & { code: string } {
     const err = new Error(
       `RATE_LIMIT_EXHAUSTED: Provider rate limit persisted after ${soloStreak} solo retries with no parallel contention (${lastErrorMessage})`,
+    ) as Error & { code: string };
+    err.code = 'RATE_LIMIT_EXHAUSTED';
+    return err;
+  }
+
+  createExhaustedError(totalRetries: number, lastErrorMessage: string): Error & { code: string } {
+    const err = new Error(
+      `RATE_LIMIT_EXHAUSTED: Provider rate limit persisted after ${totalRetries} retries (${lastErrorMessage})`,
     ) as Error & { code: string };
     err.code = 'RATE_LIMIT_EXHAUSTED';
     return err;
@@ -171,7 +198,7 @@ export class RateLimitCoordinator extends EventEmitter {
     this.scheduleDrain();
   }
 
-  acquire(signal?: AbortSignal): Promise<RateLimitLease> {
+  acquire(signal?: AbortSignal, priority = 1): Promise<RateLimitLease> {
     if (signal?.aborted) {
       return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'));
     }
@@ -194,9 +221,17 @@ export class RateLimitCoordinator extends EventEmitter {
       const cleanup = () => {
         signal?.removeEventListener('abort', onAbort);
       };
-      const waiter: QueuedWaiter = { resolve, reject, cleanup };
+      const waiter: QueuedWaiter = { priority, resolve, reject, cleanup };
       signal?.addEventListener('abort', onAbort, { once: true });
-      this.waitQueue.push(waiter);
+      let insertIdx = this.waitQueue.length;
+      for (let i = 0; i < this.waitQueue.length; i++) {
+        const existing = this.waitQueue[i];
+        if (existing && priority < existing.priority) {
+          insertIdx = i;
+          break;
+        }
+      }
+      this.waitQueue.splice(insertIdx, 0, waiter);
       this.scheduleDrain();
     });
   }
@@ -249,3 +284,26 @@ export class RateLimitCoordinator extends EventEmitter {
 }
 
 export const defaultRateLimitGate = new RateLimitCoordinator();
+
+/** Per-provider coordinator registry so rate limits on one provider never throttle others. */
+export class RateLimitRegistry {
+  private readonly gates = new Map<string, RateLimitCoordinator>();
+
+  constructor(private readonly options: RateLimitCoordinatorOptions = {}) {}
+
+  get(providerKey: string): RateLimitCoordinator {
+    const key = providerKey.trim().toLowerCase() || 'default';
+    let gate = this.gates.get(key);
+    if (!gate) {
+      gate = new RateLimitCoordinator(this.options);
+      this.gates.set(key, gate);
+    }
+    return gate;
+  }
+
+  resetAll(): void {
+    for (const gate of this.gates.values()) gate.reset();
+  }
+}
+
+export const defaultRateLimitRegistry = new RateLimitRegistry();

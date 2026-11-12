@@ -30,6 +30,8 @@ export interface Interaction {
   /** The paper's "explanation" e_t (tagged <motivation> in the case studies). */
   motivation: string;
   action: ToolAction;
+  /** Present when a single step dispatches multiple tool calls in parallel. */
+  actions?: readonly ToolAction[];
   observation: string;
 }
 
@@ -154,13 +156,42 @@ export class FoldState {
   }
 
   snapshot(): FoldStateSnapshot {
-    return { blocks: this._blocks.map((b) => ({ ...b })), latest: this._latest ? { ...this._latest } : undefined };
+    return {
+      blocks: this._blocks.map((b) => ({ ...b })),
+      latest: this._latest
+        ? {
+            ...this._latest,
+            action: { name: this._latest.action.name, arguments: { ...this._latest.action.arguments } },
+            ...(this._latest.actions
+              ? {
+                  actions: this._latest.actions.map((a) => ({
+                    name: a.name,
+                    arguments: { ...a.arguments },
+                  })),
+                }
+              : {}),
+          }
+        : undefined,
+    };
   }
 
   static restore(s: FoldStateSnapshot): FoldState {
     const st = new FoldState();
     st._blocks = s.blocks.map((b) => ({ ...b }));
-    st._latest = s.latest ? { ...s.latest } : undefined;
+    st._latest = s.latest
+      ? {
+          ...s.latest,
+          action: { name: s.latest.action.name, arguments: { ...s.latest.action.arguments } },
+          ...(s.latest.actions
+            ? {
+                actions: s.latest.actions.map((a) => ({
+                  name: a.name,
+                  arguments: { ...a.arguments },
+                })),
+              }
+            : {}),
+        }
+      : undefined;
     return st;
   }
 }
@@ -168,8 +199,10 @@ export class FoldState {
 /** Used when the model omits/garbles its folding directive. */
 export function fallbackSummary(i: Interaction, maxObsChars = 600): string {
   const obs = i.observation.replace(/\s+/g, ' ').trim();
+  const callList = i.actions && i.actions.length > 1 ? i.actions : [i.action];
+  const callsDesc = callList.map((a) => `${a.name}(${JSON.stringify(a.arguments)})`).join(', ');
   return (
-    `${i.motivation ? `${i.motivation.trim()} ` : ''}Called ${i.action.name}(${JSON.stringify(i.action.arguments)}). ` +
+    `${i.motivation ? `${i.motivation.trim()} ` : ''}Called ${callsDesc}. ` +
     `Result (truncated): ${obs.length > maxObsChars ? `${obs.slice(0, maxObsChars)}…` : obs}`
   );
 }

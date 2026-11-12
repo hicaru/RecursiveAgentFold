@@ -13,7 +13,7 @@ import { computeChunkTokens, formatMarginNote, LLMQueryEngine } from '../src/too
 import { UsageTracker } from '../src/llm/usage.js';
 import { defaultEstimator } from '../src/tokens.js';
 import type { AgentEvent } from '../src/agent/events.js';
-import type { LLMClient } from '../src/types.js';
+import type { ChatMessage, LLMClient } from '../src/types.js';
 import { AgentFoldAgent, extractFallbackAnswer } from '../src/agent/agent-fold.js';
 import { FoldState } from '../src/fold/state.js';
 import {
@@ -2357,27 +2357,44 @@ describe('step usage, invalid cap, and truncated tool calls', () => {
   });
 });
 
-describe('step timeout', () => {
-  it('returns from a step timeout even when the provider ignores the abort signal', async () => {
+describe('attribute-style parameter tags', () => {
+  it('parses <param_name="key">value</param_name> arguments into named tool arguments', async () => {
+    const { parseAgentResponse } = await import('../src/protocol/parser.js');
+    const p = parseAgentResponse(
+      '<motivation>count</motivation><tool_call name="grep"><param_name="pattern">Nairobi</param_name><param_name="max_matches">100</param_name></tool_call>',
+      { expectFolding: false },
+    );
+    expect(p.errors).toEqual([]);
+    expect(p.toolCall?.name).toBe('grep');
+    expect(p.toolCall?.arguments).toMatchObject({ pattern: 'Nairobi' });
+    expect(String(p.toolCall?.arguments.max_matches)).toBe('100');
+  });
+});
+
+describe('external signal cancellation', () => {
+  it('returns immediately on external abort even when the provider ignores the abort signal', async () => {
     const store = new ContextStore();
     store.add('seed line', { id: 'ctx' });
+    const controller = new AbortController();
     const llm: LLMClient = {
       profile: { name: 'deaf', contextWindow: 128_000, maxOutputTokens: 1024 },
       complete() {
+        setTimeout(() => controller.abort(new Error('user cancelled step')), 15);
         return new Promise(() => {});
       },
     };
     const started = Date.now();
-    const agent = new AgentFoldAgent({ llm, tools: [], store, maxStepMs: 25 });
+    const agent = new AgentFoldAgent({ llm, tools: [], store, signal: controller.signal });
     const res = await agent.run('find seed');
     expect(res.terminated).toBe('error');
-    expect(res.error).toContain('step timeout');
+    expect(res.error).toContain('user cancelled step');
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
-  it('aborts a stalled LLM call after maxStepMs', async () => {
+  it('propagates external signal abort to a waiting LLM call', async () => {
     const store = new ContextStore();
     store.add('seed line', { id: 'ctx' });
+    const controller = new AbortController();
     const llm: LLMClient = {
       profile: { name: 'stalled', contextWindow: 128_000, maxOutputTokens: 1024 },
       complete(req) {
@@ -2388,13 +2405,14 @@ describe('step timeout', () => {
             return;
           }
           signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+          setTimeout(() => controller.abort(new Error('abort requested')), 15);
         });
       },
     };
-    const agent = new AgentFoldAgent({ llm, tools: [], store, maxStepMs: 20 });
+    const agent = new AgentFoldAgent({ llm, tools: [], store, signal: controller.signal });
     const res = await agent.run('find seed');
     expect(res.terminated).toBe('error');
-    expect(res.error).toContain('step timeout');
+    expect(res.error).toContain('abort requested');
   });
 });
 
@@ -2429,6 +2447,31 @@ describe('reasoning budget', () => {
         (event) => event.type === 'format_error' && event.errors.some((error) => error.includes('reasoning budget')),
       ),
     ).toBe(true);
+  });
+
+  it('does not recover a protocol tag that reasoning only quotes', async () => {
+    const store = new ContextStore();
+    store.add('seed line', { id: 'ctx' });
+    const responses: Array<{ readonly text: string; readonly reasoning?: string }> = [
+      { text: '', reasoning: 'The error said "<tool_call> hit the output token limit". I must be shorter.' },
+      { text: '<answer>seed</answer>' },
+    ];
+    const llm = new ScriptedLLM((_req, index) => responses[Math.min(index, responses.length - 1)]!);
+    const events: AgentEvent[] = [];
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [],
+      store,
+      maxFormatRetries: 1,
+      onEvent: (event) => events.push(event),
+    });
+    const res = await agent.run('find seed');
+    expect(res.answer).toBe('seed');
+    expect(
+      events.some(
+        (event) => event.type === 'format_error' && event.errors.some((error) => error.includes('not valid')),
+      ),
+    ).toBe(false);
   });
 
   it('estimates reasoning tokens when the provider omits reasoning_tokens', async () => {
@@ -2595,14 +2638,18 @@ describe('host crash recovery helpers', () => {
     expect(defaultEstimator.count(rendered)).toBeLessThanOrEqual(6_000);
   });
 
-  it('times out a tool that ignores its signal', async () => {
+  it('unblocks a tool that ignores its signal when external abort fires', async () => {
     const store = new ContextStore();
     const events: AgentEvent[] = [];
+    const controller = new AbortController();
     const slowTool = {
       name: 'slow',
       description: 'never returns',
-      parameters: { type: 'object', properties: {} },
-      execute: () => new Promise<string>(() => {}),
+      parameters: { type: 'object' as const, properties: {} },
+      execute: () => {
+        setTimeout(() => controller.abort(new Error('tool cancelled by signal')), 15);
+        return new Promise<string>(() => {});
+      },
     };
     let call = 0;
     const llm = new ScriptedLLM(() => {
@@ -2615,14 +2662,14 @@ describe('host crash recovery helpers', () => {
       llm,
       tools: [slowTool],
       store,
-      maxToolMs: 20,
+      signal: controller.signal,
       onEvent: (event) => events.push(event),
     });
     const res = await agent.run('call slow');
-    expect(res.answer).toBe('done');
+    expect(res.terminated).toBe('error');
     expect(
       events.some(
-        (event) => event.type === 'tool_result' && (event.error ?? '').includes('tool timeout'),
+        (event) => event.type === 'tool_result' && (event.error ?? '').includes('tool cancelled by signal'),
       ),
     ).toBe(true);
   });
@@ -2985,5 +3032,137 @@ Verified counts: key_line = 1, other_line = 2.
       { from: 0, to: 0, summary: 'llm_query located ORION_KEY = "9942" at doc_xml:L2.' },
       { from: 1, to: 1, summary: 'Verified counts: key_line = 1, other_line = 2.' },
     ]);
+  });
+
+  it('maintains 4-zone segment invariants and keeps Zone 3a cached across multi-step follow-up turns', async () => {
+    const store = new ContextStore();
+    store.add('ALPHA = 10\nBETA = 20', { id: 'cfg.toml', title: 'cfg.toml' });
+    const initialManifest = store.manifest();
+    const initialDocIds = new Set(store.listManifest().map((d) => d.id));
+    const initialDocRevs: Record<string, number> = {};
+    for (const d of store.listManifest()) initialDocRevs[d.id] = d.rev;
+
+    const turn1 = new RecursiveAgentFold({
+      rootLLM: new ScriptedLLM((req) => {
+        for (const m of req.messages) {
+          if (m.segments) expect(m.segments.map((s) => s.text).join('')).toBe(m.content);
+        }
+        const totalBreakpoints = req.messages.reduce(
+          (acc, m) => acc + (m.segments ? m.segments.filter((s) => s.cacheBreakpoint).length : 0),
+          0,
+        );
+        expect(totalBreakpoints).toBeLessThanOrEqual(4);
+        const user = req.messages[1]?.content ?? '';
+        if (user.includes('Step 0.')) {
+          return '<motivation>Read cfg</motivation><tool_call name="read"><document>cfg.toml</document></tool_call>';
+        }
+        return '<folding range="0-0">ALPHA=10, BETA=20.</folding><motivation>Done</motivation><answer>30</answer>';
+      }),
+      store,
+      maxDepth: 0,
+    });
+    const r1 = await turn1.run('Sum ALPHA and BETA');
+    expect(r1.answer).toBe('30');
+
+    // Update cfg.toml in-place to verify Zone 3a delta without mutating Zone 1
+    store.add('ALPHA = 10\nBETA = 25\nGAMMA = 5', { id: 'cfg.toml', title: 'cfg.toml' });
+
+    const turn2Calls: ChatMessage[][] = [];
+    const turn2 = new RecursiveAgentFold({
+      rootLLM: new ScriptedLLM((req) => {
+        turn2Calls.push(req.messages.map((m) => ({ ...m })));
+        const user = req.messages[1]?.content ?? '';
+        if (user.includes('Step 1.')) {
+          return '<motivation>Read updated cfg</motivation><tool_call name="read"><document>cfg.toml</document></tool_call>';
+        }
+        return '<folding range="1-1">Updated BETA=25, GAMMA=5.</folding><motivation>Done</motivation><answer>40</answer>';
+      }),
+      store,
+      maxDepth: 0,
+    });
+    turn2.begin('Sum ALPHA and BETA', {
+      initialState: r1.state,
+      followUpQuestion: 'Include GAMMA and updated BETA',
+      initialManifest,
+      initialDocIds,
+      initialDocRevs,
+    });
+    const s1 = await turn2.next();
+    expect(s1.kind).toBe('tool');
+    if (s1.kind === 'tool') {
+      turn2.submit('ALPHA = 10\nBETA = 25\nGAMMA = 5');
+    }
+    const s2 = await turn2.next();
+    expect(s2.kind).toBe('answer');
+
+    const call0Segs = turn2Calls[0]?.[1]?.segments ?? [];
+    const call1Segs = turn2Calls[1]?.[1]?.segments ?? [];
+    // Zone 1, Zone 2, and Zone 3a (Follow-up + Updated Doc) stay 100% byte-identical across Turn 2 steps!
+    expect(call0Segs[0]?.text).toBe(call1Segs[0]?.text);
+    expect(call0Segs[1]?.text).toBe(call1Segs[1]?.text);
+    expect(call0Segs[2]?.text).toBe(call1Segs[2]?.text);
+    expect(call0Segs[2]?.text).toContain('### Follow-up Question');
+    expect(call0Segs[2]?.text).toContain('### Newly Added Documents');
+    expect(call0Segs[2]?.text).toContain('cfg.toml');
+  });
+
+  it('executes concurrency-safe multi-tool batches in parallel waves and spills oversized external outputs to store', async () => {
+    const store = new ContextStore();
+    store.add('seed', { id: 'doc' });
+    const order: string[] = [];
+    const parallelTool = {
+      name: 'fast_read',
+      description: 'concurrent read',
+      parameters: { type: 'object' as const, properties: { id: { type: 'string' } }, required: ['id'] },
+      isConcurrencySafe: () => true,
+      async execute(args: Record<string, unknown>) {
+        const id = String(args.id ?? '');
+        order.push(`start:${id}`);
+        await new Promise((r) => setTimeout(r, 40));
+        order.push(`end:${id}`);
+        return `VAL_${id}`;
+      },
+    };
+    const barrierTool = {
+      name: 'shell_exec',
+      description: 'sequential shell',
+      parameters: { type: 'object' as const, properties: {} },
+      async execute() {
+        order.push('barrier');
+        return Array.from({ length: 400 }, (_, i) => `LOG_LINE_${i} = ${i * 2}`).join('\n');
+      },
+    };
+    let stepIdx = 0;
+    const llm = new ScriptedLLM((req) => {
+      const s = stepIdx++;
+      if (s === 0) {
+        // Also verify leaked DSML invoke normalization + multi-tool wave batching!
+        return (
+          '<motivation>Batch two concurrent reads then run shell</motivation>' +
+          '<｜DSML｜function_calls>' +
+          '<｜DSML｜invoke name="fast_read"><｜DSML｜parameter name="id">A</｜DSML｜parameter></｜DSML｜invoke>' +
+          '<｜DSML｜invoke name="fast_read"><｜DSML｜parameter name="id">B</｜DSML｜parameter></｜DSML｜invoke>' +
+          '<｜DSML｜invoke name="shell_exec"></｜DSML｜invoke>' +
+          '</｜DSML｜function_calls>'
+        );
+      }
+      const user = req.messages[1]?.content ?? '';
+      expect(user).toContain('[Tool 1/3: fast_read]\nVAL_A');
+      expect(user).toContain('[Tool 2/3: fast_read]\nVAL_B');
+      expect(user).toContain('Full untruncated output stored as document "tool_obs_root_s0"');
+      return '<folding range="0-0">Read A, B and shell log.</folding><motivation>Done</motivation><answer>OK</answer>';
+    });
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [parallelTool, barrierTool],
+      store,
+      maxObservationTokens: 80,
+    });
+    const res = await agent.run('Run parallel wave');
+    expect(res.answer).toBe('OK');
+    // Both A and B started before either finished, and barrier ran after both finished!
+    expect(order.slice(0, 2)).toEqual(['start:A', 'start:B']);
+    expect(order[4]).toBe('barrier');
+    expect(store.get('tool_obs_root_s0')?.lines.length).toBeGreaterThan(400);
   });
 });

@@ -1,6 +1,7 @@
 import type { AgentEvent } from '../agent/events.js';
 import type { ContextStore } from '../context/store.js';
 import type { ResearchBoard } from '../context/board.js';
+import type { ToolAction } from '../fold/state.js';
 import type { UsageTracker } from '../llm/usage.js';
 import type { JSONSchema } from '../types.js';
 import { parseLooseJSON } from '../util/json.js';
@@ -24,6 +25,8 @@ export interface Tool {
   readonly name: string;
   readonly description: string;
   readonly parameters: JSONSchema;
+  /** Return true when parallel calls in the same step can run concurrently. */
+  readonly isConcurrencySafe?: (args: Readonly<Record<string, unknown>>) => boolean;
   execute(args: Record<string, unknown>, ctx: ToolContext): Promise<string>;
 }
 
@@ -112,8 +115,9 @@ export function coerceToolArguments(
           // Fall through to delimiter split.
         }
       }
+      const splitRe = key === 'paths' ? /\r?\n+/ : /[\n,]+/;
       out[key] = val
-        .split(/[\n,]+/)
+        .split(splitRe)
         .map((s) => s.trim())
         .filter(Boolean);
     }
@@ -146,6 +150,21 @@ export function formatToolCallXml(name: string, args: Record<string, unknown>): 
   }
   parts.push('</tool_call>');
   return parts.join('');
+}
+
+/** Render one or more tool actions in XML tag format for step history display. */
+export function formatToolCallsXml(actions: readonly ToolAction[]): string {
+  if (actions.length === 0) return '';
+  if (actions.length === 1) {
+    const single = actions[0];
+    return single ? formatToolCallXml(single.name, single.arguments) : '';
+  }
+  const parts = new Array<string>(actions.length);
+  for (let i = 0; i < actions.length; i++) {
+    const act = actions[i];
+    parts[i] = act ? formatToolCallXml(act.name, act.arguments) : '';
+  }
+  return parts.join('\n');
 }
 
 function formatSchemaType(schema: JSONSchema, depth = 0): string {

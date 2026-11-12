@@ -2142,6 +2142,7 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     maxDepth: settings.depth,
     agent: {
       temperature: 0,
+      maxToolCallsPerStep: 1,
       maxObservationTokens: 6400,
       maxInvalidSteps: RAF_MAX_INVALID_STEPS,
       maxInvalidTotal: RAF_MAX_INVALID_TOTAL,

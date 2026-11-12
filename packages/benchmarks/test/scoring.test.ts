@@ -89,6 +89,8 @@ describe('codegraph & longbench generators', () => {
     expect(docs[1]?.id).toBe('doc_2');
     expect(parseChoiceLetter('Answer: B')).toBe('B');
     expect(parseChoiceLetter('After checking all modules, the correct option is (C).')).toBe('C');
+    expect(parseChoiceLetter('Answer: A. On review, the final Answer: D')).toBe('D');
+    expect(parseAnswerList('Answer: one, two\nCorrection. Answer: three, four')).toEqual(['three', 'four']);
   });
 });
 

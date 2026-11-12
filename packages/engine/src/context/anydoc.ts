@@ -26,7 +26,6 @@ const DOCUMENT_EXTENSIONS: Readonly<Record<string, true>> = Object.freeze({
   xlsm: true,
   xlsb: true,
   ods: true,
-  csv: true,
 });
 
 export function documentExtFromPath(path: string): string | null {

@@ -83,11 +83,13 @@ export function quantizeChunkTokens(requested: number, max: number, min = 1024):
 }
 
 function compressIndexRanges(idx: readonly number[]): string {
-  if (!idx.length) return '';
+  const first = idx[0];
+  if (first === undefined) return '';
   const parts: string[] = [];
-  let s = idx[0]!;
+  let s = first;
   let p = s;
-  for (const i of idx.slice(1).concat([Number.NaN])) {
+  for (let k = 1; k <= idx.length; k++) {
+    const i = k < idx.length ? (idx[k] ?? Number.NaN) : Number.NaN;
     if (i === p + 1) {
       p = i;
       continue;
@@ -97,6 +99,31 @@ function compressIndexRanges(idx: readonly number[]): string {
     p = i;
   }
   return parts.join(', ');
+}
+
+function extractQueryFilterSignature(query: string, canonCats: readonly string[]): string {
+  const catSet = new Set(canonCats);
+  const tokens: string[] = [];
+  for (const m of query.matchAll(/\b(?:\d{4,}|\d{1,4}[/-]\d{1,2}(?:[/-]\d{1,4})?)\b/g)) {
+    if (m[0] && !catSet.has(m[0])) tokens.push(`num:${m[0]}`);
+  }
+  for (const m of query.matchAll(/\b(?:user|id|author|speaker|sender|account|entity)\s*[:=#]?\s*([a-z0-9_-]+)\b/gi)) {
+    const id = (m[1] ?? '').toLowerCase();
+    if (id && !catSet.has(id)) tokens.push(`ent:${id}`);
+  }
+  for (const m of query.matchAll(/"([^"\n]{1,80})"|'([^'\n]{1,80})'/g)) {
+    const lit = (m[1] ?? m[2] ?? '').trim().toLowerCase();
+    if (lit && !catSet.has(lit)) tokens.push(`lit:${lit}`);
+  }
+  const clause =
+    /\b(?:where|after|before|since|until|between|except|excluding|without|only\s+(?:for|from|by)|for\s+[a-z0-9_-]+\s*=)\b[\s\S]*/i.exec(
+      query,
+    );
+  if (clause?.[0]) {
+    tokens.push(`clause:${clause[0].trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 120)}`);
+  }
+  if (tokens.length === 0) return '';
+  return [...new Set(tokens)].sort().join(';');
 }
 
 /** Emit a margin diagnostic when adjacent category counts differ by < 5% of total and < 4% of their sum. */
@@ -142,7 +169,7 @@ export class LLMQueryEngine {
     readonly usage: UsageTracker,
     readonly opts: LLMQueryOptions = {},
   ) {
-    this.limit = createLimiter(opts.concurrency ?? 4);
+    this.limit = createLimiter(opts.concurrency ?? 16);
     this.board = opts.board ?? new ResearchBoard();
     this.memo = opts.cache?.memo ?? new Map();
     this.chunkCounts = opts.cache?.chunkCounts ?? new Map();
@@ -228,11 +255,14 @@ export class LLMQueryEngine {
     categories?: readonly string[],
   ): Promise<ChunkFinding> {
     const lineNumbers = this.opts.lineNumbers !== false;
-    const chunkCountKey = `${chunk.key}|${lineNumbers ? 'n' : 'r'}`;
     const canonCats =
       mode === 'extract' && categories && categories.length > 0
         ? [...new Set(categories.map((x) => x.trim().toLowerCase()).filter(Boolean))].sort()
         : undefined;
+    const filterSig = canonCats ? extractQueryFilterSignature(query, canonCats) : '';
+    const chunkCountKey = filterSig
+      ? `${chunk.key}|${lineNumbers ? 'n' : 'r'}|${filterSig}`
+      : `${chunk.key}|${lineNumbers ? 'n' : 'r'}`;
     if (canonCats && canonCats.length > 0) {
       const cachedCounts = this.chunkCounts.get(chunkCountKey);
       if (cachedCounts) {
@@ -265,29 +295,40 @@ export class LLMQueryEngine {
     const execPromise = (async () => {
       const doc = this.store.get(chunk.docId);
       const baseQueryContent = renderQueryMessage(query, mode, categories);
+      const chunkContent = renderChunkMessage({
+        docId: chunk.docId,
+        title: doc.title,
+        index: chunk.index,
+        total: chunk.total,
+        startLine: chunk.startLine,
+        endLine: chunk.endLine,
+        body: this.store.renderChunk(chunk, lineNumbers),
+      });
+      const systemMsg = {
+        role: 'system' as const,
+        content: LLM_QUERY_SYSTEM,
+        cacheBreakpoint: true,
+        segments: Object.freeze([Object.freeze({ text: LLM_QUERY_SYSTEM, cacheBreakpoint: true })]),
+      };
       const chunkMsg = {
         role: 'user' as const,
-        content: renderChunkMessage({
-          docId: chunk.docId,
-          title: doc.title,
-          index: chunk.index,
-          total: chunk.total,
-          startLine: chunk.startLine,
-          endLine: chunk.endLine,
-          body: this.store.renderChunk(chunk, lineNumbers),
-        }),
+        content: chunkContent,
         cacheBreakpoint: true,
+        segments: Object.freeze([Object.freeze({ text: chunkContent, cacheBreakpoint: true })]),
       };
       let lastErr = '';
       for (let attempt = 0; attempt < 2; attempt++) {
         const queryContent =
           attempt > 0 && lastErr === 'reader response truncated or empty'
-            ? `${baseQueryContent}\nCRITICAL: Your previous response ran out of tokens during thinking. Keep internal thinking under 50 words—do NOT list lines—and output the final JSON object immediately!`
+            ? `${baseQueryContent}\nCRITICAL: Your previous response ran out of tokens during thinking. Keep internal thinking under 50 words and output ONLY the XML tags (<relevant>, <counts>, <answer>, <evidence>) immediately.`
             : baseQueryContent;
         const messages = [
-          { role: 'system' as const, content: LLM_QUERY_SYSTEM },
+          systemMsg,
           chunkMsg,
-          { role: 'user' as const, content: queryContent },
+          {
+            role: 'user' as const,
+            content: queryContent,
+          },
         ];
         try {
           const res = await this.llm.complete({
@@ -296,12 +337,19 @@ export class LLMQueryEngine {
             temperature: this.opts.temperature ?? 0,
             signal,
             purpose: 'llm_query',
+            priority: 2,
+            cacheKey: chunk.key,
           });
           usage.record('llm_query', res.usage, res.latencyMs);
-          if (res.text.trim() === '' || (res.finishReason === 'length' && tryParseLooseJSON(res.text) === undefined)) {
+          const trimmedRes = res.text.trim();
+          const hasValidXml =
+            parseXmlChunkFinding(trimmedRes) !== undefined &&
+            (res.finishReason !== 'length' || /<\s*\/\s*(?:answer|counts|evidence|relevant)\s*>/i.test(trimmedRes));
+          const hasValidJson = tryParseLooseJSON(trimmedRes) !== undefined;
+          if (trimmedRes === '' || (res.finishReason === 'length' && !hasValidXml && !hasValidJson)) {
             throw new Error('reader response truncated or empty');
           }
-          const parsed = normalizeFinding(res.text);
+          const parsed = normalizeFinding(trimmedRes);
           if (parsed.counts) {
             const existing = this.chunkCounts.get(chunkCountKey) ?? {};
             this.chunkCounts.set(chunkCountKey, { ...existing, ...parsed.counts });
@@ -367,6 +415,10 @@ export class LLMQueryEngine {
       }
     } else {
       if (relevant.length) {
+        const compactIndex = relevant
+          .map((f) => `#${f.chunk.index + 1}[${f.chunk.docId}:L${f.chunk.startLine}-${f.chunk.endLine}, ev=${f.evidence.length}]`)
+          .join(', ');
+        lines.push(`Relevant chunk index (${relevant.length}): ${compactIndex}`);
         lines.push('Relevant chunks:');
         for (const f of relevant) lines.push(fmt(f));
       } else lines.push('No chunks reported relevant content.');
@@ -377,6 +429,9 @@ export class LLMQueryEngine {
     return truncateToTokens(lines.join('\n'), this.opts.maxReportTokens ?? 6000).text;
   }
 }
+
+const NEGATIVE_FINDING_RE =
+  /^(?:no\b|none\b|nothing\b|not\s+relevant\b|irrelevant\b|n\/a\b|0\s+matches\b|does\s+not\s+(?:contain|mention)\b|there\s+(?:is|are)\s+no\b)/i;
 
 function parseXmlChunkFinding(text: string): Omit<ChunkFinding, 'chunk' | 'memoHit'> | undefined {
   const relMatch = /<\s*relevant(?:\s[^>]*)?>([\s\S]*?)<\s*\/\s*relevant\s*>/i.exec(text);
@@ -437,7 +492,7 @@ function parseXmlChunkFinding(text: string): Omit<ChunkFinding, 'chunk' | 'memoH
       ? true
       : relStr === 'false' || relStr === 'no' || relStr === '0'
         ? counts !== undefined
-        : counts !== undefined || evidence.length > 0 || (answer !== '' && !/^(no|none|not relevant|irrelevant|n\/a)\b/i.test(answer));
+        : counts !== undefined || evidence.length > 0 || (answer !== '' && !NEGATIVE_FINDING_RE.test(answer));
 
   return { relevant, answer, evidence, counts };
 }
@@ -449,7 +504,7 @@ function normalizeFinding(text: string): Omit<ChunkFinding, 'chunk' | 'memoHit'>
   const obj = tryParseLooseJSON<Record<string, unknown>>(text);
   if (!obj || typeof obj !== 'object') {
     const t = text.trim();
-    const negative = /^(no|none|not relevant|irrelevant|n\/a)\b/i.test(t) || t === '';
+    const negative = NEGATIVE_FINDING_RE.test(t) || t === '';
     return { relevant: !negative, answer: t.slice(0, 2000), evidence: [] };
   }
   let counts: Record<string, number> | undefined;
@@ -484,14 +539,14 @@ function normalizeFinding(text: string): Omit<ChunkFinding, 'chunk' | 'memoHit'>
 }
 
 function sumCounts(findings: readonly ChunkFinding[]): Record<string, number> | undefined {
-  let any = false;
+  let hasCounts = false;
   const totals: Record<string, number> = {};
   for (const f of findings) {
     if (!f.counts) continue;
-    any = true;
+    hasCounts = true;
     for (const [k, v] of Object.entries(f.counts)) totals[k] = (totals[k] ?? 0) + v;
   }
-  return any ? totals : undefined;
+  return hasCounts ? totals : undefined;
 }
 
 export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
@@ -516,6 +571,7 @@ export function createLLMQueryTool(engine: LLMQueryEngine): Tool {
       },
       required: ['query'],
     },
+    isConcurrencySafe: () => true,
     async execute(args, ctx) {
       const query = argString(args, 'query') ?? '';
       const modeRaw = argString(args, 'mode', false) ?? 'locate';

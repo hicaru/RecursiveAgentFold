@@ -1,0 +1,87 @@
+{
+  "bench": "oolong",
+  "method": "raf",
+  "n": 50,
+  "meanScore": 2.7902900880336282e-42,
+  "correct": 0,
+  "meanOfficial": 2.7902900880336282e-42,
+  "meanLenient": 2.7902900880336282e-42,
+  "errors": 0,
+  "filtered": 0,
+  "meanScoreAnswered": 2.7902900880336282e-42,
+  "meanSteps": 3,
+  "meanWallSec": 0.006860000000000001,
+  "formatIssues": 0,
+  "folds": {
+    "granular": 100,
+    "deep": 0,
+    "corrected": 50
+  },
+  "llmQueryCalls": 50,
+  "tokens": {
+    "prompt": 852565,
+    "cached": 603520,
+    "completion": 8900,
+    "rootCacheHitRate": 0.9093900593949077,
+    "branchCacheHitRate": 0,
+    "cacheHitRate": 0.7078873751561464
+  },
+  "byRole": {
+    "root": {
+      "calls": 150,
+      "promptTokens": 649719,
+      "completionTokens": 8050,
+      "cachedTokens": 590848,
+      "reasoningTokens": 0,
+      "latencyMs": 0,
+      "errors": 0,
+      "cacheHitRate": 0.9093900593949077
+    },
+    "llm_query": {
+      "calls": 34,
+      "promptTokens": 202846,
+      "completionTokens": 850,
+      "cachedTokens": 12672,
+      "reasoningTokens": 0,
+      "latencyMs": 0,
+      "errors": 0,
+      "cacheHitRate": 0.06247103714147679
+    }
+  },
+  "byTask": {
+    "TASK_TYPE.MOST_FREQ": {
+      "n": 5,
+      "score": 0
+    },
+    "TASK_TYPE.LEAST_FREQ": {
+      "n": 4,
+      "score": 0
+    },
+    "TASK_TYPE.RELATIVE_FREQ": {
+      "n": 29,
+      "score": 0
+    },
+    "TASK_TYPE.NUMERIC_ONE_CLASS": {
+      "n": 12,
+      "score": 1.1626208700140119e-41
+    }
+  },
+  "byAnswerType": {
+    "ANSWER_TYPE.LABEL": {
+      "n": 7,
+      "score": 0
+    },
+    "ANSWER_TYPE.COMPARISON": {
+      "n": 29,
+      "score": 0
+    },
+    "ANSWER_TYPE.NUMERIC": {
+      "n": 12,
+      "score": 1.1626208700140119e-41
+    },
+    "ANSWER_TYPE.USER": {
+      "n": 2,
+      "score": 0
+    }
+  }
+}

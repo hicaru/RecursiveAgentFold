@@ -34,6 +34,8 @@ export interface ParsedResponse {
   folding?: FoldDirective;
   motivation?: string;
   toolCall?: ToolAction;
+  /** All tool calls parsed from this step in source order (supports parallel multi-tool batches). */
+  toolCalls?: ToolAction[];
   answer?: string;
   /** Hard errors: the response cannot be executed. */
   errors: string[];
@@ -155,6 +157,61 @@ interface ExtractedTag {
   readonly tag: string;
   readonly attrs: string;
   readonly content: string;
+  readonly start: number;
+  readonly end: number;
+}
+
+const DSML_MARKER_RE = /<\/?[|｜\uff5c]+DSML[|｜\uff5c]+/i;
+
+const ATTR_STYLE_PARAM_OPEN_RE = /<\s*(?:param_name|param|parameter|arg)\s*=\s*["']([^"'<>]+)["']\s*>/gi;
+const ATTR_STYLE_PARAM_CLOSE_RE = /<\s*\/\s*(?:param_name|param|arg)\s*>/gi;
+
+/** Convert leaked DeepSeek DSML tokens and `<param_name="key">` argument tags into standard XML tags. */
+export function normalizeModelProtocolTokens(raw: string): string {
+  let text = raw;
+  if (ATTR_STYLE_PARAM_OPEN_RE.test(text)) {
+    ATTR_STYLE_PARAM_OPEN_RE.lastIndex = 0;
+    text = text
+      .replace(ATTR_STYLE_PARAM_OPEN_RE, '<parameter name="$1">')
+      .replace(ATTR_STYLE_PARAM_CLOSE_RE, '</parameter>');
+  }
+  ATTR_STYLE_PARAM_OPEN_RE.lastIndex = 0;
+  if (!DSML_MARKER_RE.test(text)) return text;
+  return text
+    .replace(/<[|｜\uff5c]+DSML[|｜\uff5c]+invoke\b([^>]*)>/gi, '<tool_call$1>')
+    .replace(/<\/[|｜\uff5c]+DSML[|｜\uff5c]+invoke\s*>/gi, '</tool_call>')
+    .replace(/<[|｜\uff5c]+DSML[|｜\uff5c]+parameter\b([^>]*)>/gi, '<parameter$1>')
+    .replace(/<\/[|｜\uff5c]+DSML[|｜\uff5c]+parameter\s*>/gi, '</parameter>')
+    .replace(/<\/?[|｜\uff5c]+DSML[|｜\uff5c]+[^>]*>/gi, '');
+}
+
+function escapeTag(tag: string): string {
+  return tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function findMatchingCloseTag(
+  text: string,
+  tagName: string,
+  searchFrom: number,
+): { readonly index: number; readonly end: number } | undefined {
+  const esc = escapeTag(tagName);
+  const tokenRe = new RegExp(`<\\s*(\\/?)\\s*${esc}(?:\\s[^>]*?)?(\\/?)\\s*>`, 'gi');
+  tokenRe.lastIndex = searchFrom;
+  let depth = 1;
+  let m: RegExpExecArray | null;
+  while ((m = tokenRe.exec(text)) !== null) {
+    const isClose = m[1] === '/';
+    const isSelfClose = m[2] === '/';
+    if (isClose) {
+      depth -= 1;
+      if (depth === 0) {
+        return { index: m.index, end: m.index + m[0].length };
+      }
+    } else if (!isSelfClose) {
+      depth += 1;
+    }
+  }
+  return undefined;
 }
 
 function tagRegex(tag: string): RegExp {
@@ -171,37 +228,126 @@ function openTagIndex(text: string, tag: string): number {
   return m ? m.index + m[0].length : -1;
 }
 
-function extractTagWithAttrs(text: string, tag: string): ExtractedTag | undefined {
-  const m = tagRegex(tag).exec(text);
+function extractTagWithAttrs(text: string, tag: string, maskedText?: string): ExtractedTag | undefined {
+  const scan = maskedText ?? text;
+  const m = tagRegex(tag).exec(scan);
   if (m && m[2] !== undefined) {
-    return { tag, attrs: (m[1] ?? '').trim(), content: m[2].trim() };
+    const openMatch = new RegExp(`^<\\s*${tag}(\\s[^>]*)?>`, 'i').exec(text.slice(m.index));
+    const innerStart = m.index + (openMatch ? openMatch[0].length : 0);
+    const closeMatch = new RegExp(`<\\s*\\/\\s*${tag}\\s*>$`, 'i').exec(scan.slice(m.index, m.index + m[0].length));
+    const innerEnd = m.index + m[0].length - (closeMatch ? closeMatch[0].length : 0);
+    return {
+      tag,
+      attrs: (openMatch?.[1] ?? m[1] ?? '').trim(),
+      content: text.slice(innerStart, innerEnd).trim(),
+      start: m.index,
+      end: m.index + m[0].length,
+    };
   }
-  const selfClosing = new RegExp(`<\\s*${tag}(\\s[^>]*?)?\\/\\s*>`, 'i').exec(text);
+  const selfClosing = new RegExp(`<\\s*${tag}(\\s[^>]*?)?\\/\\s*>`, 'i').exec(scan);
   if (selfClosing) {
-    return { tag, attrs: (selfClosing[1] ?? '').trim(), content: '' };
+    const rawSelf = new RegExp(`^<\\s*${tag}(\\s[^>]*?)?\\/\\s*>`, 'i').exec(text.slice(selfClosing.index));
+    return {
+      tag,
+      attrs: (rawSelf?.[1] ?? selfClosing[1] ?? '').trim(),
+      content: '',
+      start: selfClosing.index,
+      end: selfClosing.index + selfClosing[0].length,
+    };
   }
   const openRe = new RegExp(`<\\s*${tag}(\\s[^>]*)?>`, 'i');
-  const openMatch = openRe.exec(text);
+  const openMatch = openRe.exec(scan);
   if (!openMatch) return undefined;
+  const rawOpen = openRe.exec(text.slice(openMatch.index));
   const start = openMatch.index + openMatch[0].length;
-  let end = text.length;
+  let end = scan.length;
   for (const other of TAGS) {
     if (other === tag) continue;
     const re = new RegExp(`<\\s*${other}(?:\\s[^>]*)?>`, 'ig');
     re.lastIndex = start;
-    const n = re.exec(text);
+    const n = re.exec(scan);
     if (n && n.index >= start && n.index < end) end = n.index;
   }
-  return { tag, attrs: (openMatch[1] ?? '').trim(), content: text.slice(start, end).trim() };
+  return {
+    tag,
+    attrs: (rawOpen?.[1] ?? openMatch[1] ?? '').trim(),
+    content: text.slice(start, end).trim(),
+    start: openMatch.index,
+    end,
+  };
 }
 
-function extractGroupTagWithAttrs(text: string, tags: readonly string[]): ExtractedTag | undefined {
-  const m = groupTagRegex(tags).exec(text);
+function extractAllTagsWithAttrs(text: string, tag: string, maskedText?: string): ExtractedTag[] {
+  const scan = maskedText ?? text;
+  const out: ExtractedTag[] = [];
+  let pos = 0;
+  const openRe = new RegExp(`<\\s*${escapeTag(tag)}(\\s[^>]*?)?(\\/?)\\s*>`, 'gi');
+  while (pos < scan.length) {
+    openRe.lastIndex = pos;
+    const openMatch = openRe.exec(scan);
+    if (!openMatch) break;
+    const tagStart = openMatch.index;
+    const contentStart = tagStart + openMatch[0].length;
+    const rawOpen = new RegExp(`^<\\s*${escapeTag(tag)}(\\s[^>]*?)?(\\/?)\\s*>`, 'i').exec(text.slice(tagStart));
+    const attrs = (rawOpen?.[1] ?? openMatch[1] ?? '').trim();
+    const selfClose = (rawOpen?.[2] ?? openMatch[2]) === '/';
+    if (selfClose) {
+      out.push({ tag, attrs, content: '', start: tagStart, end: contentStart });
+      pos = contentStart;
+      continue;
+    }
+    const close = findMatchingCloseTag(scan, tag, contentStart);
+    if (close) {
+      out.push({
+        tag,
+        attrs,
+        content: text.slice(contentStart, close.index).trim(),
+        start: tagStart,
+        end: close.end,
+      });
+      pos = close.end;
+      continue;
+    }
+    let fallbackEnd = scan.length;
+    for (const other of TAGS) {
+      const re = new RegExp(`<\\s*${other}(?:\\s[^>]*)?>`, 'ig');
+      re.lastIndex = contentStart;
+      const n = re.exec(scan);
+      if (n && n.index >= contentStart && n.index < fallbackEnd) fallbackEnd = n.index;
+    }
+    out.push({
+      tag,
+      attrs,
+      content: text.slice(contentStart, fallbackEnd).trim(),
+      start: tagStart,
+      end: fallbackEnd,
+    });
+    pos = fallbackEnd;
+  }
+  return out;
+}
+
+function extractGroupTagWithAttrs(text: string, tags: readonly string[], maskedText?: string): ExtractedTag | undefined {
+  const scan = maskedText ?? text;
+  const m = groupTagRegex(tags).exec(scan);
   if (m && m[1] !== undefined && m[3] !== undefined) {
-    return { tag: m[1].toLowerCase(), attrs: (m[2] ?? '').trim(), content: m[3].trim() };
+    const matchedTag = m[1].toLowerCase();
+    const rawOpen = new RegExp(`^<\\s*(?:${tags.join('|')})(\\s[^>]*)?>`, 'i').exec(text.slice(m.index));
+    const innerStart = m.index + (rawOpen ? rawOpen[0].length : 0);
+    const closeMatch = new RegExp(`<\\s*\\/\\s*(?:${tags.join('|')})\\s*>$`, 'i').exec(
+      scan.slice(m.index, m.index + m[0].length),
+    );
+    const innerEnd = m.index + m[0].length - (closeMatch ? closeMatch[0].length : 0);
+    return {
+      tag: matchedTag,
+      attrs: (rawOpen?.[1] ?? m[2] ?? '').trim(),
+      content: text.slice(innerStart, innerEnd).trim(),
+      start: m.index,
+      end: m.index + m[0].length,
+    };
   }
   for (const t of tags) {
-    const ext = extractTagWithAttrs(text, t);
+    const ext = extractTagWithAttrs(text, t, scan);
     if (ext !== undefined) return ext;
   }
   return undefined;
@@ -428,8 +574,9 @@ function parseXmlParamValue(key: string, rawVal: string): unknown {
         // Fall through to delimiter split
       }
     }
+    const delimRe = key === 'paths' ? /\r?\n+/ : /[\n,]+/;
     return decodeXmlText(trimmed)
-      .split(/[\n,]+/)
+      .split(delimRe)
       .map((s) => s.trim().replace(/^["']|["']$/g, ''))
       .filter(Boolean);
   }
@@ -469,13 +616,11 @@ function parseNestedXmlChildren(xml: string): unknown {
     const tag = openMatch?.[1];
     if (!openMatch || tag === undefined) return undefined;
     const start = openMatch.index + openMatch[0].length;
-    const closeRe = new RegExp(`<\\s*\\/\\s*${tag}\\s*>`, 'gi');
-    closeRe.lastIndex = start;
-    const closeMatch = closeRe.exec(xml);
+    const closeMatch = findMatchingCloseTag(xml, tag, start);
     if (!closeMatch) return undefined;
     const inner = xml.slice(start, closeMatch.index);
     entries.push({ tag, value: parseXmlParamValue(tag, inner) });
-    pos = closeMatch.index + closeMatch[0].length;
+    pos = closeMatch.end;
   }
   if (entries.length === 0) return undefined;
   const firstTag = entries[0]?.tag;
@@ -638,15 +783,27 @@ function tryParseStructuredToolCall(
     if (isSelfClosing) {
       pos = contentStart;
     } else {
-      const closeRe = new RegExp(`<\\s*\\/\\s*${rawTagName}\\s*>`, 'gi');
-      closeRe.lastIndex = contentStart;
-      const closeMatch = closeRe.exec(body);
+      const closeMatch = findMatchingCloseTag(body, rawTagName, contentStart);
       if (closeMatch) {
         inner = body.slice(contentStart, closeMatch.index);
-        pos = closeMatch.index + closeMatch[0].length;
+        pos = closeMatch.end;
       } else {
-        inner = body.slice(contentStart);
-        pos = body.length;
+        const attrKeyForScalar = tagAttrs.name ?? tagAttrs.key ?? rawTagName;
+        if (!MULTILINE_PRESERVE_KEYS[attrKeyForScalar]) {
+          const strayClose = /<\s*\/\s*[a-zA-Z_][a-zA-Z0-9_-]*\s*>/g;
+          strayClose.lastIndex = contentStart;
+          const nextClose = strayClose.exec(body);
+          if (nextClose) {
+            inner = body.slice(contentStart, nextClose.index);
+            pos = nextClose.index + nextClose[0].length;
+          } else {
+            inner = body.slice(contentStart);
+            pos = body.length;
+          }
+        } else {
+          inner = body.slice(contentStart);
+          pos = body.length;
+        }
       }
     }
 
@@ -851,22 +1008,44 @@ function parseToolCall(
   };
 }
 
-function extractAnswerFromBody(actionBody: string): string | undefined {
-  const masked = maskMarkdownCode(actionBody);
-  const openMatch = /<\s*answer(?:\s[^>]*)?>/i.exec(masked);
+interface ExtractedAnswer {
+  readonly content: string;
+  readonly start: number;
+  readonly end: number;
+}
+
+const NESTED_ANSWER_RE = /^<\s*answer(?:\s[^>]*)?>([\s\S]*?)<\s*\/\s*answer\s*>$/i;
+
+function unwrapNestedAnswer(content: string): string {
+  let current = content;
+  for (let m = NESTED_ANSWER_RE.exec(current); m !== null; m = NESTED_ANSWER_RE.exec(current)) {
+    current = (m[1] ?? '').trim();
+  }
+  return current;
+}
+
+function extractAnswerSpan(actionBody: string, maskedBody: string): ExtractedAnswer | undefined {
+  const openMatch = /<\s*answer(?:\s[^>]*)?>/i.exec(maskedBody);
   if (!openMatch) return undefined;
   const start = openMatch.index + openMatch[0].length;
   const closeRe = /<\s*\/\s*answer\s*>/gi;
   closeRe.lastIndex = start;
   let lastClose: RegExpExecArray | null = null;
   let m: RegExpExecArray | null;
-  while ((m = closeRe.exec(masked)) !== null) {
+  while ((m = closeRe.exec(maskedBody)) !== null) {
     lastClose = m;
   }
   if (lastClose !== null) {
-    return actionBody.slice(start, lastClose.index).trim();
+    return {
+      content: unwrapNestedAnswer(actionBody.slice(start, lastClose.index).trim()),
+      start: openMatch.index,
+      end: lastClose.index + lastClose[0].length,
+    };
   }
-  return extractTagWithAttrs(actionBody, 'answer')?.content;
+  const fallback = extractTagWithAttrs(actionBody, 'answer', maskedBody);
+  return fallback
+    ? { content: fallback.content, start: fallback.start, end: fallback.end }
+    : undefined;
 }
 
 export interface ParseOptions {
@@ -876,9 +1055,13 @@ export interface ParseOptions {
   reasoning?: string;
 }
 
-export function parseAgentResponse(text: string, opts: ParseOptions): ParsedResponse {
+export function parseAgentResponse(rawText: string, opts: ParseOptions): ParsedResponse {
   const errors: string[] = [];
   const warnings: string[] = [];
+  const text = normalizeModelProtocolTokens(rawText);
+  if (text !== rawText) {
+    warnings.push('normalized DSML protocol tokens');
+  }
   // Drop reasoning before looking for protocol tags; models sometimes mention
   // "<tool_call>" inside their thoughts.
   const firstFoldOpen = openTagIndex(text, 'folding');
@@ -889,7 +1072,8 @@ export function parseAgentResponse(text: string, opts: ParseOptions): ParsedResp
   const body = thinkRaw !== undefined ? text.replace(tagRegex('think'), '') : text;
   const out: ParsedResponse = { errors, warnings, think: thinkRaw ?? opts.reasoning };
 
-  const foldExt = extractGroupTagWithAttrs(body, FOLD_TAGS);
+  const maskedFullBody = maskMarkdownCode(body);
+  const foldExt = extractGroupTagWithAttrs(body, FOLD_TAGS, maskedFullBody);
   let bareFold: string | undefined;
   if (foldExt && foldExt.tag !== 'folding') {
     warnings.push('used <folded_output>/<fold> alias for <folding>');
@@ -906,7 +1090,7 @@ export function parseAgentResponse(text: string, opts: ParseOptions): ParsedResp
       warnings.push('unexpected <folding> when expectFolding=false');
     }
   } else if (opts.expectFolding) {
-    const motIdx = openTagIndex(body, 'motivation');
+    const motIdx = openTagIndex(maskedFullBody, 'motivation');
     const prefix = motIdx >= 0 ? body.slice(0, motIdx).trim() : body.trim();
     const candidate = prefix.startsWith('{') && /"range"\s*:/.test(prefix) ? extractBalanced(prefix) : undefined;
     if (candidate) {
@@ -918,36 +1102,76 @@ export function parseAgentResponse(text: string, opts: ParseOptions): ParsedResp
     }
   }
 
-  // Strip <folding> block before extracting <motivation>, <tool_call>, or <answer> so
+  // Strip <folding> span before extracting <motivation>, <tool_call>, or <answer> so
   // literal protocol tags quoted inside a folding summary are never misparsed as actions.
-  const afterFoldBody = (bareFold ? body.replace(bareFold, '') : body).replace(groupTagRegex(FOLD_TAGS), '');
+  const afterFoldBody =
+    foldExt !== undefined
+      ? `${body.slice(0, foldExt.start)}${body.slice(foldExt.end)}`
+      : bareFold
+        ? body.replace(bareFold, '')
+        : body;
 
-  const motExt = extractGroupTagWithAttrs(afterFoldBody, MOTIVATION_TAGS);
+  const maskedAfterFold = maskMarkdownCode(afterFoldBody);
+  const motExt = extractGroupTagWithAttrs(afterFoldBody, MOTIVATION_TAGS, maskedAfterFold);
   if (motExt?.content) out.motivation = motExt.content;
 
-  const actionBody = afterFoldBody.replace(groupTagRegex(MOTIVATION_TAGS), '');
-  const answer = extractAnswerFromBody(actionBody);
-  const toolExt =
-    answer !== undefined
-      ? extractTagWithAttrs(maskMarkdownCode(actionBody), 'tool_call')
-      : extractTagWithAttrs(actionBody, 'tool_call');
-  if (answer !== undefined) {
-    out.answer = answer;
-    if (toolExt !== undefined) warnings.push('both <answer> and <tool_call> present; using <answer>');
-  } else if (toolExt !== undefined) {
-    out.toolCall = parseToolCall(toolExt.content, toolExt.attrs, errors, undefined, afterFoldBody);
-  } else {
-    let aliasMatch: ExtractedTag | undefined;
-    for (const toolName of TOOL_TAG_ALIASES) {
-      const ext = extractTagWithAttrs(actionBody, toolName);
-      if (ext !== undefined) {
-        aliasMatch = ext;
-        break;
+  const actionBody =
+    motExt !== undefined
+      ? `${afterFoldBody.slice(0, motExt.start)}${afterFoldBody.slice(motExt.end)}`
+      : afterFoldBody;
+  const maskedActionBody = maskMarkdownCode(actionBody);
+  const answerSpan = extractAnswerSpan(actionBody, maskedActionBody);
+  const allToolTags = extractAllTagsWithAttrs(actionBody, 'tool_call', maskedActionBody);
+  const outsideToolTags =
+    answerSpan !== undefined
+      ? allToolTags.filter((t) => t.end <= answerSpan.start || t.start >= answerSpan.end)
+      : allToolTags;
+
+  if (outsideToolTags.length > 0) {
+    if (answerSpan !== undefined) {
+      warnings.push('both <tool_call> and <answer> present; executing <tool_call>');
+    }
+    const parsedCalls: ToolAction[] = [];
+    for (let i = 0; i < outsideToolTags.length; i++) {
+      const ext = outsideToolTags[i];
+      if (!ext) continue;
+      const callErrors: string[] = [];
+      const parsed = parseToolCall(ext.content, ext.attrs, callErrors, undefined, afterFoldBody);
+      if (parsed) {
+        parsedCalls.push(parsed);
+      } else if (parsedCalls.length === 0) {
+        errors.push(...callErrors);
+      } else {
+        warnings.push(...callErrors);
       }
     }
-    if (aliasMatch) {
-      out.toolCall = parseToolCall(aliasMatch.content, aliasMatch.attrs, errors, aliasMatch.tag, afterFoldBody);
-      warnings.push(`used <${aliasMatch.tag}> tag instead of <tool_call>`);
+    if (parsedCalls.length > 0) {
+      out.toolCalls = parsedCalls;
+      out.toolCall = parsedCalls[0];
+      errors.length = 0;
+    }
+  } else if (answerSpan !== undefined) {
+    out.answer = answerSpan.content;
+  } else {
+    const aliasActions: ToolAction[] = [];
+    for (const toolName of TOOL_TAG_ALIASES) {
+      const exts = extractAllTagsWithAttrs(actionBody, toolName, maskedActionBody);
+      if (exts.length > 0) {
+        for (let i = 0; i < exts.length; i++) {
+          const ext = exts[i];
+          if (!ext) continue;
+          const parsed = parseToolCall(ext.content, ext.attrs, errors, ext.tag, afterFoldBody);
+          if (parsed) aliasActions.push(parsed);
+        }
+        if (aliasActions.length > 0) {
+          warnings.push(`used <${toolName}> tag instead of <tool_call>`);
+          break;
+        }
+      }
+    }
+    if (aliasActions.length > 0) {
+      out.toolCalls = aliasActions;
+      out.toolCall = aliasActions[0];
     } else {
       // Last resort: bare JSON tool call without tags (excluding folding/motivation tags).
       const restBody = actionBody;
@@ -957,6 +1181,7 @@ export function parseAgentResponse(text: string, opts: ParseOptions): ParsedResp
         const parsedTool = parseToolCall(bare, undefined, tempErrors, undefined, restBody);
         if (parsedTool) {
           out.toolCall = parsedTool;
+          out.toolCalls = [parsedTool];
           warnings.push('tool call missing <tool_call> tag');
           if (!out.motivation) {
             const idx = restBody.indexOf('{');

@@ -34,14 +34,15 @@ export interface GoldAnswer {
 export function parseGold(answer: string): GoldAnswer {
   const dm = /datetime\.date\((\d+),\s*(\d+),\s*(\d+)\)/.exec(answer);
   if (dm) {
-    const d = new Date(Date.UTC(Number(dm[1]), Number(dm[2]) - 1, Number(dm[3])));
+    const [, year = '', month = '', day = ''] = dm;
+    const d = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
     // str(datetime) in Python → "YYYY-MM-DD 00:00:00"
-    return { value: `${dm[1]}-${dm[2]!.padStart(2, '0')}-${dm[3]!.padStart(2, '0')} 00:00:00`, date: d };
+    return { value: `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')} 00:00:00`, date: d };
   }
   const inner = answer.trim().replace(/^\[/, '').replace(/\]$/, '').trim();
   // first element of the list
   const m = /^(['"])((?:\\.|(?!\1).)*)\1/.exec(inner);
-  if (m) return { value: m[2]!.replace(/\\(['"\\])/g, '$1') };
+  if (m) return { value: (m[2] ?? '').replace(/\\(['"\\])/g, '$1') };
   const first = inner.split(',')[0]?.trim() ?? inner;
   return { value: first };
 }

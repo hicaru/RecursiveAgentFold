@@ -37,6 +37,8 @@ export interface IngestedFile {
   readonly tokens: number;
   readonly isDocument: boolean;
   readonly converted: boolean;
+  readonly mtimeMs?: number;
+  readonly byteSize?: number;
 }
 
 export interface IngestOptions {
@@ -143,6 +145,8 @@ async function documentToIngestedFile(
           tokens: defaultEstimator.count(cached),
           isDocument: true,
           converted: false,
+          mtimeMs: stamp.mtimeMs,
+          byteSize: stamp.size,
         }),
       };
     }
@@ -158,6 +162,8 @@ async function documentToIngestedFile(
         tokens: defaultEstimator.count(markdown),
         isDocument: true,
         converted: true,
+        mtimeMs: stamp.mtimeMs,
+        byteSize: stamp.size,
       }),
     };
   } catch (err: unknown) {
@@ -194,6 +200,8 @@ async function textToIngestedFile(
         tokens: defaultEstimator.count(content),
         isDocument: false,
         converted: false,
+        mtimeMs: s.mtimeMs,
+        byteSize: s.size,
       }),
     };
   } catch {
@@ -461,5 +469,34 @@ export function extractPromptPaths(text: string, cwd: string = process.cwd()): r
       // Ignore inaccessible candidate paths.
     }
   }
+  return Object.freeze(out);
+}
+
+/** Resolve multiple source paths in parallel while preserving deterministic input order. */
+export async function resolveIngestSources(
+  sources: readonly string[],
+  opts: IngestOptions = {},
+): Promise<
+  ReadonlyArray<
+    | { readonly source: string; readonly ok: true; readonly value: IngestResult }
+    | { readonly source: string; readonly ok: false; readonly error: string }
+  >
+> {
+  if (sources.length === 0) return Object.freeze([]);
+  const limit = createLimiter(INGEST_CONCURRENCY);
+  const out = new Array<
+    | { readonly source: string; readonly ok: true; readonly value: IngestResult }
+    | { readonly source: string; readonly ok: false; readonly error: string }
+  >(sources.length);
+  await Promise.all(
+    sources.map((src, idx) =>
+      limit(async () => {
+        const res = await resolveIngestSource(src, opts);
+        out[idx] = res.ok
+          ? Object.freeze({ source: src, ok: true, value: res.value })
+          : Object.freeze({ source: src, ok: false, error: res.error });
+      }),
+    ),
+  );
   return Object.freeze(out);
 }

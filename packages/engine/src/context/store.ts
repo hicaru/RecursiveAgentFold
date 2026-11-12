@@ -1,48 +1,68 @@
 import { CharRatioEstimator, defaultEstimator, type TokenEstimator } from '../tokens.js';
 import { Bm25DocumentIndex, type SearchOptions, type SearchWindowHit } from './bm25.js';
-import { resolveIngestSource, sanitizeDocId, type IngestOptions, type IngestResult } from './ingest.js';
+import {
+  resolveIngestSource,
+  resolveIngestSources,
+  sanitizeDocId,
+  type IngestOptions,
+  type IngestResult,
+} from './ingest.js';
 
 export const VALID_DOC_ID_RE = /^[A-Za-z0-9_.\-]+(?:\/[A-Za-z0-9_.\-]+)*$/;
 const MAX_MANIFEST_DOCS = 200;
 export interface StoredDocument {
-  id: string;
-  title: string;
-  /** Lines after hard-wrapping of overlong lines (1-based addressing externally). */
-  lines: string[];
-  chars: number;
-  tokens: number;
-  estimator: TokenEstimator;
+  readonly id: string;
+  readonly title: string;
+  /** Document lines (1-based addressing externally). */
+  readonly lines: readonly string[];
+  readonly chars: number;
+  readonly tokens: number;
+  readonly estimator: TokenEstimator;
   /** False keeps the document out of the model manifest while tools can still read it. */
-  manifest: boolean;
+  readonly manifest: boolean;
+  /** Monotonic store revision assigned when this document was added or updated. */
+  readonly rev: number;
+  /** Source filesystem path when ingested from disk. */
+  readonly absPath?: string;
+  /** Source file modification timestamp in milliseconds when known. */
+  readonly mtimeMs?: number;
+  /** Source file byte size when known. */
+  readonly byteSize?: number;
+  /** True for ephemeral per-run artifacts (such as overflow or specialist reports). */
+  readonly transient?: boolean;
 }
 
 export interface Chunk {
-  docId: string;
+  readonly docId: string;
   /** 0-based chunk index within the document for this chunk size. */
-  index: number;
-  total: number;
+  readonly index: number;
+  readonly total: number;
   /** 1-based inclusive line range. */
-  startLine: number;
-  endLine: number;
-  tokens: number;
-  chunkTokens: number;
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly tokens: number;
+  readonly chunkTokens: number;
   /** Stable identity: same doc + same chunk size => same key => same prompt prefix. */
-  key: string;
+  readonly key: string;
 }
 
 export interface AddDocumentOptions {
-  id?: string;
-  title?: string;
+  readonly id?: string;
+  readonly title?: string;
   /** Known true token count (calibrates the estimator for this document). */
-  tokens?: number;
+  readonly tokens?: number;
   /** False keeps the document out of the model manifest while tools can still read it. */
-  manifest?: boolean;
+  readonly manifest?: boolean;
+  readonly absPath?: string;
+  readonly mtimeMs?: number;
+  readonly byteSize?: number;
+  readonly transient?: boolean;
 }
 
 export interface GrepMatch {
-  docId: string;
-  line: number;
-  text: string;
+  readonly docId: string;
+  readonly line: number;
+  readonly text: string;
 }
 
 export interface ContextStoreOptions {
@@ -84,8 +104,10 @@ const OUTLINE_HEADER_RE =
  */
 export class ContextStore {
   private readonly docs = new Map<string, StoredDocument>();
+  private readonly pathIndex = new Map<string, string>();
   private readonly chunkCache = new Map<string, Chunk[]>();
   private bm25Index: Bm25DocumentIndex | undefined;
+  private _rev = 0;
   private readonly estimator: TokenEstimator;
   private readonly maxLineChars: number;
   private readonly previewLines: number;
@@ -94,15 +116,20 @@ export class ContextStore {
 
   constructor(opts: ContextStoreOptions = {}) {
     this.estimator = opts.estimator ?? defaultEstimator;
-    this.maxLineChars = opts.maxLineChars ?? 2000;
+    this.maxLineChars = opts.maxLineChars ?? 8000;
     this.previewLines = opts.previewLines ?? 2;
     this.previewMinLines = opts.previewMinLines ?? 20;
     this.previewLineChars = opts.previewLineChars ?? 160;
   }
 
+  get revision(): number {
+    return this._rev;
+  }
+
   add(text: string, opts: AddDocumentOptions = {}): StoredDocument {
     const id = opts.id ?? `doc${this.docs.size + 1}`;
     if (!VALID_DOC_ID_RE.test(id)) throw new Error(`invalid document id "${id}"`);
+    const prev = this.docs.get(id);
     const lines: string[] = [];
     for (const raw of text.split(/\r?\n/)) {
       if (raw.length <= this.maxLineChars) lines.push(raw);
@@ -115,19 +142,65 @@ export class ContextStore {
       calibratedRatio !== undefined && opts.tokens !== baseCount
         ? new CharRatioEstimator(calibratedRatio, Math.min(calibratedRatio, 1.4))
         : this.estimator;
+    const rev = ++this._rev;
+    const absPath = opts.absPath ?? prev?.absPath;
+    const mtimeMs = opts.mtimeMs;
+    const byteSize = opts.byteSize;
+    const transient = opts.transient ?? prev?.transient;
     const doc: StoredDocument = {
       id,
-      title: opts.title ?? id,
+      title: opts.title ?? prev?.title ?? id,
       lines,
       chars: text.length,
       tokens: opts.tokens ?? baseCount,
       estimator,
-      manifest: opts.manifest ?? true,
+      manifest: opts.manifest ?? prev?.manifest ?? true,
+      rev,
+      ...(absPath !== undefined ? { absPath } : {}),
+      ...(mtimeMs !== undefined ? { mtimeMs } : {}),
+      ...(byteSize !== undefined ? { byteSize } : {}),
+      ...(transient !== undefined ? { transient } : {}),
     };
+    if (prev?.absPath && prev.absPath !== absPath) {
+      this.pathIndex.delete(prev.absPath);
+    }
+    if (absPath !== undefined) {
+      this.pathIndex.set(absPath, id);
+    }
     this.docs.set(id, doc);
     for (const k of [...this.chunkCache.keys()]) if (k.startsWith(`${id}@`)) this.chunkCache.delete(k);
     this.bm25Index = undefined;
     return doc;
+  }
+
+  delete(id: string): boolean {
+    const prev = this.docs.get(id);
+    if (!prev) return false;
+    this.docs.delete(id);
+    if (prev.absPath !== undefined) {
+      this.pathIndex.delete(prev.absPath);
+    }
+    for (const k of [...this.chunkCache.keys()]) if (k.startsWith(`${id}@`)) this.chunkCache.delete(k);
+    this.bm25Index = undefined;
+    this._rev += 1;
+    return true;
+  }
+
+  /** Remove ephemeral documents (such as specialist or overflow reports) between independent runs. */
+  clearTransient(): number {
+    let removed = 0;
+    for (const [id, doc] of [...this.docs.entries()]) {
+      if (doc.transient === true || (doc.manifest === false && id.startsWith('branch_report_'))) {
+        this.delete(id);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  findByAbsPath(absPath: string): StoredDocument | undefined {
+    const id = this.pathIndex.get(absPath);
+    return id !== undefined ? this.docs.get(id) : undefined;
   }
 
   async addPath(sourcePath: string, opts: IngestOptions = {}): Promise<IngestResult> {
@@ -141,9 +214,40 @@ export class ContextStore {
     for (let i = 0; i < res.value.files.length; i++) {
       const f = res.value.files[i];
       if (!f) continue;
-      this.add(f.content, { id: f.id, title: f.title, tokens: f.tokens });
+      this.add(f.content, {
+        id: f.id,
+        title: f.title,
+        tokens: f.tokens,
+        absPath: f.path,
+        ...(f.mtimeMs !== undefined ? { mtimeMs: f.mtimeMs } : {}),
+        ...(f.byteSize !== undefined ? { byteSize: f.byteSize } : {}),
+      });
     }
     return res.value;
+  }
+
+  /** Ingest multiple paths in parallel and commit documents in deterministic input order. */
+  async addPaths(sourcePaths: readonly string[], opts: IngestOptions = {}): Promise<readonly IngestResult[]> {
+    const settled = await resolveIngestSources(sourcePaths, opts);
+    const results: IngestResult[] = [];
+    for (let i = 0; i < settled.length; i++) {
+      const item = settled[i];
+      if (!item || !item.ok) continue;
+      for (let j = 0; j < item.value.files.length; j++) {
+        const f = item.value.files[j];
+        if (!f) continue;
+        this.add(f.content, {
+          id: f.id,
+          title: f.title,
+          tokens: f.tokens,
+          absPath: f.path,
+          ...(f.mtimeMs !== undefined ? { mtimeMs: f.mtimeMs } : {}),
+          ...(f.byteSize !== undefined ? { byteSize: f.byteSize } : {}),
+        });
+      }
+      results.push(item.value);
+    }
+    return Object.freeze(results);
   }
 
   has(id: string): boolean {

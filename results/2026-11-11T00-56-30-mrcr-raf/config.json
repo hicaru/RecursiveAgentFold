@@ -1,0 +1,27 @@
+{
+  "bench": "mrcr",
+  "method": "raf",
+  "startedAt": "2026-11-11T00:56:30.430Z",
+  "tasks": 6,
+  "taskIds": [
+    "mrcr-131072-coref-0",
+    "mrcr-131072-coref-1",
+    "mrcr-131072-coref-2",
+    "mrcr-131072-coref-3",
+    "mrcr-131072-coref-4",
+    "mrcr-131072-coref-5"
+  ],
+  "argv": [
+    "mrcr",
+    "--mock",
+    "--max-depth",
+    "2"
+  ],
+  "tools": "all",
+  "models": {
+    "mock": true,
+    "llmQuery": {
+      "reserveRatio": 0.3
+    }
+  }
+}

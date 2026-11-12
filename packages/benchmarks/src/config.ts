@@ -73,14 +73,14 @@ export function createModels(o: ModelOverrides = {}): BenchModels {
     apiKey: rootApiKey,
     model: rootModel,
     contextWindow: envNum('RAF_ROOT_CONTEXT', 200_000),
-    maxOutputTokens: envNum('RAF_ROOT_MAX_OUTPUT', 16_000),
+    maxOutputTokens: envNum('RAF_ROOT_MAX_OUTPUT', 32_000),
     thinking: envThinking('RAF_ROOT_THINKING', 'enabled'),
     extraBody: envJSON('RAF_ROOT_EXTRA_BODY'),
     temperature: envNum('RAF_ROOT_TEMPERATURE', 0),
     maxRetries: envNum('RAF_MAX_RETRIES', 8),
     retryBaseMs: envNum('RAF_RETRY_BASE_MS', 5000),
     retryMaxMs: 30_000,
-    timeoutMs: envNum('RAF_TIMEOUT_MS', 900_000),
+    ...(env('RAF_TIMEOUT_MS') !== undefined ? { timeoutMs: envNum('RAF_TIMEOUT_MS', 0) } : {}),
   };
   const branchModel = o.branchModel ?? env('RAF_BRANCH_MODEL');
   const branchBaseUrl = o.branchBaseUrl ?? env('RAF_BRANCH_BASE_URL', baseUrl) ?? baseUrl;
@@ -106,7 +106,7 @@ export function createModels(o: ModelOverrides = {}): BenchModels {
         maxRetries: rootCfg.maxRetries,
         retryBaseMs: rootCfg.retryBaseMs,
         retryMaxMs: rootCfg.retryMaxMs,
-        timeoutMs: rootCfg.timeoutMs,
+        ...(rootCfg.timeoutMs !== undefined ? { timeoutMs: rootCfg.timeoutMs } : {}),
       }
     : rootCfg;
   const queryModel = o.queryModel ?? env('RAF_QUERY_MODEL', 'glm-5.3-flash') ?? 'glm-5.3-flash';
@@ -129,13 +129,13 @@ export function createModels(o: ModelOverrides = {}): BenchModels {
     maxRetries: envNum('RAF_MAX_RETRIES', 8),
     retryBaseMs: envNum('RAF_RETRY_BASE_MS', 5000),
     retryMaxMs: 30_000,
-    timeoutMs: envNum('RAF_TIMEOUT_MS', 900_000),
+    ...(env('RAF_TIMEOUT_MS') !== undefined ? { timeoutMs: envNum('RAF_TIMEOUT_MS', 0) } : {}),
   };
   const maxChunk = o.maxChunkTokens ?? (env('RAF_MAX_CHUNK_TOKENS') ? Number(env('RAF_MAX_CHUNK_TOKENS')) : undefined);
   const llmQuery: LLMQueryOptions = {
     reserveRatio: o.reserveRatio ?? envNum('RAF_RESERVE_RATIO', 0.3),
     maxChunkTokens: maxChunk,
-    concurrency: o.queryConcurrency ?? envNum('RAF_QUERY_CONCURRENCY', 8),
+    concurrency: o.queryConcurrency ?? envNum('RAF_QUERY_CONCURRENCY', 16),
   };
   const rootClient = new OpenAICompatibleClient(rootCfg);
   const branchClient = hasDistinctBranch ? new OpenAICompatibleClient(branchCfg) : rootClient;

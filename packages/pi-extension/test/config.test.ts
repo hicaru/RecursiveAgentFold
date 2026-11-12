@@ -15,7 +15,7 @@ describe('config', () => {
     const c = sanitizeConfig({ depth: 9, reserve: 0.33, concurrency: 99 });
     expect(c.depth).toBe(3);
     expect(c.reserve).toBeCloseTo(0.35);
-    expect(c.concurrency).toBe(8);
+    expect(c.concurrency).toBe(32);
     const low = sanitizeConfig({ depth: 0, reserve: 0.01, concurrency: 0 });
     expect(low.depth).toBe(1);
     expect(low.reserve).toBeCloseTo(0.1);
