@@ -1,6 +1,6 @@
 {
   "name": "@raf/dsh-plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Recursive AgentFold engine runtime, settings panel, and composer engine switch for the DeepSeek Harness Web UI.",

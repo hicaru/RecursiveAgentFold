@@ -1,11 +1,12 @@
 {
   "name": "@raf/benchmarks",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Live-model benchmarks for the Recursive AgentFold engine (OOLONG, synthetic needle, prompt checks).",
   "type": "module",
   "scripts": {
     "cli": "tsx --conditions=source src/cli.ts",
+    "e2e:host": "bash scripts/e2e-dsh-host.sh",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "build": "echo \"benchmarks run from source via tsx\""

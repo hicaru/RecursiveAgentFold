@@ -2,7 +2,16 @@ import { EventEmitter, once } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// The real Host records fold events through appendPluginRecord; mock the
+// module so the plugin's probe resolves in tests and records become visible.
+const foldRecords = vi.hoisted(() => [] as Array<{ type: string; data: unknown }>);
+vi.mock('@deepseek-ai/dsh-session', () => ({
+  appendPluginRecord: (_session: unknown, type: string, data: unknown) => {
+    foldRecords.push({ type, data });
+  },
+}));
 
 interface RegisteredTool {
   name: string;
@@ -42,7 +51,6 @@ describe('@raf/dsh-plugin contract & multi-tool batching', () => {
       const toolsReady = once(readyEmitter, 'ready');
       let resolveCount = 0;
       let disposeCount = 0;
-      const customAppends: Array<{ type: string; data: unknown }> = [];
       const agentHandlers = new Map<string, Array<(ev: Record<string, unknown>) => void>>();
       const routes = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
       const disposers: Array<() => void> = [];
@@ -54,9 +62,6 @@ describe('@raf/dsh-plugin contract & multi-tool batching', () => {
           header: { cwd: tmpDir },
           log: [{ type: 'turn/start', data: { turn: 1 } }],
           append: () => {},
-          appendCustom: (type: string, data: unknown) => {
-            customAppends.push({ type, data });
-          },
         },
       };
 
@@ -122,13 +127,25 @@ describe('@raf/dsh-plugin contract & multi-tool batching', () => {
         | ((options: Record<string, unknown>, next: () => unknown) => AsyncIterable<Record<string, unknown>>)
         | undefined;
       const recordedLlmRequests: Array<Record<string, unknown>> = [];
+      const resolveModelInfoCalls: Array<{ provider: unknown; model: unknown }> = [];
       let llmStep = 0;
 
       const mockCtx = {
         tools: mockToolsService,
         llm: {
-          resolveModelInfo: () => ({ contextWindow: 256_000 }),
-          retryPolicy: { maxAttempts: 2 },
+          // Mirrors the real Host contract: async (provider, model, signal) with
+          // the context window nested under info.context.contextWindow.
+          async resolveModelInfo(provider: unknown, model: unknown) {
+            resolveModelInfoCalls.push({ provider, model });
+            if (typeof provider !== 'string' || typeof model !== 'string') {
+              const failure = new Error(`no adapter registered for provider "${String(provider)}"`);
+              (failure as { code?: string }).code = 'NO_ADAPTER';
+              throw failure;
+            }
+            return { provider, id: model, name: model, context: { contextWindow: 256_000 } };
+          },
+          // Mirrors the real Host: policy comes from providerRetryPolicy(provider).
+          providerRetryPolicy: () => ({ maxAttempts: 2 }),
           async *stream(opts: Record<string, unknown>) {
             recordedLlmRequests.push(opts);
             const purpose = String(opts.purpose ?? '');
@@ -210,6 +227,14 @@ describe('@raf/dsh-plugin contract & multi-tool batching', () => {
           cb({ ...this, webServer: this.get('webServer'), compaction: mockCompaction });
         },
       };
+
+      // The real Host exits the process on any unhandled rejection; a floating
+      // promise inside the plugin is fatal there, so track them here.
+      const unhandled: unknown[] = [];
+      const onUnhandled = (err: unknown) => {
+        unhandled.push(err);
+      };
+      process.on('unhandledRejection', onUnhandled);
 
       dshPlugin.apply(mockCtx);
       await toolsReady;
@@ -302,9 +327,18 @@ describe('@raf/dsh-plugin contract & multi-tool batching', () => {
       }
 
       expect(finalAnswer).toBe('ALL_BATCH_OK');
-      // Fold summary appeared in visible reasoning and appendCustom
+      // resolveModelInfo must use the Host signature: positional string args.
+      expect(resolveModelInfoCalls.length).toBeGreaterThan(0);
+      for (const call of resolveModelInfoCalls) {
+        expect(call).toEqual({ provider: 'mock', model: 'mock-root' });
+      }
+      // No floating rejection may escape the plugin: the real Host treats one
+      // as a fatal load failure and the desktop restarts it.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+      // Fold summary appeared in visible reasoning and the plugin-record API
       expect(seenFoldReasoning.some((t) => t.includes('[Fold 0-0]'))).toBe(true);
-      expect(customAppends.some((c) => c.type === 'raf-fold')).toBe(true);
+      expect(foldRecords.some((c) => c.type === 'plugin:raf/fold')).toBe(true);
       // ResolvedToolSet was disposed on every resolve
       expect(resolveCount).toBeGreaterThan(0);
       expect(disposeCount).toBe(resolveCount);
@@ -365,6 +399,8 @@ describe('@raf/dsh-plugin contract & multi-tool batching', () => {
       // 5. Dispose restores exact original compactIfNeeded
       for (const d of disposers) d();
       expect(mockCompaction.compactIfNeeded).toBe(originalCompactRef);
+      process.off('unhandledRejection', onUnhandled);
+      expect(unhandled).toEqual([]);
     } finally {
       if (prevProfileDir === undefined) delete process.env.DSH_PROFILE_DIR;
       else process.env.DSH_PROFILE_DIR = prevProfileDir;

@@ -710,8 +710,19 @@ export class DshBenchmarkGroupHost {
           }
           return [{ id: opts.root.profile.name, name: opts.root.profile.name }];
         },
-        async resolveModelInfo() {
-          return {};
+        // Mirrors the real Host contract: async (provider, model, signal), the
+        // context window nested under info.context.contextWindow.
+        async resolveModelInfo(providerId: string, modelId: string) {
+          return {
+            provider: providerId,
+            id: modelId,
+            name: modelId,
+            context: { contextWindow: opts.root.profile.contextWindow },
+          };
+        },
+        // Mirrors the real Host: retry policy is resolved per provider route.
+        providerRetryPolicy(_providerId: string) {
+          return { maxAttempts: 4 };
         },
         async *stream(streamOpts: DshStreamOptions): AsyncIterable<DshStreamChunk> {
           const purpose = streamOpts.purpose ?? 'raf-root';

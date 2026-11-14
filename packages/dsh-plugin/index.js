@@ -14,6 +14,14 @@ const dshLlmProbe = import('@deepseek-ai/dsh-llm')
     }
   })
   .catch(() => {});
+let dshAppendPluginRecord;
+const dshSessionProbe = import('@deepseek-ai/dsh-session')
+  .then((mod) => {
+    if (typeof mod?.appendPluginRecord === 'function') {
+      dshAppendPluginRecord = mod.appendPluginRecord;
+    }
+  })
+  .catch(() => {});
 const ENGINE_STANDARD = 'standard';
 const ENGINE_RAF = 'raf';
 const ENGINE_ROUTE = '/plugins/@raf/dsh-plugin/engine';
@@ -380,13 +388,23 @@ function questionOf(messages, index) {
   return renderContent(messages[index].content);
 }
 
-function contextWindowOf(ctx, sessionId, outer) {
+async function contextWindowOf(ctx, sessionId, outer) {
   try {
     const llm = ctx.get('llm');
-    if (llm !== undefined && typeof llm.resolveModelInfo === 'function' && outer?.provider && outer?.model) {
-      const info = llm.resolveModelInfo({ provider: outer.provider, model: outer.model });
-      if (info !== null && typeof info === 'object' && Number.isFinite(info.contextWindow) && info.contextWindow > 0) {
-        return info.contextWindow;
+    if (
+      llm !== undefined &&
+      typeof llm.resolveModelInfo === 'function' &&
+      typeof outer?.provider === 'string' &&
+      outer.provider !== '' &&
+      typeof outer?.model === 'string' &&
+      outer.model !== ''
+    ) {
+      // The Host service takes (provider, model, signal) and returns a promise.
+      // An unawaited rejection is fatal to the Host process.
+      const info = await llm.resolveModelInfo(outer.provider, outer.model, outer.signal);
+      const contextWindow = info?.context?.contextWindow;
+      if (Number.isFinite(contextWindow) && contextWindow > 0) {
+        return contextWindow;
       }
     }
     const agents = ctx.get('agents');
@@ -888,7 +906,13 @@ class DshLlmClient {
         }
         continue;
       }
-      const policyMax = this.ctx.get?.('llm')?.retryPolicy?.maxAttempts;
+      let policyMax;
+      try {
+        // providerRetryPolicy throws for an unregistered route; keep the default then.
+        policyMax = this.ctx.get?.('llm')?.providerRetryPolicy?.(this.provider)?.maxAttempts;
+      } catch {
+        policyMax = undefined;
+      }
       const maxRetryAttempts =
         typeof policyMax === 'number' && Number.isFinite(policyMax) && policyMax >= 1
           ? Math.floor(policyMax)
@@ -1824,7 +1848,7 @@ class SessionCommitBus extends EventEmitter {
         const foldLine = `[Fold ${from}-${to}] ${event.outcome.directive.summary}`;
         if (Array.isArray(turn?.stepFolds)) turn.stepFolds.push(foldLine);
         if (typeof turn?.appendCustom === 'function') {
-          turn.appendCustom('raf-fold', { range: [from, to], summary: event.outcome.directive.summary });
+          turn.appendCustom('fold', { range: [from, to], summary: event.outcome.directive.summary });
         }
       }
       if (
@@ -2201,7 +2225,7 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
       }
     }
   }
-  const contextWindow = contextWindowOf(ctx, outer.sessionId, outer);
+  const contextWindow = await contextWindowOf(ctx, outer.sessionId, outer);
   const rootTarget = { provider: outer.provider, model: outer.model };
   const branchTarget = resolveTierTarget(outer, settings, 'BRANCH', rootTarget);
   const queryTarget = resolveTierTarget(outer, settings, 'QUERY', rootTarget);
@@ -2220,7 +2244,16 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
   const userMessage = userIndex >= 0 ? messages[userIndex] : undefined;
   const initialAttachments = extractMessageAttachments(userMessage);
   const appendCustom =
-    typeof session?.appendCustom === 'function' ? (type, data) => session.appendCustom(type, data) : undefined;
+    typeof dshAppendPluginRecord === 'function' && session !== undefined
+      ? (type, data) => {
+          // The Host grammar is "plugin:" plus slash-separated lowercase segments.
+          try {
+            dshAppendPluginRecord(session, `plugin:raf/${type}`, data);
+          } catch {
+            // The record is advisory; a rejected append must not stop the turn.
+          }
+        }
+      : undefined;
   const run = runs.create({
     sessionId: outer.sessionId,
     model: `${outer.provider}/${outer.model}`,

@@ -3,6 +3,7 @@
 ## Workspace
 - Use pnpm only. Do not use npm or yarn. Run package commands with `pnpm --filter <pkg> <cmd>`.
 - Run `pnpm typecheck && pnpm test` before every commit.
+- Version every change set. Bump the patch version (`0.1.0` → `0.1.1` → `0.1.2` → …) in every `package.json` and add one matching version section to `CHANGELOG.md`. Do not use date-only headings.
 - Do not modify generated files (`dist/`, etc.). Do not commit `.env` or secrets.
 - Share dependencies only across `packages/*`. Do not introduce reverse dependencies.
 

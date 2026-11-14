@@ -1,6 +1,50 @@
 # Changelog
 
-## 2026-11-14 — Session bug fixes (B1–B36, PI-*, P-B*)
+## 0.1.1 — 2026-11-15 — Fix fatal host crash on RAF session start (introduced in 0.1.0)
+
+`session-713f288d-75b8-4e67-8359-2f57381428ea` (and two sibling sessions) died at turn 1:
+`dsh: fatal load failure: LlmError: no adapter registered for provider "[object Object]"`,
+host exit 1, desktop auto-restart. Root cause chain, verified against the installed
+`@deepseek-ai/dsh 0.2.2-rc.3` sources and reproduced deterministically on a real host:
+
+1. The B1–B36 fix session (pi, `google-antigravity/gemini-3.8-flash`, commit `fa3fd95`)
+   implemented its advisor's plan line for B29 verbatim:
+   `ctx.llm?.resolveModelInfo?.({ provider, model })?.contextWindow`.
+2. The real Host API is `await llm.resolveModelInfo(provider, model, signal)` returning
+   `info.context.contextWindow`. The object argument made the provider `[object Object]`;
+   the missing `await` left a floating rejected promise; any unhandled rejection is a
+   fatal load failure in `dsh-app-boot` (`installFailLoud`), which exits the host.
+3. The commit's mock verification (`--method dsh`) could not catch it: the mock
+   `resolveModelInfo` was synchronous, object-tolerant, and returned a flat
+   `contextWindow` field — it mirrored the wrong contract.
+
+### Fixes
+
+- **`packages/dsh-plugin/index.js`**: `contextWindowOf` now awaits
+  `llm.resolveModelInfo(provider, model, signal)` (string guards, nested
+  `context.contextWindow`, `NO_ADAPTER`-safe fallback to `tokenMeter`, then `128000`).
+- **Phantom Host APIs from the same advisor plan, replaced with real ones**:
+  retry policy via guarded `llm.providerRetryPolicy(provider)` (was a nonexistent
+  `llm.retryPolicy` property); fold events via `appendPluginRecord(session,
+  'plugin:raf/fold', …)` (was a nonexistent `session.appendCustom`). Left guarded and
+  harmless: `ctx.get('fs')` (no such service), `agent.meta?.isSeeded` (real field is
+  `session.header.isSeeded`), engine-internal `cacheControl` wire blocks (adapters drop
+  the key; breakpoints do not reach the provider through the DSH bridge — known gap).
+- **Contract mocks now mirror the real Host** (`packages/benchmarks/test/dsh-plugin.test.ts`,
+  `src/dsh-host.ts`): `resolveModelInfo` is async, positional-arg (rejects object calls),
+  returns nested `context`; `providerRetryPolicy` per route; `appendPluginRecord` exercised
+  through `vi.mock`. New regression guards: recorded-call signature assertions and a
+  process-level `unhandledRejection` canary (the exact failure class that killed the host).
+  The old code fails these tests; the fixed code passes.
+- **New real-host smoke** `pnpm --filter @raf/benchmarks run e2e:host`
+  (`scripts/e2e-dsh-host.sh`): builds an isolated `DSH_HOME` profile (dsh-base +
+  dsh-headless + plugin link), seeds `defaultEngine: "raf"`, runs one headless turn on the
+  installed app runtime, and fails on any `fatal load failure`. Old code: exit 1 with the
+  production stack; fixed code: exit 0, answer `OK`.
+
+Verified: `pnpm typecheck && pnpm test` (183 tests) and the real-host E2E above.
+
+## 0.1.0 — 2026-11-14 — Session bug fixes (B1–B36, PI-*, P-B*)
 
 Fixes for failures observed in production RAF sessions (`docs/RAF_SESSION_BUGS.md`, Pi sessions
 `01a1d561`, `01a1d10c`). Verified with `pnpm typecheck && pnpm test && pnpm build` (183 tests) and

@@ -1,6 +1,6 @@
 {
   "name": "@raf/pi-extension",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Recursive AgentFold for pi: native-step RAF root loop, scoped branch specialists, llm_query reader, live agent UI.",
   "type": "module",
