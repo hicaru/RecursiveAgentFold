@@ -3,11 +3,13 @@ import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import type { ChatMessage, LLMResponse } from '@raf/engine/source';
 import {
   addUsage,
+  applyCacheBreakpointsToPayload,
   emptyUsage,
   ModelClient,
   modelSpec,
   PrefetchedRootClient,
   reasoningOf,
+  supportsExplicitCacheBlocks,
   toEngineResponse,
   toEngineUsage,
   toPiMessages,
@@ -159,5 +161,56 @@ describe('llm mappers', () => {
         signal: controller.signal,
       }),
     ).rejects.toThrow('step timeout after 300000 ms');
+  });
+
+  it('detects compat.cacheControlFormat, emits 1-segment user block array, preserves ttl: 1h, and attaches images', () => {
+    const compatModel = {
+      id: 'custom-claude',
+      name: 'Custom Claude',
+      provider: 'custom-proxy',
+      api: 'openai-completions',
+      input: ['text', 'image'],
+      compat: { cacheControlFormat: 'anthropic' },
+      contextWindow: 200_000,
+      maxTokens: 16_000,
+    } as never;
+    expect(supportsExplicitCacheBlocks(compatModel)).toBe(true);
+
+    const anthropicModel = {
+      id: 'claude-sonnet',
+      name: 'Claude Sonnet',
+      provider: 'anthropic',
+      api: 'anthropic-messages',
+      input: ['text', 'image'],
+      contextWindow: 200_000,
+      maxTokens: 16_000,
+    } as never;
+    const engineMsgs: ChatMessage[] = [
+      { role: 'system', content: 'SYS', cacheBreakpoint: true },
+      {
+        role: 'user',
+        content: 'ZONE1',
+        segments: [{ text: 'ZONE1', cacheBreakpoint: true }],
+        attachments: [{ kind: 'image', mimeType: 'image/png', data: 'QUJD' }],
+      },
+    ];
+    const piMsgs = toPiMessages(engineMsgs, anthropicModel);
+    expect(Array.isArray(piMsgs[1]?.content)).toBe(true);
+    expect(piMsgs[1]?.content).toEqual([
+      { type: 'text', text: 'ZONE1' },
+      { type: 'image', data: 'QUJD', mimeType: 'image/png' },
+    ]);
+
+    const payload = {
+      system: [{ type: 'text', text: 'SYS', cache_control: { type: 'ephemeral', ttl: '1h' } }],
+      tools: [{ name: 'read', cache_control: { type: 'ephemeral', ttl: '1h' } }],
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'ZONE1' }] }],
+    };
+    applyCacheBreakpointsToPayload(payload, engineMsgs, anthropicModel);
+    expect(payload.messages[0]?.content[0]).toEqual({
+      type: 'text',
+      text: 'ZONE1',
+      cache_control: { type: 'ephemeral', ttl: '1h' },
+    });
   });
 });

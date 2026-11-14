@@ -12,8 +12,8 @@ import { UsageTracker } from '../llm/usage.js';
 import { buildAgentSystemPrompt, FORCE_ANSWER, FORMAT_REMINDER, FORMAT_REPAIR, renderBlockLabel } from '../prompts/agent.js';
 import { maskMarkdownCode, parseAgentResponse, type ParsedResponse } from '../protocol/parser.js';
 import { defaultEstimator, truncateToTokens, type TokenEstimator } from '../tokens.js';
-import { coerceToolArguments, formatToolCallsXml, renderToolSchemas, type Tool } from '../tools/types.js';
-import type { ChatContentSegment, ChatMessage, LLMClient, LLMResponse, LLMUsage } from '../types.js';
+import { coerceToolArguments, formatToolCallsXml, renderToolSchemas, validateToolArguments, type Tool } from '../tools/types.js';
+import type { ChatAttachment, ChatContentSegment, ChatMessage, LLMClient, LLMResponse, LLMUsage } from '../types.js';
 import type { AgentEvent, EventSink } from './events.js';
 
 export interface AgentFoldConfig {
@@ -51,6 +51,10 @@ export interface AgentFoldConfig {
   readonly estimator?: TokenEstimator;
   /** Static domain instructions appended to the system prompt. */
   readonly systemPromptExtra?: string;
+  readonly systemPromptAddendum?: string;
+  readonly initialAttachments?: readonly ChatAttachment[];
+  readonly maxManifestTokens?: number;
+  readonly maxGranularBlocks?: number;
   readonly temperature?: number;
   readonly signal?: AbortSignal;
   readonly board?: ResearchBoard;
@@ -63,6 +67,7 @@ export interface AgentFoldConfig {
   readonly ancestorTasks?: readonly string[];
   readonly parent?: string;
   readonly scope?: string;
+  readonly cwd?: string;
   readonly maxDepth?: number;
   readonly initialBoardRev?: number;
   readonly initialBoardCount?: number;
@@ -199,6 +204,7 @@ export interface PendingAgentStep {
   readonly motivation: string;
   readonly action: ToolAction;
   readonly actions?: readonly ToolAction[];
+  readonly droppedActions?: readonly string[];
 }
 
 function cloneAction(action: ToolAction): ToolAction {
@@ -209,7 +215,11 @@ function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (signal === undefined) return promise;
   const reasonError = () =>
     signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason ?? 'aborted'));
-  if (signal.aborted) return Promise.reject(reasonError());
+  if (signal.aborted) {
+    promise.catch(() => {});
+    return Promise.reject(reasonError());
+  }
+  promise.catch(() => {});
   let onAbort: (() => void) | undefined;
   const aborted = new Promise<never>((_resolve, reject) => {
     onAbort = () => reject(reasonError());
@@ -218,6 +228,49 @@ function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   return Promise.race([promise, aborted]).finally(() => {
     if (onAbort !== undefined) signal.removeEventListener('abort', onAbort);
   });
+}
+
+function renderBoundedManifest(store: ContextStore, maxTokens: number, estimator: TokenEstimator): string {
+  const docs = store.listManifest();
+  if (docs.length === 0) return '(no documents loaded)';
+  const rootDocs: typeof docs = [];
+  const groups = new Map<string, { count: number; tokens: number }>();
+  for (let i = 0; i < docs.length; i++) {
+    const d = docs[i];
+    if (!d) continue;
+    const slash = d.id.indexOf('/');
+    if (slash < 0) {
+      rootDocs.push(d);
+    } else {
+      const prefix = d.id.slice(0, slash + 1);
+      const g = groups.get(prefix);
+      if (g) {
+        g.count += 1;
+        g.tokens += d.tokens;
+      } else {
+        groups.set(prefix, { count: 1, tokens: d.tokens });
+      }
+    }
+  }
+  const lines: string[] = [];
+  const rootLimit = 20;
+  for (let i = 0; i < Math.min(rootDocs.length, rootLimit); i++) {
+    const d = rootDocs[i];
+    if (!d) continue;
+    lines.push(
+      `- id: \`${d.id}\` — ${d.title} — ~${d.tokens.toLocaleString('en-US')} tokens, ${d.lines.length.toLocaleString('en-US')} lines`,
+    );
+  }
+  if (rootDocs.length > rootLimit) {
+    lines.push(`... and ${rootDocs.length - rootLimit} more root files (use list_documents)`);
+  }
+  const sortedGroups = [...groups.entries()].sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]));
+  for (const [prefix, g] of sortedGroups) {
+    lines.push(
+      `- prefix \`${prefix}\`: ${g.count} document(s) (~${g.tokens.toLocaleString('en-US')} tokens) — use list_documents(prefix="${prefix}"), search, or grep`,
+    );
+  }
+  return truncateToTokens(lines.join('\n'), maxTokens, estimator).text;
 }
 
 /**
@@ -252,6 +305,7 @@ export class AgentFoldAgent {
   private inProcessRun = false;
   private runResult?: AgentRunResult;
   private preparedStep?: { readonly step: number; readonly messages: ChatMessage[] };
+  private tokenScale = 1;
 
   constructor(private readonly cfg: AgentFoldConfig) {
     this.depth = cfg.depth ?? 0;
@@ -266,7 +320,8 @@ export class AgentFoldAgent {
         cfg.tools.map((t) => t.name),
         { minDeepFoldBlocks },
       )}\n\n# Tools\n${renderToolSchemas(cfg.tools)}` +
-      (cfg.systemPromptExtra ? `\n\n# Notes\n${cfg.systemPromptExtra}` : '');
+      (cfg.systemPromptExtra ? `\n\n# Notes\n${cfg.systemPromptExtra}` : '') +
+      (cfg.systemPromptAddendum ? `\n\n${cfg.systemPromptAddendum}` : '');
     this.initialBoardRev =
       cfg.initialBoardRev ?? cfg.initialBoardCount ?? (cfg.board ? cfg.board.settledRev() : 0);
     const boardSnap =
@@ -276,7 +331,12 @@ export class AgentFoldAgent {
           ? cfg.board.renderSettled()
           : undefined;
     if (boardSnap !== undefined) this.initialBoardSnapshot = boardSnap;
-    this.initialManifest = cfg.initialManifest ?? cfg.store.manifest();
+    const rawManifest = cfg.initialManifest ?? cfg.store.manifest();
+    const maxManifestTokens = cfg.maxManifestTokens ?? 8_000;
+    this.initialManifest =
+      cfg.initialManifest === undefined && maxManifestTokens > 0 && this.estimator.count(rawManifest) > maxManifestTokens
+        ? renderBoundedManifest(cfg.store, maxManifestTokens, this.estimator)
+        : rawManifest;
     const suppliedDocIds = cfg.initialDocIds === undefined ? undefined : new Set(cfg.initialDocIds);
     const docRevs = new Map<string, number>();
     for (const doc of cfg.store.listManifest()) {
@@ -287,7 +347,6 @@ export class AgentFoldAgent {
     }
     this.initialManifestDocRevs = docRevs;
   }
-
   private emit(e: AgentEvent): void {
     this.cfg.onEvent?.(e);
   }
@@ -339,6 +398,7 @@ export class AgentFoldAgent {
       motivation: pending.motivation,
       action: cloneAction(pending.action),
       actions,
+      ...(pending.droppedActions !== undefined ? { droppedActions: [...pending.droppedActions] } : {}),
     };
   }
 
@@ -360,12 +420,13 @@ export class AgentFoldAgent {
       motivation: pending.motivation,
       action: primary,
       actions,
+      ...(pending.droppedActions !== undefined ? { droppedActions: [...pending.droppedActions] } : {}),
     };
     this.preparedStep = undefined;
   }
 
   private promptTokens(messages: readonly ChatMessage[]): number {
-    return this.estimator.count(messages.map((m) => m.content).join('\n'));
+    return Math.ceil(this.estimator.count(messages.map((m) => m.content).join('\n')) * this.tokenScale);
   }
 
   private enforcePromptBudget(
@@ -463,12 +524,11 @@ export class AgentFoldAgent {
       zone2 = blockLines.join('\n');
     }
 
-    const zone3aSections: string[] = [];
-    if (this.cfg.followUpQuestion) {
-      zone3aSections.push(
-        `\n\n### Follow-up Question\n${this.cfg.followUpQuestion.trim()}\n(Reuse exact key=value facts and formulas already recorded in Previous Steps above if sufficient. Verify any new identifier or index with search, outline, grep, or read first.)`,
-      );
-    }
+    const zone3a = this.cfg.followUpQuestion
+      ? `\n\n### Follow-up Question\n${this.cfg.followUpQuestion.trim()}\n(Reuse exact key=value facts and formulas already recorded in Previous Steps above if sufficient. Verify any new identifier or index with search, outline, grep, or read first.)`
+      : '';
+
+    const zone3bParts: string[] = [];
     const allDocs = this.cfg.store.listManifest();
     const changedDocIds: string[] = [];
     for (let i = 0; i < allDocs.length; i++) {
@@ -480,11 +540,11 @@ export class AgentFoldAgent {
       }
     }
     if (changedDocIds.length > 0) {
-      zone3aSections.push(`\n\n### Newly Added Documents\n${this.cfg.store.manifestFor(changedDocIds)}`);
+      zone3bParts.push(`\n\n### Newly Added Documents\n${this.cfg.store.manifestFor(changedDocIds)}`);
     }
     const delta = this.cfg.board?.renderSince(this.initialBoardRev, this.cfg.scope);
     if (delta) {
-      zone3aSections.push(`\n\n### New Board Findings\n${delta}`);
+      zone3bParts.push(`\n\n### New Board Findings\n${delta}`);
     }
     const storedReports = this.depth === 0 ? this.cfg.store.list().filter((doc) => !doc.manifest) : [];
     if (storedReports.length > 0) {
@@ -495,13 +555,10 @@ export class AgentFoldAgent {
             `- id: \`${doc.id}\` — ${doc.title} — ~${doc.tokens.toLocaleString('en-US')} tokens, ${doc.lines.length.toLocaleString('en-US')} lines`,
         );
       if (storedReports.length > 50) lines.push(`... and ${storedReports.length - 50} more stored reports`);
-      zone3aSections.push(`\n\n### Stored Reports\n${lines.join('\n')}`);
+      zone3bParts.push(`\n\n### Stored Reports\n${lines.join('\n')}`);
     }
-    const zone3a = zone3aSections.join('');
-
-    const zone3bParts: string[] = [];
     if (latest !== undefined) {
-      if (zone3a !== '') {
+      if (zone3bParts.length > 0 || zone3a !== '') {
         zone3bParts.push(`\n\n${renderLatest(latest)}`);
       } else if (blocks.length > 0) {
         zone3bParts.push(`\n${renderLatest(latest)}`);
@@ -530,6 +587,9 @@ export class AgentFoldAgent {
         role: 'user',
         content: userContent,
         segments: userSegments,
+        ...(this.cfg.initialAttachments !== undefined && this.cfg.initialAttachments.length > 0
+          ? { attachments: this.cfg.initialAttachments }
+          : {}),
       },
     ];
   }
@@ -636,6 +696,7 @@ export class AgentFoldAgent {
         let truncatedReasoning = false;
         let reasoningOverBudget = false;
         try {
+          const rawEst = Math.max(1, this.estimator.count(messages.map((m) => m.content).join('\n')));
           const res = await this.completeWithSignal({
             messages,
             temperature: this.cfg.temperature,
@@ -644,6 +705,9 @@ export class AgentFoldAgent {
             cacheKey: `${this.name}:d${this.depth}`,
             priority: this.priority,
           });
+          if (res.usage.promptTokens > 0) {
+            this.tokenScale = Math.min(2.5, Math.max(0.8, res.usage.promptTokens / rawEst));
+          }
           this.usage.record(this.role, res.usage, res.latencyMs);
           this.addStepUsage(res.usage);
           this.emit({
@@ -758,6 +822,15 @@ export class AgentFoldAgent {
             'your previous read stopped mid-window at the token limit and you omitted <folding>; emit <folding> for the previous step and read the remaining lines before outputting <answer>',
           );
         }
+        if (p.errors.length === 0 && p.answer === undefined) {
+          const candidateActions = p.toolCalls && p.toolCalls.length > 0 ? p.toolCalls : p.toolCall ? [p.toolCall] : [];
+          for (const rawAct of candidateActions) {
+            const resolved = this.resolveToolAction(rawAct);
+            const tool = this.toolMap.get(resolved.name);
+            const validationErrors = validateToolArguments(resolved.name, resolved.arguments, tool?.parameters);
+            if (validationErrors.length > 0) p.errors.push(...validationErrors);
+          }
+        }
         if (p.errors.length === 0) {
           parsed = p;
           break;
@@ -869,8 +942,17 @@ export class AgentFoldAgent {
           );
         }
         this.emit({ type: 'fold', agent: this.name, step, outcome, requested: parsed.folding });
+        const maxGranular = this.cfg.maxGranularBlocks ?? 48;
+        if (maxGranular > 2 && this.state.blocks.length > maxGranular) {
+          const epochSize = Math.min(24, Math.max(2, Math.floor(maxGranular / 2)));
+          const oldest = this.state.blocks.slice(0, epochSize);
+          const joined = oldest
+            .map((b) => `[${b.from === b.to ? b.from : `${b.from}-${b.to}`}] ${b.summary}`)
+            .join(' | ');
+          const compactSummary = truncateToTokens(joined, 1200, this.estimator).text;
+          this.state.condensePrefix(epochSize, compactSummary);
+        }
       }
-
       if (parsed.answer !== undefined) {
         if (this.isSpecialist || !this.inProcessRun) {
           const answerStep = this.state.currentStep;
@@ -907,15 +989,26 @@ export class AgentFoldAgent {
         };
       }
 
-      const rawActions = (
+      const allParsedActions =
         parsed.toolCalls && parsed.toolCalls.length > 0
           ? parsed.toolCalls
-          : [parsed.toolCall ?? { name: 'none', arguments: {} }]
-      ).slice(0, Math.max(1, this.cfg.maxToolCallsPerStep ?? Number.POSITIVE_INFINITY));
+          : [parsed.toolCall ?? { name: 'none', arguments: {} }];
+      const toolCallLimit = Math.max(1, this.cfg.maxToolCallsPerStep ?? Number.POSITIVE_INFINITY);
+      const rawActions = allParsedActions.slice(0, toolCallLimit);
+      const droppedActions =
+        allParsedActions.length > rawActions.length
+          ? allParsedActions.slice(rawActions.length).map((a) => a.name)
+          : undefined;
       const actions = rawActions.map((a) => this.resolveToolAction(a));
       const action = actions[0] ?? { name: 'none', arguments: {} };
       const motivation = parsed.motivation ?? '';
-      this.pending = { step, motivation, action, actions };
+      this.pending = {
+        step,
+        motivation,
+        action,
+        actions,
+        ...(droppedActions !== undefined ? { droppedActions } : {}),
+      };
       this.emit({ type: 'tool_call', agent: this.name, step, action, actions, motivation });
       return {
         kind: 'tool',
@@ -950,7 +1043,12 @@ export class AgentFoldAgent {
       }
       rawObservation = parts.join('\n\n');
     }
-
+    if (pending.droppedActions && pending.droppedActions.length > 0) {
+      const limit = Math.max(1, this.cfg.maxToolCallsPerStep ?? 1);
+      rawObservation =
+        `[Note: ${pending.droppedActions.length} additional <tool_call> block(s) (${pending.droppedActions.join(', ')}) exceeded maxToolCallsPerStep=${limit} and were NOT executed; re-emit them in the next step if still needed.]\n\n` +
+        rawObservation;
+    }
     const maxTokens = this.cfg.maxObservationTokens ?? DEFAULT_MAX_OBSERVATION_TOKENS;
     const { text: truncatedText, truncated } = truncateToTokens(rawObservation, maxTokens, this.estimator);
     let finalObservation = truncatedText;
@@ -1136,6 +1234,7 @@ export class AgentFoldAgent {
         board: this.cfg.board,
         callStack: this.cfg.callStack,
         ancestorTasks: [...(this.cfg.ancestorTasks ?? []), this.cfg.followUpQuestion ?? this.currentTaskQuestion],
+        ...(this.cfg.cwd !== undefined ? { cwd: this.cfg.cwd } : {}),
       });
       const observation = await raceAbort(toolPromise, this.cfg.signal);
       return { text: observation };

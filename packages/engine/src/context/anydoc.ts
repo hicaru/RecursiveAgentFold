@@ -3,6 +3,11 @@
  * Missing addon or failed load resolves to null and degrades rich documents to skipped: "no-converter".
  */
 
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileP = promisify(execFile);
+
 export interface AnydocHandle {
   readonly formatFromPath: (path: string) => string | null;
   readonly toMarkdown: (path: string) => Promise<string>;
@@ -69,4 +74,68 @@ export function setAnydocForTest(handle: AnydocHandle | null | undefined): void 
     return;
   }
   cached = Promise.resolve(handle);
+}
+
+const JXA_PDFKIT_SCRIPT = [
+  'ObjC.import("Quartz");',
+  'function run(argv) {',
+  '  const url = $.NSURL.fileURLWithPath(argv[0]);',
+  '  const doc = $.PDFDocument.alloc.initWithURL(url);',
+  '  if (!doc || doc.isNil()) return "";',
+  '  const count = doc.pageCount;',
+  '  const pages = [];',
+  '  for (let i = 0; i < count; i++) {',
+  '    const page = doc.pageAtIndex(i);',
+  '    if (page && !page.isNil()) {',
+  '      const s = page.string;',
+  '      if (s && !s.isNil()) pages.push(ObjC.unwrap(s));',
+  '    }',
+  '  }',
+  '  return pages.join("\\n\\n");',
+  '}',
+].join('\n');
+
+const PY_PDF_SCRIPT = [
+  'import sys',
+  'p = sys.argv[1]',
+  'try:',
+  '    import pypdf',
+  '    r = pypdf.PdfReader(p)',
+  '    print("\\n\\n".join((page.extract_text() or "") for page in r.pages))',
+  '    sys.exit(0)',
+  'except Exception:',
+  '    pass',
+  'try:',
+  '    import fitz',
+  '    doc = fitz.open(p)',
+  '    print("\\n\\n".join(page.get_text() for page in doc))',
+  '    sys.exit(0)',
+  'except Exception:',
+  '    sys.exit(1)',
+].join('\n');
+
+/** Extract plain text from a PDF when @firecrawl/anydoc is unavailable. */
+export async function convertPdfFallback(absPath: string): Promise<string | null> {
+  const execOpts = { maxBuffer: 16 * 1024 * 1024, timeout: 30_000 };
+  try {
+    const { stdout } = await execFileP('pdftotext', ['-layout', '-nopgbrk', absPath, '-'], execOpts);
+    if (typeof stdout === 'string' && stdout.trim() !== '') return stdout;
+  } catch {
+    // pdftotext unavailable or failed; try platform/python fallbacks.
+  }
+  if (process.platform === 'darwin') {
+    try {
+      const { stdout } = await execFileP('osascript', ['-l', 'JavaScript', '-e', JXA_PDFKIT_SCRIPT, absPath], execOpts);
+      if (typeof stdout === 'string' && stdout.trim() !== '') return stdout;
+    } catch {
+      // PDFKit unavailable or failed; try python fallback.
+    }
+  }
+  try {
+    const { stdout } = await execFileP('python3', ['-c', PY_PDF_SCRIPT, absPath], execOpts);
+    if (typeof stdout === 'string' && stdout.trim() !== '') return stdout;
+  } catch {
+    // No python PDF library available.
+  }
+  return null;
 }

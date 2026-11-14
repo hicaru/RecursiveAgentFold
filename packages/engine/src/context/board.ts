@@ -306,7 +306,7 @@ export class ResearchBoard {
     const budget = typeof excludeScopeOrMaxTokens === 'number' ? excludeScopeOrMaxTokens : maxTokens;
     const lines: string[] = [];
     for (const e of this._entries) {
-      if (e.rev <= sinceRev && !e.inProgress) continue;
+      if (e.rev <= sinceRev) continue;
       if (excludeScope !== undefined && e.kind === 'branch' && normalizeScopeKey(e.scope) === excludeScope) {
         continue;
       }
@@ -417,8 +417,8 @@ export class ResearchBoard {
           };
         }
         if (out.failed === true) {
-          // Remove any in-progress board entry on failure. Preserve partial folded blocks
-          // when an interrupted multi-step specialist already condensed work; otherwise roll back.
+          // Remove any in-progress board entry on initial failure. Preserve partial folded blocks
+          // whenever an interrupted specialist already condensed work.
           if (targetSession.latestSummary === '') {
             this.removeBranchEntry(normScope);
             if (out.state.blocks.length > 0) {
@@ -426,6 +426,8 @@ export class ResearchBoard {
             } else {
               this._specialists.delete(normScope);
             }
+          } else if (out.state.blocks.length > targetSession.state.blocks.length) {
+            targetSession.state = out.state;
           }
           return { result: out.resultText, reused: false, scope: normScope, failed: true };
         }

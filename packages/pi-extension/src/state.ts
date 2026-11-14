@@ -3,12 +3,13 @@ import {
   BRANCH_REPORT_ID_PREFIX,
   FoldState,
   ResearchBoard,
+  type ChatMessage,
   type FoldStateSnapshot,
   type LLMQueryCache,
   type ResearchBoardSnapshot,
   type ToolAction,
 } from '@raf/engine/source';
-
+import { applyCacheBreakpointsToPayload, type ChatModel } from './llm.js';
 /** Custom entry types this extension appends to the session. */
 export const ENTRY_STATE = 'raf-state';
 export const ENTRY_MODE = 'raf-mode';
@@ -41,6 +42,10 @@ export interface PersistedState {
   readonly initialQuestion?: string;
   readonly initialManifest?: string;
   readonly initialDocIds?: readonly string[];
+  readonly initialDocRevs?: Readonly<Record<string, number>>;
+  readonly initialBoardSnapshot?: string;
+  readonly initialBoardRev?: number;
+  readonly sources?: readonly string[];
   readonly docSeq?: number;
   readonly board?: ResearchBoardSnapshot;
   readonly pending?: PendingCall;
@@ -48,9 +53,9 @@ export interface PersistedState {
 }
 
 /** Persisted documents per entry. Branch reports come first. */
-const MAX_PERSISTED_DOC_CHARS = 1_000_000;
-const MAX_PERSISTED_DOCS = 200;
-
+const MAX_PERSISTED_DOC_CHARS = 48_000;
+const MAX_PERSISTED_DOCS = 24;
+const MAX_SINGLE_REPORT_CHARS = 16_000;
 /**
  * In-memory RAF state of one pi session. It outlives single turns: the board,
  * the llm_query memo, stored documents, and the root fold state carry over.
@@ -70,6 +75,14 @@ export class SessionState {
   initialBoardSnapshot?: string;
   initialBoardRev?: number;
   pending?: PendingCall;
+  hostInstructions?: string;
+  lastPreparedMessages?: readonly ChatMessage[];
+  lastRootModel?: ChatModel;
+
+  decorateCachedPayload(payload: unknown): unknown {
+    if (this.lastPreparedMessages === undefined || this.lastRootModel === undefined) return undefined;
+    return applyCacheBreakpointsToPayload(payload, this.lastPreparedMessages, this.lastRootModel);
+  }
 
   /** Replace the carried-over state with a persisted entry. Workspace files are re-indexed later. */
   restore(state: PersistedState | undefined): void {
@@ -88,9 +101,18 @@ export class SessionState {
     this.initialBoardSnapshot = undefined;
     this.initialBoardRev = undefined;
     this.pending = undefined;
+    this.hostInstructions = undefined;
+    this.lastPreparedMessages = undefined;
+    this.lastRootModel = undefined;
     if (state === undefined) return;
     this.rootState = state.rootState;
     this.initialQuestion = state.initialQuestion;
+    this.initialManifest = state.initialManifest;
+    this.initialDocIds = state.initialDocIds !== undefined ? new Set(state.initialDocIds) : undefined;
+    this.initialDocRevs = state.initialDocRevs;
+    this.initialBoardSnapshot = state.initialBoardSnapshot;
+    this.initialBoardRev = state.initialBoardRev;
+    for (const s of state.sources ?? []) this.sources.add(s);
     this.pending = state.pending;
     if (state.board !== undefined) {
       try {
@@ -121,9 +143,14 @@ export class SessionState {
     let chars = 0;
     let count = 0;
     for (const [id, doc] of ordered) {
-      if (count >= MAX_PERSISTED_DOCS || chars + doc.text.length > MAX_PERSISTED_DOC_CHARS) continue;
-      docs[id] = { title: doc.title, text: doc.text };
-      chars += doc.text.length;
+      if (count >= MAX_PERSISTED_DOCS) break;
+      let text = doc.text;
+      if (id.startsWith(BRANCH_REPORT_ID_PREFIX) && text.length > MAX_SINGLE_REPORT_CHARS) {
+        text = `${text.slice(0, MAX_SINGLE_REPORT_CHARS)}\n…[truncated ${text.length - MAX_SINGLE_REPORT_CHARS} chars]`;
+      }
+      if (chars + text.length > MAX_PERSISTED_DOC_CHARS) continue;
+      docs[id] = { title: doc.title, text };
+      chars += text.length;
       count += 1;
     }
     let board: ResearchBoardSnapshot | undefined;
@@ -137,12 +164,124 @@ export class SessionState {
       status,
       ...(this.rootState !== undefined ? { rootState: this.rootState } : {}),
       ...(this.initialQuestion !== undefined ? { initialQuestion: this.initialQuestion } : {}),
+      ...(this.initialManifest !== undefined ? { initialManifest: this.initialManifest } : {}),
+      ...(this.initialDocIds !== undefined ? { initialDocIds: [...this.initialDocIds] } : {}),
+      ...(this.initialDocRevs !== undefined ? { initialDocRevs: this.initialDocRevs } : {}),
+      ...(this.initialBoardSnapshot !== undefined ? { initialBoardSnapshot: this.initialBoardSnapshot } : {}),
+      ...(this.initialBoardRev !== undefined ? { initialBoardRev: this.initialBoardRev } : {}),
+      ...(this.sources.size > 0 ? { sources: [...this.sources] } : {}),
       ...(this.docSeq > 0 ? { docSeq: this.docSeq } : {}),
       ...(board !== undefined ? { board } : {}),
       ...(this.pending !== undefined ? { pending: this.pending } : {}),
       ...(count > 0 ? { docs } : {}),
     };
   }
+}
+
+/** Build a compact RAF-native compaction summary without extra LLM calls. */
+export function buildCompactionSummary(session: SessionState): string {
+  const sections: string[] = [];
+  const settled = session.board.renderSettled();
+  if (settled !== undefined && settled.trim() !== '') {
+    sections.push(`## Shared Research Board\n${settled.trim()}`);
+  }
+  const blocks = session.rootState?.blocks ?? [];
+  if (blocks.length > 0) {
+    const blockLines = blocks.map((b) => `- [Steps ${b.from}-${b.to}] ${b.summary}`);
+    sections.push(`## Folded History\n${blockLines.join('\n')}`);
+  }
+  const latest = session.rootState?.latest;
+  if (latest !== undefined) {
+    const obs = latest.observation.replace(/\s+/g, ' ').trim();
+    sections.push(
+      `## Latest Interaction (Step ${latest.step}: ${latest.action.name})\n${obs.length > 600 ? `${obs.slice(0, 600)}…` : obs}`,
+    );
+  }
+  if (sections.length === 0) return '';
+  const combined = sections.join('\n\n');
+  return combined.length > 12_000 ? `${combined.slice(0, 11_997)}...` : combined;
+}
+
+/** Extract host project_context, skills, and addendum sections from Pi messages or systemPromptOptions. */
+export function extractHostInstructions(messages: readonly unknown[], systemPromptOptions?: unknown): string {
+  const merged: Record<string, string> = {};
+  const keys = ['project_context', 'skills', 'addendum'] as const;
+  for (const msg of messages) {
+    if (msg === null || typeof msg !== 'object') continue;
+    const rec = msg as { readonly role?: unknown; readonly sections?: unknown };
+    if (rec.role !== 'system' || rec.sections === null || typeof rec.sections !== 'object') continue;
+    const sections = rec.sections as Record<string, unknown>;
+    for (const k of keys) {
+      const val = sections[k];
+      if (val === null) delete merged[k];
+      else if (typeof val === 'string' && val.trim() !== '') merged[k] = val.trim();
+    }
+  }
+  if (systemPromptOptions !== null && typeof systemPromptOptions === 'object') {
+    if (
+      'sections' in systemPromptOptions &&
+      systemPromptOptions.sections !== null &&
+      typeof systemPromptOptions.sections === 'object'
+    ) {
+      const sec = systemPromptOptions.sections as Record<string, unknown>;
+      for (const k of keys) {
+        const val = sec[k];
+        if (merged[k] === undefined && typeof val === 'string' && val.trim() !== '') {
+          merged[k] = val.trim();
+        }
+      }
+    }
+    if (
+      merged.project_context === undefined &&
+      'contextFiles' in systemPromptOptions &&
+      Array.isArray(systemPromptOptions.contextFiles) &&
+      systemPromptOptions.contextFiles.length > 0
+    ) {
+      const filesText = systemPromptOptions.contextFiles
+        .filter(
+          (f): f is { readonly path: string; readonly content: string } =>
+            f !== null &&
+            typeof f === 'object' &&
+            'path' in f &&
+            typeof f.path === 'string' &&
+            'content' in f &&
+            typeof f.content === 'string',
+        )
+        .map((f) => `## ${f.path}\n${f.content.trim()}`)
+        .join('\n\n');
+      if (filesText !== '') merged.project_context = filesText;
+    }
+    if (
+      merged.skills === undefined &&
+      'skills' in systemPromptOptions &&
+      Array.isArray(systemPromptOptions.skills) &&
+      systemPromptOptions.skills.length > 0
+    ) {
+      const skillLines = systemPromptOptions.skills
+        .filter(
+          (s): s is { readonly name: string; readonly description?: string; readonly filePath?: string } =>
+            s !== null && typeof s === 'object' && 'name' in s && typeof s.name === 'string',
+        )
+        .map((s) => `- ${s.name}${s.description ? `: ${s.description}` : ''}${s.filePath ? ` (${s.filePath})` : ''}`);
+      if (skillLines.length > 0) {
+        merged.skills = `<available_skills>\n${skillLines.join('\n')}\n</available_skills>`;
+      }
+    }
+    if (
+      merged.addendum === undefined &&
+      'appendSystemPrompt' in systemPromptOptions &&
+      typeof systemPromptOptions.appendSystemPrompt === 'string' &&
+      systemPromptOptions.appendSystemPrompt.trim() !== ''
+    ) {
+      merged.addendum = systemPromptOptions.appendSystemPrompt.trim();
+    }
+  }
+  const parts: string[] = [];
+  for (const k of keys) {
+    const val = merged[k];
+    if (val !== undefined && val !== '') parts.push(val);
+  }
+  return parts.join('\n\n');
 }
 
 /** Narrow untrusted entry data to a persisted state. */

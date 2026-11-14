@@ -2,13 +2,13 @@
  * Multi-format file & directory ingestion into ContextStore documents.
  */
 
-import { existsSync, type Stats } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { defaultEstimator } from '../tokens.js';
 import { createLimiter } from '../util/concurrency.js';
-import { documentExtFromPath, getAnydoc, type AnydocHandle } from './anydoc.js';
+import { convertPdfFallback, documentExtFromPath, getAnydoc, type AnydocHandle } from './anydoc.js';
 import { captureStamp, readMdCache, writeMdCache } from './md-cache.js';
 import {
   checkPathSafety,
@@ -26,9 +26,33 @@ export const DEFAULT_MAX_WALK_FILES = 1200;
 export const DEFAULT_MAX_TOTAL_CHARS = 32 * 1024 * 1024;
 export const MAX_DOCUMENT_BYTES = 64 * 1024 * 1024;
 export const MAX_SKIPPED_REPORTED = 64;
+export const MTIME_FRESHNESS_WINDOW_MS = 2_000;
 
 const INGEST_CONCURRENCY = 8;
 
+export interface HostFileStat {
+  readonly mtimeMs: number;
+  readonly size: number;
+  isFile(): boolean;
+  isDirectory(): boolean;
+}
+
+export interface HostFileSystem {
+  stat(path: string): Promise<HostFileStat>;
+  readFile(path: string, encoding: 'utf8'): Promise<string>;
+  readdir?(
+    path: string,
+    opts: { withFileTypes: true },
+  ): Promise<readonly { readonly name: string; isFile(): boolean; isDirectory(): boolean }[]>;
+  lstat?(path: string): Promise<HostFileStat & { isSymbolicLink(): boolean }>;
+  realpath?(path: string): Promise<string>;
+  readBytes?(path: string, maxBytes: number): Promise<Uint8Array>;
+}
+
+const DEFAULT_HOST_FS: HostFileSystem = Object.freeze({
+  stat: (p: string) => stat(p),
+  readFile: (p: string, encoding: 'utf8') => readFile(p, encoding),
+});
 export interface IngestedFile {
   readonly id: string;
   readonly title: string;
@@ -49,8 +73,8 @@ export interface IngestOptions {
   readonly maxFiles?: number;
   readonly maxTotalChars?: number;
   readonly skipRichDocuments?: boolean;
+  readonly fs?: HostFileSystem;
 }
-
 export interface IngestResult {
   readonly source: string;
   readonly resolvedPath: string;
@@ -122,15 +146,52 @@ async function documentToIngestedFile(
   anydoc: AnydocHandle | null,
 ): Promise<FileIngestOutcome> {
   const docId = makeDocId(idPrefix, relPath);
-  if (anydoc === null) {
-    return { ok: false, skipped: Object.freeze({ path: docId, reason: 'no-converter' }) };
-  }
   const stamp = await captureStamp(absPath);
   if (stamp === undefined) {
     return { ok: false, skipped: Object.freeze({ path: docId, reason: 'unreadable' }) };
   }
   if (stamp.size > MAX_DOCUMENT_BYTES) {
     return { ok: false, skipped: Object.freeze({ path: docId, reason: 'oversized' }) };
+  }
+  if (anydoc === null) {
+    if (documentExtFromPath(absPath) === 'pdf') {
+      const cachedPdf = await readMdCache(absPath);
+      if (cachedPdf !== undefined) {
+        return {
+          ok: true,
+          value: Object.freeze({
+            id: docId,
+            title: docId,
+            path: absPath,
+            content: cachedPdf,
+            tokens: defaultEstimator.count(cachedPdf),
+            isDocument: true,
+            converted: false,
+            mtimeMs: stamp.mtimeMs,
+            byteSize: stamp.size,
+          }),
+        };
+      }
+      const pdfText = await convertPdfFallback(absPath);
+      if (pdfText !== null) {
+        await writeMdCache(absPath, pdfText, stamp).catch(() => {});
+        return {
+          ok: true,
+          value: Object.freeze({
+            id: docId,
+            title: docId,
+            path: absPath,
+            content: pdfText,
+            tokens: defaultEstimator.count(pdfText),
+            isDocument: true,
+            converted: true,
+            mtimeMs: stamp.mtimeMs,
+            byteSize: stamp.size,
+          }),
+        };
+      }
+    }
+    return { ok: false, skipped: Object.freeze({ path: docId, reason: 'no-converter' }) };
   }
   try {
     const cached = await readMdCache(absPath);
@@ -179,17 +240,28 @@ async function textToIngestedFile(
   relPath: string,
   idPrefix: string | undefined,
   maxBytes: number,
+  fsImpl: HostFileSystem,
 ): Promise<FileIngestOutcome> {
   const docId = makeDocId(idPrefix, relPath);
   try {
-    const s = await stat(absPath);
+    const s = await fsImpl.stat(absPath);
     if (s.size > maxBytes) {
       return { ok: false, skipped: Object.freeze({ path: docId, reason: 'oversized' }) };
     }
-    if (await isBinary(absPath)) {
+    if (fsImpl === DEFAULT_HOST_FS) {
+      if (await isBinary(absPath)) {
+        return { ok: false, skipped: Object.freeze({ path: docId, reason: 'binary' }) };
+      }
+    } else if (fsImpl.readBytes !== undefined) {
+      const buf = await fsImpl.readBytes(absPath, 8192);
+      if (buf.includes(0)) {
+        return { ok: false, skipped: Object.freeze({ path: docId, reason: 'binary' }) };
+      }
+    }
+    const content = await fsImpl.readFile(absPath, 'utf8');
+    if (fsImpl !== DEFAULT_HOST_FS && fsImpl.readBytes === undefined && content.includes('\0')) {
       return { ok: false, skipped: Object.freeze({ path: docId, reason: 'binary' }) };
     }
-    const content = await readFile(absPath, 'utf-8');
     return {
       ok: true,
       value: Object.freeze({
@@ -207,6 +279,34 @@ async function textToIngestedFile(
   } catch {
     return { ok: false, skipped: Object.freeze({ path: docId, reason: 'unreadable' }) };
   }
+}
+
+async function enumerateWithHostFs(
+  rootAbs: string,
+  fsImpl: HostFileSystem,
+  signal?: AbortSignal,
+): Promise<readonly string[]> {
+  const readdirFn = fsImpl.readdir;
+  if (readdirFn === undefined) return enumerateFiles(rootAbs, signal);
+  const out: string[] = [];
+  const walkDir = async (dirAbs: string, relDir: string): Promise<void> => {
+    if (signal?.aborted) return;
+    const entries = await readdirFn(dirAbs, { withFileTypes: true });
+    for (const entry of entries) {
+      if (signal?.aborted) return;
+      if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === 'dist') continue;
+      const rel = relDir === '' ? entry.name : `${relDir}/${entry.name}`;
+      const abs = join(dirAbs, entry.name);
+      if (entry.isDirectory()) {
+        await walkDir(abs, rel);
+      } else if (entry.isFile()) {
+        out.push(rel);
+      }
+    }
+  };
+  await walkDir(rootAbs, '');
+  out.sort();
+  return out;
 }
 
 function expandHome(rawPath: string): string {
@@ -230,13 +330,25 @@ export async function resolveIngestSource(
   }
   const expanded = expandHome(trimmed);
   const baseCwd = opts.cwd ?? process.cwd();
-  const resolvedPath = isAbsolute(expanded) ? resolve(expanded) : resolve(baseCwd, expanded);
+  const absCwd = resolve(baseCwd);
+  const fsImpl = opts.fs ?? DEFAULT_HOST_FS;
+  let resolvedPath = isAbsolute(expanded) ? resolve(expanded) : resolve(absCwd, expanded);
 
-  let s: Stats;
+  let s: HostFileStat;
   try {
-    s = await stat(resolvedPath);
+    s = await fsImpl.stat(resolvedPath);
   } catch {
-    return { ok: false, error: `add_document: path not found: ${resolvedPath}` };
+    if (!isAbsolute(expanded) && (expanded.startsWith('Users/') || expanded.startsWith('home/'))) {
+      const rooted = resolve('/', expanded);
+      try {
+        s = await fsImpl.stat(rooted);
+        resolvedPath = rooted;
+      } catch {
+        return { ok: false, error: `add_document: path not found: ${resolvedPath}` };
+      }
+    } else {
+      return { ok: false, error: `add_document: path not found: ${resolvedPath}` };
+    }
   }
 
   const sourceId =
@@ -244,10 +356,19 @@ export async function resolveIngestSource(
       ? opts.idPrefix === ''
         ? ''
         : sanitizeDocId(opts.idPrefix)
-      : deriveSourceId(trimmed, resolvedPath);
+      : opts.cwd !== undefined
+        ? resolvedPath === absCwd
+          ? ''
+          : isInsideRoot(resolvedPath, absCwd)
+            ? sanitizeDocId(relative(absCwd, resolvedPath))
+            : deriveSourceId(trimmed, resolvedPath)
+        : deriveSourceId(trimmed, resolvedPath);
 
   if (s.isDirectory()) {
-    const allPaths = await enumerateFiles(resolvedPath, opts.signal);
+    const allPaths =
+      opts.fs?.readdir !== undefined
+        ? await enumerateWithHostFs(resolvedPath, fsImpl, opts.signal)
+        : await enumerateFiles(resolvedPath, opts.signal);
     const maxFiles = opts.maxFiles !== undefined && opts.maxFiles > 0 ? opts.maxFiles : DEFAULT_MAX_WALK_FILES;
     const maxTotalChars =
       opts.maxTotalChars !== undefined && opts.maxTotalChars > 0 ? opts.maxTotalChars : DEFAULT_MAX_TOTAL_CHARS;
@@ -278,7 +399,10 @@ export async function resolveIngestSource(
             return;
           }
           const abs = join(resolvedPath, rel);
-          const safety = await checkPathSafety(abs, resolvedPath);
+          const safety =
+            fsImpl === DEFAULT_HOST_FS
+              ? await checkPathSafety(abs, resolvedPath)
+              : { ok: true as const, realAbs: abs };
           if (!safety.ok) {
             drops[i] = Object.freeze({ path: docPath, reason: safety.reason });
             return;
@@ -298,7 +422,7 @@ export async function resolveIngestSource(
             }
             return;
           }
-          const textRes = await textToIngestedFile(safety.realAbs, rel, sourceId, maxWalkBytes);
+          const textRes = await textToIngestedFile(safety.realAbs, rel, sourceId, maxWalkBytes, fsImpl);
           if (textRes.ok) {
             readChars += textRes.value.content.length;
             slots[i] = textRes.value;
@@ -368,8 +492,8 @@ export async function resolveIngestSource(
 
   // Single file
   let rel = basename(resolvedPath);
-  if (opts.idPrefix === undefined && opts.cwd !== undefined && isInsideRoot(resolvedPath, baseCwd)) {
-    const relFromCwd = relative(baseCwd, resolvedPath);
+  if (opts.idPrefix === undefined && opts.cwd !== undefined && isInsideRoot(resolvedPath, absCwd)) {
+    const relFromCwd = relative(absCwd, resolvedPath);
     if (relFromCwd !== '' && !relFromCwd.startsWith('..')) {
       rel = relFromCwd;
     }
@@ -377,7 +501,10 @@ export async function resolveIngestSource(
   if (isSensitivePath(rel) || isSensitivePath(trimmed.replace(/^\.\//, ''))) {
     return { ok: false, error: `add_document: refused sensitive path: ${resolvedPath}` };
   }
-  const safety = await checkPathSafety(resolvedPath, dirname(resolvedPath));
+  const safety =
+    fsImpl === DEFAULT_HOST_FS
+      ? await checkPathSafety(resolvedPath, dirname(resolvedPath))
+      : { ok: true as const, realAbs: resolvedPath };
   if (!safety.ok) {
     return {
       ok: false,
@@ -418,6 +545,7 @@ export async function resolveIngestSource(
     rel,
     singlePrefix,
     MAX_SINGLE_FILE_BYTES,
+    fsImpl,
   );
   if (!textRes.ok) {
     return {
@@ -443,7 +571,18 @@ export async function resolveIngestSource(
 }
 
 const PROMPT_PATH_TOKEN_RE =
-  /(?:~\/|\.\.?\/|\/)[A-Za-z0-9_.\-/]+|[A-Za-z0-9_.\-]+(?:\/[A-Za-z0-9_.\-]+)+/g;
+  /(?:~\/|\.\.?\/|\/)[\p{L}\p{N}_.\-/]+|[\p{L}\p{N}_.\-]+(?:\/[\p{L}\p{N}_.\-]+)+/gu;
+
+const EXCLUDED_PROMPT_DIRS: ReadonlySet<string> = new Set([
+  resolve(homedir()),
+  resolve(homedir(), 'Downloads'),
+  resolve(homedir(), 'Desktop'),
+  resolve(homedir(), 'Documents'),
+  '/tmp',
+  '/var',
+  '/Users',
+  '/home',
+]);
 
 export function extractPromptPaths(text: string, cwd: string = process.cwd()): readonly string[] {
   if (!text) return Object.freeze([]);
@@ -459,7 +598,7 @@ export function extractPromptPaths(text: string, cwd: string = process.cwd()): r
     if (/^[a-z]+:\/\//i.test(cleaned)) continue;
     const expanded = expandHome(cleaned);
     const abs = isAbsolute(expanded) ? resolve(expanded) : resolve(cwd, expanded);
-    if (seen.has(abs)) continue;
+    if (seen.has(abs) || EXCLUDED_PROMPT_DIRS.has(abs)) continue;
     try {
       if (existsSync(abs)) {
         seen.add(abs);

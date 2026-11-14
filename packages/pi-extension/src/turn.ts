@@ -1,8 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
-import type { AssistantMessage, JsonObject, JsonValue, Message, ThinkingContent, ToolCall, Usage } from '@earendil-works/pi-ai';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
+import type { AssistantMessage, ImageContent, JsonObject, JsonValue, Message, ThinkingContent, ToolCall, Usage } from '@earendil-works/pi-ai';
 import type {
   AgentToolResult,
   AgentToolUpdateCallback,
@@ -15,11 +15,13 @@ import {
   ContextStore,
   defaultRateLimitRegistry,
   extractPromptPaths,
+  MTIME_FRESHNESS_WINDOW_MS,
   normalizeBranchArguments,
   RecursiveAgentFold,
   sanitizeDocId,
   type AgentEvent,
   type AgentRunResult,
+  type ChatAttachment,
   type ChatMessage,
   type IngestResult,
   type JSONSchema,
@@ -40,7 +42,7 @@ import {
 import type { AgentMessage } from './pi-types.js';
 import type { Routes } from './routes.js';
 import { geminiSafeSchema } from './schema.js';
-import { contentText, renderTranscript, seedPriorTurns, type SessionState, type TurnStatus } from './state.js';
+import { contentText, extractHostInstructions, renderTranscript, seedPriorTurns, type SessionState, type TurnStatus } from './state.js';
 import type { CallSnapshot, RunTracker } from './tracker.js';
 
 /** Engine limits. Synthetic wall-clock step/tool timeouts are intentionally absent. */
@@ -287,12 +289,27 @@ export function fitArguments(args: JsonObject, schema: unknown): JsonObject {
     if (!(key in props)) delete working[key];
   }
 
+  // Map unambiguous snake_case <-> camelCase keys onto declared schema properties.
+  for (const key of Object.keys(working)) {
+    if (key in props) continue;
+    const val = working[key];
+    if (val === undefined) continue;
+    const camel = key.replace(/_([a-z])/g, (_, ch: string) => ch.toUpperCase());
+    const snake = key.replace(/([A-Z])/g, (_, ch: string) => `_${ch.toLowerCase()}`);
+    if (camel !== key && camel in props && working[camel] === undefined) {
+      working[camel] = val;
+      delete working[key];
+    } else if (snake !== key && snake in props && working[snake] === undefined) {
+      working[snake] = val;
+      delete working[key];
+    }
+  }
+
   for (const [key, propSchema] of Object.entries(props)) {
     if (!(key in working)) continue;
     const coerced = coerceValue(working[key], propSchema);
     if (coerced !== undefined) working[key] = coerced;
   }
-
   if ('edits' in props && Array.isArray(working.edits)) {
     working.edits = working.edits.map((item) => normalizeEditEntry(item));
   }
@@ -331,6 +348,7 @@ export interface TurnInit {
   readonly nativeTools: readonly ToolInfo[];
   readonly getSubagentTools?: () => readonly ToolInfo[];
   readonly history: readonly AgentMessage[];
+  readonly images?: readonly ImageContent[];
 }
 
 export interface RafToolDetails {
@@ -347,6 +365,7 @@ export type StepOutcome =
 interface ActiveToolCall {
   readonly ctx: ExtensionToolContext;
   usage: Usage | undefined;
+  images?: ImageContent[];
 }
 
 const activeCallStorage = new AsyncLocalStorage<ActiveToolCall>();
@@ -375,6 +394,8 @@ export class RafTurn {
   private step = 0;
   private readonly fallbackToolCalls: ActiveToolCall[] = [];
   private extraRootUsage: Usage[] = [];
+  private lastAttemptUsage?: Usage;
+  private readonly initialAttachments?: readonly ChatAttachment[];
   private lastError?: string;
   private finished = false;
 
@@ -391,7 +412,13 @@ export class RafTurn {
     this.tracker = init.tracker;
     this.store = store;
     this.workspace = init.ctx.cwd;
-
+    if (init.images !== undefined && init.images.length > 0) {
+      this.initialAttachments = init.images.map((img) => ({
+        kind: 'image' as const,
+        mimeType: img.mimeType,
+        data: img.data,
+      }));
+    }
     const { root, branch, reader } = init.routes;
     const rootGate = defaultRateLimitRegistry.get(root.model.provider);
     const branchGate = defaultRateLimitRegistry.get(branch.model.provider);
@@ -426,7 +453,10 @@ export class RafTurn {
       sessionId,
       rateLimitGate: rootGate,
       ...(rootThinking !== undefined ? { reasoning: rootThinking } : {}),
-      onUsage: (usage) => this.extraRootUsage.push(usage),
+      onUsage: (usage) => {
+        this.extraRootUsage.push(usage);
+        this.lastAttemptUsage = usage;
+      },
     });
     this.root = new PrefetchedRootClient(rootLive);
 
@@ -470,7 +500,7 @@ export class RafTurn {
       store,
       board: init.session.board,
       clearTransientOnRun: false,
-      ingest: { cwd: this.workspace, onIngest: (res) => this.keepIngested(res, true) },
+      ingest: { cwd: this.workspace, onIngest: (res) => this.keepIngested(res, false) },
       documentTools: RAF_DOC_TOOL_OPTIONS,
       maxDepth: init.config.depth,
       agent: {
@@ -515,10 +545,15 @@ export class RafTurn {
     for (const [id, doc] of session.docs) {
       try {
         const isReport = id.startsWith(BRANCH_REPORT_ID_PREFIX);
-        store.add(doc.text, { id, title: doc.title, manifest: !isReport, transient: isReport });
+        const isTransient = isReport || id.startsWith('tool_');
+        store.add(doc.text, { id, title: doc.title, manifest: !isTransient, transient: isTransient });
       } catch {
         session.docs.delete(id);
       }
+    }
+    if (session.hostInstructions === undefined) {
+      const extracted = extractHostInstructions(init.history);
+      if (extracted !== '') session.hostInstructions = extracted;
     }
     const holder: { turn?: RafTurn } = {};
     const rootTools = Object.freeze(init.nativeTools.map((info) => bridgeTool(info, () => holder.turn)));
@@ -621,6 +656,22 @@ export class RafTurn {
         // An empty or unreadable workspace is not fatal.
       }
     }
+    const existingSources = [...session.sources].filter((src) => src !== this.workspace);
+    for (const src of existingSources) {
+      const loaded = this.store
+        .list()
+        .some((d) => d.absPath === src || (d.absPath !== undefined && d.absPath.startsWith(src.endsWith(sep) ? src : src + sep)));
+      if (loaded) continue;
+      try {
+        const res = await this.store.addPath(src, {
+          cwd: this.workspace,
+          ...(signal !== undefined ? { signal } : {}),
+        });
+        this.keepIngested(res, false);
+      } catch {
+        // Skip sources deleted from disk before resume; preserved initialManifest keeps Zone 1 cache intact.
+      }
+    }
     const promptPaths = extractPromptPaths(this.question, this.workspace).filter((p) => !session.sources.has(p));
     if (promptPaths.length > 0) {
       const results = await this.store.addPaths(promptPaths, {
@@ -628,7 +679,7 @@ export class RafTurn {
         ...(signal !== undefined ? { signal } : {}),
       });
       for (const res of results) {
-        this.keepIngested(res, true);
+        this.keepIngested(res, false);
         session.sources.add(res.resolvedPath);
         session.board.record({
           agent: 'root',
@@ -656,6 +707,10 @@ export class RafTurn {
       ...(session.initialDocRevs !== undefined ? { initialDocRevs: session.initialDocRevs } : {}),
       ...(session.initialBoardRev !== undefined ? { initialBoardRev: session.initialBoardRev } : {}),
       ...(session.initialBoardSnapshot !== undefined ? { initialBoardSnapshot: session.initialBoardSnapshot } : {}),
+      ...(this.initialAttachments !== undefined ? { initialAttachments: this.initialAttachments } : {}),
+      ...(session.hostInstructions !== undefined && session.hostInstructions !== ''
+        ? { systemPromptAddendum: session.hostInstructions }
+        : {}),
     };
     if (session.rootState !== undefined) {
       this.engine.begin(session.initialQuestion ?? question, {
@@ -741,10 +796,16 @@ export class RafTurn {
 
   /** Replace the native request with the AgentFold context. */
   prepareRequest(messages: readonly AgentMessage[]): Message[] {
+    if (this.session.hostInstructions === undefined) {
+      const extracted = extractHostInstructions(messages);
+      if (extracted !== '') this.session.hostInstructions = extracted;
+    }
     if (this.pendingCallIds.length > 0) this.submitObservations(messages, this.pendingCallIds);
     const prepared = this.engine.prepareRootMessages();
     this.prepared = prepared;
     this.lastPrepared = prepared;
+    this.session.lastPreparedMessages = prepared;
+    this.session.lastRootModel = this.routes.root.model;
     this.awaiting = true;
     this.tracker.rootRequest();
     return toPiMessages(prepared, this.routes.root.model);
@@ -800,15 +861,20 @@ export class RafTurn {
     const label = String(args.url ?? args.path ?? args.query ?? args.command ?? toolName);
     const id = this.nextIndexedId(toolName);
     try {
-      const doc = this.store.add(text, { id, title: `${toolName}: ${label.slice(0, 120)}` });
-      this.session.docs.set(id, { title: doc.title, text, persist: true });
+      const doc = this.store.add(text, {
+        id,
+        title: `${toolName}: ${label.slice(0, 120)}`,
+        manifest: false,
+        transient: true,
+      });
+      this.session.docs.set(id, { title: doc.title, text, persist: false });
       return `[Indexed in ContextStore as document "${id}" (${doc.lines.length} lines, ~${doc.tokens} tokens) — use search, outline, grep, tally, read, branch(scope="${id}"), or llm_query on "${id}"]\n${text}`;
     } catch {
       return text;
     }
   }
 
-  private refreshFile(target: string): void {
+  refreshFile(target: string): void {
     try {
       const abs = isAbsolute(target) ? resolve(target) : resolve(this.workspace, target);
       const st = statSync(abs, { throwIfNoEntry: false });
@@ -818,7 +884,7 @@ export class RafTurn {
         existing !== undefined &&
         existing.mtimeMs === st.mtimeMs &&
         existing.byteSize === st.size &&
-        Math.abs(Date.now() - st.mtimeMs) >= 15
+        Math.abs(Date.now() - st.mtimeMs) >= MTIME_FRESHNESS_WINDOW_MS
       ) {
         return;
       }
@@ -888,12 +954,16 @@ export class RafTurn {
     }
     this.prepared = undefined;
     this.lastPrepared = undefined;
-    this.extraRootUsage = [];
+    this.clearRootAttemptUsage();
     let usage: Usage = message.usage;
     try {
       const step = await this.engine.next();
-      usage = this.extraRootUsage.reduce(addUsage, message.usage);
-      for (const extra of this.extraRootUsage) this.tracker.addCost('root', extra.cost.total);
+      const lastAttempt = this.lastAttemptUsage;
+      if (this.extraRootUsage.length > 0 && lastAttempt !== undefined) {
+        const summed = this.extraRootUsage.reduce(addUsage, message.usage);
+        usage = { ...lastAttempt, cost: summed.cost };
+        for (const extra of this.extraRootUsage) this.tracker.addCost('root', extra.cost.total);
+      }
       const thinking = thinkingBlocks(message, step.kind === 'done' ? undefined : step.reasoning);
       if (step.kind === 'tool') {
         this.step = step.step;
@@ -1061,7 +1131,10 @@ export class RafTurn {
       this.tracker.endCall(toolCallId);
       const call = this.tracker.callSnapshot(toolCallId);
       return {
-        content: [{ type: 'text', text: observation }],
+        content: [
+          { type: 'text', text: observation },
+          ...(frame.images !== undefined ? frame.images : []),
+        ],
         ...(frame.usage !== undefined ? { usage: frame.usage } : {}),
         details: {
           tool: name,
@@ -1091,14 +1164,59 @@ export class RafTurn {
   }
 
   /** Run a native pi tool for a branch sub-agent through pi's validation and hooks. */
-  async runNative(name: string, args: Record<string, unknown>, signal: AbortSignal | undefined): Promise<string> {
-    const ctx = this.currentToolCtx();
+  async runNative(
+    name: string,
+    args: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    cwd?: string,
+  ): Promise<string> {
+    const active = this.currentActiveCall();
+    const ctx = active?.ctx;
     if (ctx === undefined) throw new Error(`${name} can run only inside a RAF tool call`);
-    const outcome = await ctx.executeTool(name, args, signal !== undefined ? { signal } : {});
+    let execArgs = args;
+    if (cwd !== undefined && cwd !== this.workspace) {
+      const nextArgs: Record<string, unknown> = { ...args };
+      const lowerName = name.toLowerCase();
+      if (lowerName === 'bash') {
+        if (typeof nextArgs.command === 'string' && nextArgs.command.trim() !== '') {
+          const quoted = `'${cwd.replace(/'/g, "'\\''")}'`;
+          nextArgs.command = `cd ${quoted} && ${nextArgs.command}`;
+        }
+      } else if (
+        lowerName === 'write' ||
+        lowerName === 'edit' ||
+        lowerName === 'read' ||
+        lowerName === 'ls' ||
+        lowerName === 'find' ||
+        lowerName === 'glob'
+      ) {
+        if (typeof nextArgs.path === 'string' && nextArgs.path.trim() !== '' && !isAbsolute(nextArgs.path)) {
+          nextArgs.path = resolve(cwd, nextArgs.path);
+        }
+        if (typeof nextArgs.file_path === 'string' && nextArgs.file_path.trim() !== '' && !isAbsolute(nextArgs.file_path)) {
+          nextArgs.file_path = resolve(cwd, nextArgs.file_path);
+        }
+        if ((lowerName === 'ls' || lowerName === 'find' || lowerName === 'glob') && nextArgs.path === undefined && nextArgs.file_path === undefined) {
+          nextArgs.path = cwd;
+        }
+      }
+      execArgs = nextArgs;
+    }
+    const outcome = await ctx.executeTool(name, execArgs, signal !== undefined ? { signal } : {});
+    if (Array.isArray(outcome.result.content)) {
+      for (const block of outcome.result.content) {
+        if (block !== null && typeof block === 'object' && block.type === 'image') {
+          const img = block as ImageContent;
+          if (active !== undefined && typeof img.data === 'string' && typeof img.mimeType === 'string') {
+            active.images ??= [];
+            active.images.push(img);
+          }
+        }
+      }
+    }
     const text = resultText(outcome.result.content, outcome.isError);
-    return this.indexResult(name, args, text, outcome.isError);
+    return this.indexResult(name, execArgs, text, outcome.isError);
   }
-
   /** End the turn and abort any unfinished background work. */
   finish(status: TurnStatus): void {
     if (this.finished) return;
@@ -1117,6 +1235,11 @@ export class RafTurn {
     this.lastPrepared = undefined;
     if (!this.controller.signal.aborted) this.controller.abort(new Error(`RAF turn ${status}`));
     this.tracker.endRun();
+  }
+
+  private clearRootAttemptUsage(): void {
+    this.extraRootUsage = [];
+    this.lastAttemptUsage = undefined;
   }
 
   get error(): string | undefined {
@@ -1191,11 +1314,10 @@ function bridgeTool(info: BridgeableShape, turn: () => RafTurn | undefined): Too
       const current = turn();
       if (current === undefined) throw new Error(`${info.name}: RAF turn is not active`);
       const fitted = fitArguments(toJsonObject(args), info.parameters);
-      return current.runNative(info.name, fitted, toolCtx.signal);
+      return current.runNative(info.name, fitted, toolCtx.signal, toolCtx.cwd);
     },
   };
 }
-
 export function progressLine(call: CallSnapshot | undefined): string {
   if (call === undefined) return 'running…';
   const running = call.agents.filter((agent) => agent.status === 'running').length;

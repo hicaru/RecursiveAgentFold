@@ -1,3 +1,5 @@
+import { realpathSync } from 'node:fs';
+import { basename, isAbsolute, resolve, sep } from 'node:path';
 import { CharRatioEstimator, defaultEstimator, type TokenEstimator } from '../tokens.js';
 import { Bm25DocumentIndex, type SearchOptions, type SearchWindowHit } from './bm25.js';
 import {
@@ -8,6 +10,13 @@ import {
   type IngestResult,
 } from './ingest.js';
 
+function canonicalAbsPath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+}
 export const VALID_DOC_ID_RE = /^[A-Za-z0-9_.\-]+(?:\/[A-Za-z0-9_.\-]+)*$/;
 const MAX_MANIFEST_DOCS = 200;
 export interface StoredDocument {
@@ -59,12 +68,59 @@ export interface AddDocumentOptions {
   readonly transient?: boolean;
 }
 
-export interface GrepMatch {
-  readonly docId: string;
+export interface GrepContextLine {
   readonly line: number;
   readonly text: string;
 }
 
+export interface GrepMatch {
+  readonly docId: string;
+  readonly line: number;
+  readonly text: string;
+  readonly before?: readonly GrepContextLine[];
+  readonly after?: readonly GrepContextLine[];
+}
+
+function globToRegExp(glob: string): RegExp {
+  const normalized = glob.trim().replace(/\\/g, '/');
+  let out = '';
+  for (let i = 0; i < normalized.length; i++) {
+    const ch = normalized[i] ?? '';
+    if (ch === '*') {
+      if (normalized[i + 1] === '*') {
+        if (normalized[i + 2] === '/') {
+          out += '(?:.*/)?';
+          i += 2;
+        } else {
+          out += '.*';
+          i += 1;
+        }
+      } else {
+        out += '[^/]*';
+      }
+    } else if (ch === '?') {
+      out += '[^/]';
+    } else if (ch === '{') {
+      const close = normalized.indexOf('}', i + 1);
+      if (close > i + 1) {
+        const alts = normalized
+          .slice(i + 1, close)
+          .split(',')
+          .map((a) => a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+        out += `(?:${alts.join('|')})`;
+        i = close;
+      } else {
+        out += '\\{';
+      }
+    } else if (/[.*+?^${}()|[\]\\]/.test(ch)) {
+      out += `\\${ch}`;
+    } else {
+      out += ch;
+    }
+  }
+  const prefix = normalized.includes('/') ? '^' : '(?:^|/)';
+  return new RegExp(`${prefix}${out}$`, 'i');
+}
 export interface ContextStoreOptions {
   readonly estimator?: TokenEstimator;
   /** Lines longer than this are hard-wrapped so chunking stays line-aligned. */
@@ -127,14 +183,27 @@ export class ContextStore {
   }
 
   add(text: string, opts: AddDocumentOptions = {}): StoredDocument {
-    const id = opts.id ?? `doc${this.docs.size + 1}`;
-    if (!VALID_DOC_ID_RE.test(id)) throw new Error(`invalid document id "${id}"`);
-    const prev = this.docs.get(id);
-    const lines: string[] = [];
-    for (const raw of text.split(/\r?\n/)) {
-      if (raw.length <= this.maxLineChars) lines.push(raw);
-      else for (let i = 0; i < raw.length; i += this.maxLineChars) lines.push(raw.slice(i, i + this.maxLineChars));
+    const requestedId = opts.id ?? `doc${this.docs.size + 1}`;
+    if (!VALID_DOC_ID_RE.test(requestedId)) throw new Error(`invalid document id "${requestedId}"`);
+    const canonOptsAbsPath = opts.absPath !== undefined ? canonicalAbsPath(opts.absPath) : undefined;
+    let id = requestedId;
+    if (canonOptsAbsPath !== undefined) {
+      const existingId = this.pathIndex.get(canonOptsAbsPath);
+      if (existingId !== undefined && existingId !== requestedId) {
+        const keepOld =
+          !existingId.startsWith('file_') &&
+          !existingId.startsWith('tool_') &&
+          existingId.length <= requestedId.length;
+        if (keepOld) {
+          id = existingId;
+        } else {
+          this.delete(existingId);
+        }
+      }
     }
+    const prev = this.docs.get(id);
+    const trimmedText = text.endsWith('\r\n') ? text.slice(0, -2) : text.endsWith('\n') ? text.slice(0, -1) : text;
+    const lines: string[] = text.length === 0 ? [] : trimmedText.split(/\r?\n/);
     const baseCount = this.estimator.count(text);
     const calibratedRatio =
       opts.tokens && opts.tokens > 0 && text.length > 0 ? Math.max(0.8, text.length / opts.tokens) : undefined;
@@ -143,7 +212,7 @@ export class ContextStore {
         ? new CharRatioEstimator(calibratedRatio, Math.min(calibratedRatio, 1.4))
         : this.estimator;
     const rev = ++this._rev;
-    const absPath = opts.absPath ?? prev?.absPath;
+    const absPath = canonOptsAbsPath ?? prev?.absPath;
     const mtimeMs = opts.mtimeMs;
     const byteSize = opts.byteSize;
     const transient = opts.transient ?? prev?.transient;
@@ -199,7 +268,7 @@ export class ContextStore {
   }
 
   findByAbsPath(absPath: string): StoredDocument | undefined {
-    const id = this.pathIndex.get(absPath);
+    const id = this.pathIndex.get(canonicalAbsPath(absPath)) ?? this.pathIndex.get(absPath);
     return id !== undefined ? this.docs.get(id) : undefined;
   }
 
@@ -274,17 +343,41 @@ export class ContextStore {
   }
 
   /** Resolve a document ID, path, or directory prefix to one or more stored document IDs. */
-  resolveIds(raw: string): string[] {
+  resolveIds(raw: string, cwd?: string): string[] {
+    const trimmed = raw.trim();
+    if (trimmed === '.' || trimmed === './') {
+      if (cwd !== undefined) {
+        const absCwd = resolve(cwd);
+        const prefix = absCwd.endsWith(sep) ? absCwd : absCwd + sep;
+        return [...this.docs.values()]
+          .filter((d) => d.manifest && (d.absPath === undefined || d.absPath === absCwd || d.absPath.startsWith(prefix)))
+          .map((d) => d.id);
+      }
+      return this.listManifest().map((d) => d.id);
+    }
     const single = this.resolveId(raw);
     if (single !== undefined) return [single];
-    const clean = sanitizeDocId(raw.trim().replace(/^\.\/+|^\/+/, ''));
-    if (!clean) return [];
-    const prefix = `${clean}/`;
-    const matches: string[] = [];
-    for (const doc of this.docs.values()) {
-      if (doc.id.startsWith(prefix)) matches.push(doc.id);
+    const clean = sanitizeDocId(trimmed.replace(/^\.\/+|^\/+/, ''));
+    const matches = new Set<string>();
+    if (clean) {
+      const prefix = `${clean}/`;
+      for (const doc of this.docs.values()) {
+        if (doc.id.startsWith(prefix)) matches.add(doc.id);
+      }
     }
-    return matches;
+    if (cwd !== undefined || isAbsolute(trimmed)) {
+      const resolvedDir = isAbsolute(trimmed) ? resolve(trimmed) : resolve(cwd ?? process.cwd(), trimmed);
+      if (cwd !== undefined && resolvedDir === resolve(cwd)) {
+        return this.resolveIds('.', cwd);
+      }
+      const dirPrefix = resolvedDir.endsWith(sep) ? resolvedDir : resolvedDir + sep;
+      for (const doc of this.docs.values()) {
+        if (doc.absPath !== undefined && (doc.absPath === resolvedDir || doc.absPath.startsWith(dirPrefix))) {
+          matches.add(doc.id);
+        }
+      }
+    }
+    return [...matches];
   }
 
   get(id: string): StoredDocument {
@@ -292,10 +385,40 @@ export class ContextStore {
     if (direct) return direct;
     const resolvedId = this.resolveId(id);
     const d = resolvedId !== undefined ? this.docs.get(resolvedId) : undefined;
-    if (!d) throw new Error(`Unknown document "${id}". Available: ${[...this.docs.keys()].join(', ') || '(none)'}`);
+    if (!d) {
+      const parts: string[] = [];
+      const shortId = id.length > 80 ? `${id.slice(0, 80)}…` : id;
+      parts.push(`Unknown document "${shortId}".`);
+      if (id.includes('\n') || id.includes('\r') || id.includes('<')) {
+        parts.push('Hint: document argument contains newline or XML markup; pass only the document ID in <document>.');
+      }
+      const rawNeedle = id.trim().toLowerCase();
+      const needle = rawNeedle.split(/[\s<>]+/).find(Boolean) ?? rawNeedle;
+      const needleBase = needle.includes('/') ? needle.slice(needle.lastIndexOf('/') + 1) : needle;
+      const scored: Array<{ readonly id: string; readonly score: number }> = [];
+      for (const candidate of this.docs.keys()) {
+        const lower = candidate.toLowerCase();
+        const base = lower.includes('/') ? lower.slice(lower.lastIndexOf('/') + 1) : lower;
+        let score = 0;
+        if (needle !== '' && lower === needle) score = 100;
+        else if (needleBase !== '' && base === needleBase) score = 80;
+        else if (needle !== '' && (lower.includes(needle) || needle.includes(lower))) score = 60;
+        else if (needleBase !== '' && (base.includes(needleBase) || needleBase.includes(base))) score = 40;
+        if (score > 0 || this.docs.size <= 8) {
+          scored.push({ id: candidate, score });
+        }
+      }
+      scored.sort((a, b) => b.score - a.score || a.id.length - b.id.length || a.id.localeCompare(b.id));
+      const suggestions = scored.slice(0, 8).map((s) => s.id);
+      if (suggestions.length > 0) {
+        parts.push(`Closest: ${suggestions.join(', ')}.`);
+      }
+      parts.push(`(${this.docs.size} documents total; call list_documents to inspect)`);
+      const msg = parts.join(' ');
+      throw new Error(msg.length > 600 ? `${msg.slice(0, 597)}...` : msg);
+    }
     return d;
   }
-
   list(): StoredDocument[] {
     return [...this.docs.values()];
   }
@@ -411,7 +534,11 @@ export class ContextStore {
     if (e < s) return { text: '', startLine: s, endLine: e, totalLines: doc.lines.length };
     const text = doc.lines
       .slice(s - 1, e)
-      .map((l, i) => `${s + i}| ${l}`)
+      .map((l, i) => {
+        const clipped =
+          l.length > this.maxLineChars ? `${l.slice(0, this.maxLineChars)}…[+${l.length - this.maxLineChars} chars]` : l;
+        return `${s + i}| ${clipped}`;
+      })
       .join('\n');
     return { text, startLine: s, endLine: e, totalLines: doc.lines.length };
   }
@@ -470,17 +597,48 @@ export class ContextStore {
 
   grep(
     pattern: string,
-    opts: { docIds?: string[]; ignoreCase?: boolean; maxMatches?: number; maxLineChars?: number } = {},
+    opts: {
+      docIds?: string[];
+      ignoreCase?: boolean;
+      maxMatches?: number;
+      maxLineChars?: number;
+      literal?: boolean;
+      glob?: string;
+      context?: number;
+    } = {},
   ): { matches: GrepMatch[]; total: number; perDoc: Record<string, number> } {
-    const re = new RegExp(pattern, opts.ignoreCase === false ? '' : 'i');
+    const rawPat = opts.literal === true ? pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : pattern;
+    const re = new RegExp(rawPat, opts.ignoreCase === false ? '' : 'i');
+    const globRe = opts.glob !== undefined && opts.glob.trim() !== '' ? globToRegExp(opts.glob) : undefined;
+    const ctxLines =
+      typeof opts.context === 'number' && Number.isFinite(opts.context)
+        ? Math.max(0, Math.min(10, Math.floor(opts.context)))
+        : 0;
     const max = opts.maxMatches ?? 50;
     const maxChars = opts.maxLineChars ?? 300;
     const perDocMatches: GrepMatch[][] = [];
     const perDoc: Record<string, number> = {};
     let total = 0;
     const ids = opts.docIds?.length ? opts.docIds : this.listManifest().map((d) => d.id);
+    const clipLine = (line: string, m?: RegExpExecArray | null): string => {
+      if (line.length <= maxChars) return line;
+      if (m) {
+        const matchIdx = m.index;
+        const matchLen = m[0].length;
+        if (matchIdx + matchLen <= maxChars) {
+          return `${line.slice(0, maxChars)}…[+${line.length - maxChars} chars]…`;
+        }
+        const start = Math.max(0, Math.min(line.length - maxChars, matchIdx - Math.floor(maxChars / 3)));
+        const end = Math.min(line.length, start + maxChars);
+        return `${start > 0 ? '…' : ''}${line.slice(start, end)}${end < line.length ? `…[+${line.length - end} chars]…` : ''}`;
+      }
+      return `${line.slice(0, maxChars)}…[+${line.length - maxChars} chars]…`;
+    };
     for (const id of ids) {
       const doc = this.get(id);
+      if (globRe !== undefined && !globRe.test(doc.id) && !globRe.test(doc.title) && !globRe.test(basename(doc.id))) {
+        continue;
+      }
       perDoc[id] = 0;
       const docMatches: GrepMatch[] = [];
       for (let i = 0; i < doc.lines.length; i++) {
@@ -490,21 +648,24 @@ export class ContextStore {
           total++;
           perDoc[id]++;
           if (docMatches.length < max) {
-            let text: string;
-            if (line.length <= maxChars) {
-              text = line;
-            } else {
-              const matchIdx = m.index;
-              const matchLen = m[0].length;
-              if (matchIdx + matchLen <= maxChars) {
-                text = `${line.slice(0, maxChars)}…`;
-              } else {
-                const start = Math.max(0, Math.min(line.length - maxChars, matchIdx - Math.floor(maxChars / 3)));
-                const end = Math.min(line.length, start + maxChars);
-                text = `${start > 0 ? '…' : ''}${line.slice(start, end)}${end < line.length ? '…' : ''}`;
+            const text = clipLine(line, m);
+            const before: GrepContextLine[] = [];
+            const after: GrepContextLine[] = [];
+            if (ctxLines > 0) {
+              for (let k = Math.max(0, i - ctxLines); k < i; k++) {
+                before.push({ line: k + 1, text: clipLine(doc.lines[k] ?? '') });
+              }
+              for (let k = i + 1; k <= Math.min(doc.lines.length - 1, i + ctxLines); k++) {
+                after.push({ line: k + 1, text: clipLine(doc.lines[k] ?? '') });
               }
             }
-            docMatches.push({ docId: id, line: i + 1, text });
+            docMatches.push({
+              docId: id,
+              line: i + 1,
+              text,
+              ...(before.length > 0 ? { before } : {}),
+              ...(after.length > 0 ? { after } : {}),
+            });
           }
         }
       }

@@ -162,6 +162,7 @@ interface ExtractedTag {
 }
 
 const DSML_MARKER_RE = /<\/?[|｜\uff5c]+DSML[|｜\uff5c]+/i;
+const PROTOCOL_PARAM_MARKUP_RE = /<\s*\/?\s*(?:tool_call|parameter|param|folding|folded_output|motivation|answer)\b/i;
 
 const ATTR_STYLE_PARAM_OPEN_RE = /<\s*(?:param_name|param|parameter|arg)\s*=\s*["']([^"'<>]+)["']\s*>/gi;
 const ATTR_STYLE_PARAM_CLOSE_RE = /<\s*\/\s*(?:param_name|param|arg)\s*>/gi;
@@ -666,9 +667,11 @@ function extractTaskElements(xmlText: string): Array<{ scope?: string; task: str
 function tryParseStructuredToolCall(
   raw: string,
   attrs: string | undefined,
+  errors?: string[],
   fallbackName?: string,
   contextText?: string,
 ): ToolAction | undefined {
+  const initialErrCount = errors?.length ?? 0;
   const topAttrs = parseXmlAttributes(attrs ?? '');
   let toolName: string | undefined =
     topAttrs.name ?? topAttrs.tool ?? topAttrs.tool_name ?? topAttrs.function ?? fallbackName;
@@ -689,7 +692,7 @@ function tryParseStructuredToolCall(
     if (outerTagLower === 'invoke' || outerTagLower === 'function_call' || outerTagLower === 'tool') {
       toolName = outerAttrs.name ?? outerAttrs.tool ?? outerAttrs.function ?? toolName;
       body = stripCodeFence(outerWrap[3]);
-    } else if (!KNOWN_PARAM_NAMES[outerTag] && !KNOWN_PARAM_NAMES[outerTagLower]) {
+    } else if (toolName === undefined && !KNOWN_PARAM_NAMES[outerTag] && !KNOWN_PARAM_NAMES[outerTagLower]) {
       toolName = toolName ?? outerTag;
       for (const [k, v] of Object.entries(outerAttrs)) {
         if (k === 'name' || k === 'tool') continue;
@@ -789,17 +792,17 @@ function tryParseStructuredToolCall(
         pos = closeMatch.end;
       } else {
         const attrKeyForScalar = tagAttrs.name ?? tagAttrs.key ?? rawTagName;
-        if (!MULTILINE_PRESERVE_KEYS[attrKeyForScalar]) {
-          const strayClose = /<\s*\/\s*[a-zA-Z_][a-zA-Z0-9_-]*\s*>/g;
-          strayClose.lastIndex = contentStart;
-          const nextClose = strayClose.exec(body);
-          if (nextClose) {
-            inner = body.slice(contentStart, nextClose.index);
-            pos = nextClose.index + nextClose[0].length;
-          } else {
-            inner = body.slice(contentStart);
-            pos = body.length;
-          }
+        if (MULTILINE_PRESERVE_KEYS[attrKeyForScalar]) {
+          errors?.push('unclosed <' + rawTagName + '> tag in <tool_call>');
+          return undefined;
+        }
+        errors?.push('unclosed <' + rawTagName + '> parameter tag in <tool_call>');
+        const nextBoundaryRe = /<\s*(?:parameter|param|arg|field)\b|<\s*\/\s*tool_call\b[^>]*>|<\s*\/\s*[a-zA-Z_][a-zA-Z0-9_-]*\s*>/gi;
+        nextBoundaryRe.lastIndex = contentStart;
+        const nextBoundary = nextBoundaryRe.exec(body);
+        if (nextBoundary) {
+          inner = body.slice(contentStart, nextBoundary.index);
+          pos = /^<\s*\//.test(nextBoundary[0]) ? nextBoundary.index + nextBoundary[0].length : nextBoundary.index;
         } else {
           inner = body.slice(contentStart);
           pos = body.length;
@@ -821,6 +824,10 @@ function tryParseStructuredToolCall(
       attrKey !== undefined
         ? attrKey
         : rawTagName;
+    if (paramKey === 'param_name') {
+      errors?.push('replace placeholder <param_name> with the actual parameter tag name');
+      return undefined;
+    }
 
     if (paramKey === 'task') {
       const scopeAttr = tagAttrs.scope?.trim();
@@ -846,9 +853,23 @@ function tryParseStructuredToolCall(
       continue;
     }
 
+    const rawWithoutCdata = inner.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '');
+    if (PROTOCOL_PARAM_MARKUP_RE.test(rawWithoutCdata)) {
+      errors?.push(
+        'unescaped protocol markup inside parameter "' +
+          paramKey +
+          '"; wrap literal XML tags in <![CDATA[...]]> or escape as &lt;...&gt;',
+      );
+      return undefined;
+    }
+
     const val = isSelfClosing && tagAttrs.value !== undefined ? parseXmlParamValue(paramKey, tagAttrs.value) : parseXmlParamValue(paramKey, inner);
     const existing = args[paramKey];
     if (existing !== undefined) {
+      if (!LIST_PARAM_KEYS[paramKey] && paramKey !== 'task' && paramKey !== 'tasks' && paramKey !== 'edit' && paramKey !== 'item') {
+        errors?.push('duplicate scalar parameter "' + paramKey + '" in single <tool_call>; emit separate <tool_call> blocks for batched calls');
+        return undefined;
+      }
       if (Array.isArray(existing)) {
         if (Array.isArray(val)) existing.push(...val);
         else existing.push(val);
@@ -890,8 +911,14 @@ function tryParseStructuredToolCall(
       currentLines.length = 0;
     };
     for (const line of lines) {
-      const m = /^([a-zA-Z_][a-zA-Z0-9_-]*)\s*:\s*(.*)$/.exec(line);
-      if (m && m[1] !== undefined && m[2] !== undefined && KNOWN_PARAM_NAMES[m[1]]) {
+      const m = /^([a-zA-Z_][a-zA-Z0-9_-]{0,63})\s*:\s*(.*)$/.exec(line);
+      const isUrlScheme =
+        m !== null && m[1] !== undefined && m[2] !== undefined && /^https?$|^ftp$|^file$/i.test(m[1]) && m[2].startsWith('//');
+      if (m && m[1] !== undefined && m[2] !== undefined && !isUrlScheme && (KNOWN_PARAM_NAMES[m[1]] || toolName !== undefined)) {
+        if (m[1] === 'param_name') {
+          errors?.push('replace placeholder <param_name> with the actual parameter tag name');
+          return undefined;
+        }
         flushKv();
         currentKey = m[1];
         currentLines.push(m[2]);
@@ -905,6 +932,13 @@ function tryParseStructuredToolCall(
     // Single shorthand scalar inside <calculator>2 + 2</calculator> or <grep>pattern</grep>
     if (kvCount === 0 && toolName && Object.keys(args).length === 0 && body.trim()) {
       const scalar = decodeXmlText(body).trim();
+      if (
+        scalar.includes('\n') ||
+        ((toolName === 'read' || toolName === 'add_document') && /\s+\d+(?:\s+\d+)?$/.test(scalar))
+      ) {
+        errors?.push('untagged multi-value body in <tool_call name="' + toolName + '">; wrap each argument in its XML tag');
+        return undefined;
+      }
       if (toolName === 'calculator') args.expression = scalar;
       else if (toolName === 'grep' || toolName === 'tally') args.pattern = scalar;
       else if (toolName === 'search' || toolName === 'llm_query') args.query = scalar;
@@ -913,6 +947,8 @@ function tryParseStructuredToolCall(
       else if (toolName === 'bash') args.command = scalar;
     }
   }
+
+  if ((errors?.length ?? 0) > initialErrCount) return undefined;
 
   const finalName =
     toolName ?? (Object.keys(args).length > 0 && contextText !== undefined ? inferBareToolName(args, contextText) : undefined);
@@ -932,8 +968,10 @@ function parseToolCall(
   const trimmed = cleanedRaw.trim();
   const hasXmlOrAttrs = Boolean(attrs && attrs.trim()) || (trimmed.startsWith('<') && !trimmed.startsWith('{'));
   if (hasXmlOrAttrs || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
-    const structured = tryParseStructuredToolCall(cleanedRaw, attrs, fallbackName, contextText);
+    const beforeErrors = errors.length;
+    const structured = tryParseStructuredToolCall(cleanedRaw, attrs, errors, fallbackName, contextText);
     if (structured) return structured;
+    if (errors.length > beforeErrors) return undefined;
     if (hasXmlOrAttrs && !trimmed.includes('{')) {
       errors.push('tool_call.name is missing');
       return undefined;
@@ -944,8 +982,10 @@ function parseToolCall(
   try {
     parsedJson = parseLooseJSON(cleanedRaw);
   } catch (e) {
-    const structured = tryParseStructuredToolCall(cleanedRaw, attrs, fallbackName, contextText);
+    const beforeCatchErrors = errors.length;
+    const structured = tryParseStructuredToolCall(cleanedRaw, attrs, errors, fallbackName, contextText);
     if (structured) return structured;
+    if (errors.length > beforeCatchErrors) return undefined;
     errors.push(`<tool_call> is not valid: ${(e as Error).message}`);
     return undefined;
   }
@@ -1137,15 +1177,13 @@ export function parseAgentResponse(rawText: string, opts: ParseOptions): ParsedR
       if (!ext) continue;
       const callErrors: string[] = [];
       const parsed = parseToolCall(ext.content, ext.attrs, callErrors, undefined, afterFoldBody);
-      if (parsed) {
+      if (parsed && callErrors.length === 0) {
         parsedCalls.push(parsed);
-      } else if (parsedCalls.length === 0) {
-        errors.push(...callErrors);
       } else {
-        warnings.push(...callErrors);
+        errors.push(...callErrors);
       }
     }
-    if (parsedCalls.length > 0) {
+    if (parsedCalls.length > 0 && parsedCalls.length === outsideToolTags.length) {
       out.toolCalls = parsedCalls;
       out.toolCall = parsedCalls[0];
       errors.length = 0;

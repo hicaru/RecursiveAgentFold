@@ -20,6 +20,12 @@ function isCjkCode(code: number): boolean {
   );
 }
 
+function isNonLatinAlphaCode(code: number): boolean {
+  return code >= 0x0370 && code <= 0x07ff;
+}
+
+const NON_LATIN_ALPHA_CHARS_PER_TOKEN = 1.8;
+
 export class CharRatioEstimator implements TokenEstimator {
   readonly cjkCharsPerToken: number;
   constructor(
@@ -34,11 +40,15 @@ export class CharRatioEstimator implements TokenEstimator {
     const len = text.length;
     if (len === 0) return 0;
     let cjkCount = 0;
+    let nonLatinAlphaCount = 0;
     for (let i = 0; i < len; i++) {
-      if (isCjkCode(text.charCodeAt(i))) cjkCount++;
+      const code = text.charCodeAt(i);
+      if (isCjkCode(code)) cjkCount++;
+      else if (isNonLatinAlphaCode(code)) nonLatinAlphaCount++;
     }
-    const otherCount = len - cjkCount;
-    return Math.ceil(cjkCount / this.cjkCharsPerToken + otherCount / this.charsPerToken);
+    const otherCount = len - cjkCount - nonLatinAlphaCount;
+    const nonLatinRatio = Math.min(this.charsPerToken, NON_LATIN_ALPHA_CHARS_PER_TOKEN);
+    return Math.ceil(cjkCount / this.cjkCharsPerToken + nonLatinAlphaCount / nonLatinRatio + otherCount / this.charsPerToken);
   }
   chars(tokens: number): number {
     if (!(tokens > 0)) return 0;
@@ -47,11 +57,13 @@ export class CharRatioEstimator implements TokenEstimator {
   prefixChars(text: string, maxTokens: number): number {
     if (!(maxTokens > 0) || text.length === 0) return 0;
     const invCjk = 1 / this.cjkCharsPerToken;
+    const invNonLatin = 1 / Math.min(this.charsPerToken, NON_LATIN_ALPHA_CHARS_PER_TOKEN);
     const invOther = 1 / this.charsPerToken;
     let used = 0;
     const len = text.length;
     for (let i = 0; i < len; i++) {
-      const cost = isCjkCode(text.charCodeAt(i)) ? invCjk : invOther;
+      const code = text.charCodeAt(i);
+      const cost = isCjkCode(code) ? invCjk : isNonLatinAlphaCode(code) ? invNonLatin : invOther;
       if (used + cost > maxTokens) return i;
       used += cost;
     }
@@ -65,10 +77,12 @@ function suffixCharsWithinTokens(text: string, maxTokens: number, estimator: Tok
   if (!(maxTokens > 0) || text.length === 0) return 0;
   if (estimator instanceof CharRatioEstimator) {
     const invCjk = 1 / estimator.cjkCharsPerToken;
+    const invNonLatin = 1 / Math.min(estimator.charsPerToken, NON_LATIN_ALPHA_CHARS_PER_TOKEN);
     const invOther = 1 / estimator.charsPerToken;
     let used = 0;
     for (let i = text.length - 1; i >= 0; i--) {
-      const cost = isCjkCode(text.charCodeAt(i)) ? invCjk : invOther;
+      const code = text.charCodeAt(i);
+      const cost = isCjkCode(code) ? invCjk : isNonLatinAlphaCode(code) ? invNonLatin : invOther;
       if (used + cost > maxTokens) return text.length - 1 - i;
       used += cost;
     }

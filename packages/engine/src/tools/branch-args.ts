@@ -4,6 +4,7 @@ import { ToolArgumentError } from './types.js';
 export interface SubTaskSpec {
   readonly scope?: string;
   readonly task: string;
+  readonly cwd?: string;
 }
 
 export interface NormalizedBranchArgs {
@@ -11,6 +12,7 @@ export interface NormalizedBranchArgs {
   readonly task?: string;
   readonly tasks?: readonly SubTaskSpec[];
   readonly max_steps?: number;
+  readonly cwd?: string;
 }
 
 const CONTAINER_KEYS: readonly string[] = Object.freeze([
@@ -98,6 +100,9 @@ const STEP_KEYS: readonly string[] = Object.freeze([
   'budget',
 ]);
 
+const CWD_ONLY_KEYS: readonly string[] = Object.freeze(['cwd', 'workdir', 'working_directory', 'workingDirectory']);
+const CWD_KEYS: readonly string[] = Object.freeze([...CWD_ONLY_KEYS, 'dir']);
+
 const MULTI_SCOPE_KEYS: readonly string[] = Object.freeze(['scopes', 'paths', 'documents', 'modules', 'dirs']);
 
 const RESERVED_MAP_KEYS: ReadonlySet<string> = new Set(
@@ -107,6 +112,7 @@ const RESERVED_MAP_KEYS: ReadonlySet<string> = new Set(
     ...SCOPE_KEYS,
     ...TASK_KEYS,
     ...STEP_KEYS,
+    ...CWD_ONLY_KEYS,
     ...MULTI_SCOPE_KEYS,
     'tool',
     'tool_name',
@@ -191,6 +197,38 @@ function pickString(rec: Readonly<Record<string, unknown>>, keys: readonly strin
   return undefined;
 }
 
+function pickCwd(rec: Readonly<Record<string, unknown>>, hasTask: boolean): string | undefined {
+  return pickString(rec, hasTask ? CWD_KEYS : CWD_ONLY_KEYS);
+}
+
+function makeSubTaskSpec(task: string, scope?: string, cwd?: string): SubTaskSpec {
+  return {
+    ...(scope !== undefined && scope !== '' ? { scope } : {}),
+    task,
+    ...(cwd !== undefined && cwd !== '' ? { cwd } : {}),
+  };
+}
+
+function findClosingTag(
+  text: string,
+  tagName: string,
+  searchFrom: number,
+): { readonly index: number; readonly end: number } | undefined {
+  const esc = tagName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const tokenRe = new RegExp(`<\\s*(\\/?)\\s*${esc}(?:\\s[^>]*?)?(\\/?)\\s*>`, 'gi');
+  tokenRe.lastIndex = searchFrom;
+  let depth = 1;
+  let m: RegExpExecArray | null;
+  while ((m = tokenRe.exec(text)) !== null) {
+    if (m[1] === '/') {
+      depth -= 1;
+      if (depth === 0) return { index: m.index, end: m.index + m[0].length };
+    } else if (m[2] !== '/') {
+      depth += 1;
+    }
+  }
+  return undefined;
+}
 function pickNumber(rec: Readonly<Record<string, unknown>>, keys: readonly string[]): number | undefined {
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i];
@@ -283,15 +321,21 @@ function parseXmlBranchTasks(raw: string, fallbackScope?: string): SubTaskSpec[]
 
   let working = text;
   for (;;) {
-    const wrap = /^<\s*([a-zA-Z_][a-zA-Z0-9_./-]*)(?:\s[^>]*)?>([\s\S]*)<\s*\/\s*\1\s*>$/i.exec(working);
-    const tag = wrap?.[1]?.toLowerCase();
-    if (wrap?.[2] !== undefined && tag !== undefined && (XML_WRAPPER_TAGS.has(tag) || tag === 'tool_call' || tag === 'invoke')) {
-      working = wrap[2].trim();
-    } else {
-      break;
+    const openWrap = /^<\s*([a-zA-Z_][a-zA-Z0-9_./-]*)(?:\s[^>]*)?>/i.exec(working);
+    const tag = openWrap?.[1]?.toLowerCase();
+    if (openWrap && tag !== undefined && (XML_WRAPPER_TAGS.has(tag) || tag === 'tool_call' || tag === 'invoke')) {
+      const close = findClosingTag(working, openWrap[1] ?? tag, openWrap[0].length);
+      if (close !== undefined && close.end === working.length) {
+        working = working.slice(openWrap[0].length, close.index).trim();
+        continue;
+      }
     }
+    break;
   }
-
+  if (working !== text && !working.startsWith('<')) {
+    const unwrapped = parseFlexibleBranchTasks(working, fallbackScope);
+    return unwrapped.length > 0 ? unwrapped : undefined;
+  }
   const elements: Array<{ readonly tag: string; readonly attrs: Record<string, string>; readonly body: string }> = [];
   let pos = 0;
   while (pos < working.length) {
@@ -316,16 +360,13 @@ function parseXmlBranchTasks(raw: string, fallbackScope?: string): SubTaskSpec[]
       pos = contentStart;
       continue;
     }
-    const escapedTag = tagName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const closeRe = new RegExp(`<\\s*\\/\\s*${escapedTag}\\s*>`, 'gi');
-    closeRe.lastIndex = contentStart;
-    const closeMatch = closeRe.exec(working);
+    const closeMatch = findClosingTag(working, tagName, contentStart);
     if (!closeMatch) {
       elements.push({ tag: tagName, attrs, body: working.slice(contentStart) });
       pos = working.length;
     } else {
       elements.push({ tag: tagName, attrs, body: working.slice(contentStart, closeMatch.index) });
-      pos = closeMatch.index + closeMatch[0].length;
+      pos = closeMatch.end;
     }
   }
 
@@ -376,13 +417,28 @@ function parseXmlBranchTasks(raw: string, fallbackScope?: string): SubTaskSpec[]
 
     if (XML_ITEM_TAGS.has(lower) || TASK_KEYS.includes(lower)) {
       let scope = pickString(el.attrs, SCOPE_KEYS) ?? pendingScope;
+      let cwd = pickCwd(el.attrs, true);
       let taskText = pickString(el.attrs, TASK_KEYS);
       let body = el.body.trim();
 
       if (body.startsWith('<')) {
-        const childParsed = parseXmlChildFields(body);
+        if (/^<\s*(?:tasks|branches|subtasks|sub_tasks|items|jobs|specs|task|branch|subtask|sub_task|item)\b/i.test(body)) {
+          const nested = parseFlexibleBranchTasks(body, scope ?? fallbackScope);
+          if (nested.length > 0) {
+            out.push(...nested);
+            pendingScope = undefined;
+            continue;
+          }
+        }
+        const childParsed = parseXmlChildFields(body, scope ?? fallbackScope);
         if (childParsed !== undefined) {
+          if (childParsed.tasks !== undefined && childParsed.tasks.length > 0) {
+            out.push(...childParsed.tasks);
+            pendingScope = undefined;
+            continue;
+          }
           scope = childParsed.scope ?? scope;
+          cwd = childParsed.cwd ?? cwd;
           if (childParsed.task !== undefined) taskText = childParsed.task;
           body = '';
         }
@@ -391,8 +447,7 @@ function parseXmlBranchTasks(raw: string, fallbackScope?: string): SubTaskSpec[]
         taskText = decodeXmlText(body).trim();
       }
       if (taskText !== undefined && taskText !== '') {
-        const finalScope = scope ?? fallbackScope;
-        out.push(finalScope !== undefined && finalScope !== '' ? { scope: finalScope, task: taskText } : { task: taskText });
+        out.push(makeSubTaskSpec(taskText, scope ?? fallbackScope, cwd));
         pendingScope = undefined;
       }
       continue;
@@ -408,29 +463,47 @@ function parseXmlBranchTasks(raw: string, fallbackScope?: string): SubTaskSpec[]
   return out.length > 0 ? out : undefined;
 }
 
-function parseXmlChildFields(xml: string): { readonly scope?: string; readonly task?: string } | undefined {
+function parseXmlChildFields(
+  xml: string,
+  fallbackScope?: string,
+): { readonly scope?: string; readonly task?: string; readonly cwd?: string; readonly tasks?: readonly SubTaskSpec[] } | undefined {
   const fields: Record<string, string> = {};
-  const tagRe = /<\s*([a-zA-Z_][a-zA-Z0-9_-]*)(?:\s[^>]*)?>([\s\S]*?)<\s*\/\s*\1\s*>/gi;
-  let m: RegExpExecArray | null;
+  const tagRe = /<\s*([a-zA-Z_][a-zA-Z0-9_-]*)(?:\s[^>]*)?>/gi;
+  let pos = 0;
   let count = 0;
-  let remainder = xml;
-  while ((m = tagRe.exec(xml)) !== null) {
-    const k = m[1];
-    const v = m[2];
-    if (k !== undefined && v !== undefined) {
-      fields[k] = decodeXmlText(v).trim();
-      fields[k.toLowerCase()] = decodeXmlText(v).trim();
-      remainder = remainder.replace(m[0], '');
-      count++;
+  let remainder = '';
+  while (pos < xml.length) {
+    tagRe.lastIndex = pos;
+    const openMatch = tagRe.exec(xml);
+    if (!openMatch || openMatch[1] === undefined) {
+      remainder += xml.slice(pos);
+      break;
     }
+    remainder += xml.slice(pos, openMatch.index);
+    const k = openMatch[1];
+    const start = openMatch.index + openMatch[0].length;
+    const close = findClosingTag(xml, k, start);
+    const rawInner = close ? xml.slice(start, close.index) : xml.slice(start);
+    const lower = k.toLowerCase();
+    if (XML_WRAPPER_TAGS.has(lower)) {
+      const nested = parseFlexibleBranchTasks(rawInner, fields.scope ?? fallbackScope);
+      if (nested.length > 0) return { tasks: nested };
+    }
+    const decoded = decodeXmlText(rawInner).trim();
+    fields[k] = decoded;
+    fields[lower] = decoded;
+    count++;
+    pos = close ? close.end : xml.length;
   }
   if (count === 0) return undefined;
   const scope = pickString(fields, SCOPE_KEYS);
   const task = pickString(fields, TASK_KEYS) ?? (remainder.trim() !== '' ? decodeXmlText(remainder).trim() : undefined);
-  if (scope === undefined && task === undefined) return undefined;
+  const cwd = pickCwd(fields, task !== undefined);
+  if (scope === undefined && task === undefined && cwd === undefined) return undefined;
   return {
     ...(scope !== undefined ? { scope } : {}),
     ...(task !== undefined ? { task } : {}),
+    ...(cwd !== undefined ? { cwd } : {}),
   };
 }
 
@@ -848,11 +921,24 @@ function extractTasksFromRecord(rec: Readonly<Record<string, unknown>>, fallback
   }
 
   const singleTask = pickString(rec, TASK_KEYS);
+  const explicitCwd = pickCwd(rec, singleTask !== undefined);
   if (singleTask !== undefined) {
-    if (multiScopes.length > 0) {
-      return multiScopes.map((s) => ({ scope: s, task: singleTask }));
+    const trimmedTask = stripCodeFence(singleTask);
+    if (
+      /^<\s*(?:tasks|branches|subtasks|sub_tasks|items|jobs|specs|task|branch|subtask|sub_task|item)\b/i.test(
+        trimmedTask,
+      ) ||
+      trimmedTask.startsWith('[')
+    ) {
+      const unpacked = parseFlexibleBranchTasks(trimmedTask, explicitScope);
+      if (unpacked.length > 0 && (unpacked.length > 1 || unpacked[0]?.task !== trimmedTask)) {
+        return explicitCwd !== undefined ? unpacked.map((u) => makeSubTaskSpec(u.task, u.scope, u.cwd ?? explicitCwd)) : unpacked;
+      }
     }
-    return [explicitScope !== undefined && explicitScope !== '' ? { scope: explicitScope, task: singleTask } : { task: singleTask }];
+    if (multiScopes.length > 0) {
+      return multiScopes.map((s) => makeSubTaskSpec(singleTask, s, explicitCwd));
+    }
+    return [makeSubTaskSpec(singleTask, explicitScope, explicitCwd)];
   }
 
   // Map-by-scope object: `{ "docs": "Study docs", "packages/engine": { prompt: "Study engine" } }`
@@ -870,7 +956,8 @@ function extractTasksFromRecord(rec: Readonly<Record<string, unknown>>, fallback
       const nestedTask = pickString(v, TASK_KEYS);
       if (nestedTask !== undefined) {
         const nestedScope = pickString(v, SCOPE_KEYS) ?? cleanKey;
-        mapSpecs.push({ scope: nestedScope, task: nestedTask });
+        const nestedCwd = pickCwd(v, true);
+        mapSpecs.push(makeSubTaskSpec(nestedTask, nestedScope, nestedCwd));
       }
     }
   }
@@ -1011,12 +1098,10 @@ export function normalizeBranchArguments(input: unknown): Record<string, unknown
         const stepField = xmlMaxSteps !== undefined && Number.isFinite(xmlMaxSteps) ? { max_steps: xmlMaxSteps } : {};
         if (xmlTasks.length === 1) {
           const first = xmlTasks[0];
-          return first?.scope !== undefined
-            ? { scope: first.scope, task: first.task, ...stepField }
-            : { task: first?.task ?? '', ...stepField };
+          return { ...makeSubTaskSpec(first?.task ?? '', first?.scope, first?.cwd), ...stepField };
         }
         return {
-          tasks: xmlTasks.map((t) => (t.scope !== undefined ? { scope: t.scope, task: t.task } : { task: t.task })),
+          tasks: xmlTasks.map((t) => makeSubTaskSpec(t.task, t.scope, t.cwd)),
           ...stepField,
         };
       }
@@ -1036,7 +1121,7 @@ export function normalizeBranchArguments(input: unknown): Record<string, unknown
     try {
       const specs = parseFlexibleBranchTasks(input);
       if (specs.length > 0) {
-        return { tasks: specs.map((t) => (t.scope !== undefined ? { scope: t.scope, task: t.task } : { task: t.task })) };
+        return { tasks: specs.map((t) => makeSubTaskSpec(t.task, t.scope, t.cwd)) };
       }
     } catch {
       return { tasks: input };
@@ -1048,6 +1133,7 @@ export function normalizeBranchArguments(input: unknown): Record<string, unknown
 
   const maxSteps = pickNumber(input, STEP_KEYS);
   const explicitScope = pickString(input, SCOPE_KEYS);
+  const explicitCwd = pickCwd(input, typeof input.task === 'string' || Array.isArray(input.tasks));
 
   // Preserve explicitly invalid `tasks` array elements so `branch.execute` can surface `ToolArgumentError` if needed,
   // while normalizing every valid object, string, map, XML, TOML, or YAML representation into `{ scope?, task }` objects!
@@ -1065,6 +1151,7 @@ export function normalizeBranchArguments(input: unknown): Record<string, unknown
     if (specs.length === 0) {
       const out: Record<string, unknown> = {};
       if (explicitScope !== undefined) out.scope = explicitScope;
+      if (explicitCwd !== undefined) out.cwd = explicitCwd;
       if (maxSteps !== undefined) out.max_steps = maxSteps;
       return Object.keys(out).length > 0 ? out : { ...input };
     }
@@ -1073,15 +1160,18 @@ export function normalizeBranchArguments(input: unknown): Record<string, unknown
       const only = specs[0];
       const out: Record<string, unknown> = {};
       const finalScope = only?.scope ?? explicitScope;
+      const finalCwd = only?.cwd ?? explicitCwd;
       if (finalScope !== undefined) out.scope = finalScope;
       if (only?.task !== undefined) out.task = only.task;
+      if (finalCwd !== undefined) out.cwd = finalCwd;
       if (maxSteps !== undefined) out.max_steps = maxSteps;
       return out;
     }
     const out: Record<string, unknown> = {
-      tasks: specs.map((t) => (t.scope !== undefined ? { scope: t.scope, task: t.task } : { task: t.task })),
+      tasks: specs.map((t) => makeSubTaskSpec(t.task, t.scope, t.cwd ?? explicitCwd)),
     };
     if (explicitScope !== undefined) out.scope = explicitScope;
+    if (explicitCwd !== undefined) out.cwd = explicitCwd;
     if (maxSteps !== undefined) out.max_steps = maxSteps;
     return out;
   } catch {
@@ -1094,8 +1184,9 @@ function toPlainBranchRecord(norm: NormalizedBranchArgs): Record<string, unknown
   if (norm.scope !== undefined) out.scope = norm.scope;
   if (norm.task !== undefined) out.task = norm.task;
   if (norm.tasks !== undefined) {
-    out.tasks = norm.tasks.map((t) => (t.scope !== undefined ? { scope: t.scope, task: t.task } : { task: t.task }));
+    out.tasks = norm.tasks.map((t) => makeSubTaskSpec(t.task, t.scope, t.cwd));
   }
+  if (norm.cwd !== undefined) out.cwd = norm.cwd;
   if (norm.max_steps !== undefined) out.max_steps = norm.max_steps;
   return out;
 }

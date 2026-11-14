@@ -1,11 +1,17 @@
 import { stat } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
-import { sanitizeDocId, type IngestResult } from '../context/ingest.js';
+import {
+  MTIME_FRESHNESS_WINDOW_MS,
+  sanitizeDocId,
+  type HostFileSystem,
+  type IngestResult,
+} from '../context/ingest.js';
 import { defaultEstimator, truncateToTokens } from '../tokens.js';
 import { argNumber, argString, argStringList, ToolArgumentError, type Tool, type ToolContext } from './types.js';
 
 export interface AddDocumentToolOptions {
   readonly cwd?: string;
+  readonly fs?: HostFileSystem;
   readonly onIngest?: (res: IngestResult) => void;
 }
 export interface DocumentToolOptions {
@@ -29,26 +35,29 @@ async function refreshLiveFileIfPresent(
   ctx: ToolContext,
   ingest?: AddDocumentToolOptions,
 ): Promise<string | undefined> {
-  if (ingest?.cwd === undefined) return undefined;
-  const candidate = isAbsolute(rawTarget) ? resolve(rawTarget) : resolve(ingest.cwd, rawTarget);
-  const s = await stat(candidate).catch(() => undefined);
+  const baseCwd = ctx.cwd ?? ingest?.cwd;
+  if (baseCwd === undefined) return undefined;
+  const candidate = isAbsolute(rawTarget) ? resolve(rawTarget) : resolve(baseCwd, rawTarget);
+  const statFn = ingest?.fs?.stat ?? stat;
+  const s = await statFn(candidate).catch(() => undefined);
   if (!s || !s.isFile()) return undefined;
   const existing = ctx.store.findByAbsPath(candidate);
   if (
     existing !== undefined &&
     existing.mtimeMs === s.mtimeMs &&
     existing.byteSize === s.size &&
-    Math.abs(Date.now() - s.mtimeMs) >= 15
+    Math.abs(Date.now() - s.mtimeMs) >= MTIME_FRESHNESS_WINDOW_MS
   ) {
     return existing.id;
   }
   try {
-    const res = await ctx.store.addPath(rawTarget, {
-      cwd: ingest.cwd,
+    const res = await ctx.store.addPath(candidate, {
+      cwd: ingest?.cwd ?? baseCwd,
+      ...(ingest?.fs !== undefined ? { fs: ingest.fs } : {}),
       ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
     });
-    ingest.onIngest?.(res);
-    return res.files[0]?.id;
+    ingest?.onIngest?.(res);
+    return ctx.store.findByAbsPath(candidate)?.id ?? res.files[0]?.id;
   } catch {
     return ctx.store.resolveId(rawTarget);
   }
@@ -59,13 +68,15 @@ async function ensureTargetIds(
   ctx: ToolContext,
   ingest?: AddDocumentToolOptions,
 ): Promise<string[]> {
+  const baseCwd = ingest?.cwd ?? ctx.cwd;
   const refreshed = await refreshLiveFileIfPresent(rawTarget, ctx, ingest);
   if (refreshed !== undefined) return [refreshed];
-  const existing = ctx.store.resolveIds(rawTarget);
+  const existing = ctx.store.resolveIds(rawTarget, baseCwd);
   if (existing.length > 0) return existing;
   try {
     const res = await ctx.store.addPath(rawTarget, {
-      ...(ingest?.cwd !== undefined ? { cwd: ingest.cwd } : {}),
+      ...(baseCwd !== undefined ? { cwd: baseCwd } : {}),
+      ...(ingest?.fs !== undefined ? { fs: ingest.fs } : {}),
       ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
     });
     ingest?.onIngest?.(res);
@@ -77,9 +88,9 @@ async function ensureTargetIds(
       key: `add_document:${sourceKey}`,
       summary: `Loaded ${res.files.length} document(s) (~${res.totalTokens.toLocaleString('en-US')} tokens) under prefix "${sourceKey}" from ${res.resolvedPath}`,
     });
-    return res.files.map((f) => f.id);
+    return res.files.map((f) => ctx.store.findByAbsPath(f.path)?.id ?? f.id);
   } catch {
-    return ctx.store.resolveIds(rawTarget);
+    return ctx.store.resolveIds(rawTarget, baseCwd);
   }
 }
 
@@ -109,6 +120,7 @@ async function ensureTargetsFromArgs(
           idPrefix: '',
           maxFiles: 300,
           skipRichDocuments: true,
+          ...(ingest.fs !== undefined ? { fs: ingest.fs } : {}),
           ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
         });
         ingest.onIngest?.(res);
@@ -230,8 +242,10 @@ export function createAddDocumentTool(opts: AddDocumentToolOptions = {}): Tool {
         throw new ToolArgumentError('must provide "path" or "paths"');
       }
 
+      const effectiveCwd = ctx.cwd ?? opts.cwd;
       const ingestOpts = {
-        ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+        ...(effectiveCwd !== undefined ? { cwd: effectiveCwd } : {}),
+        ...(opts.fs !== undefined ? { fs: opts.fs } : {}),
         ...(idPrefix !== undefined ? { idPrefix } : {}),
         ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
       };
@@ -404,11 +418,16 @@ export function createGrepTool(opts: DocumentToolOptions = {}): Tool {
     isConcurrencySafe: () => true,
     async execute(args, ctx) {
       const pattern = argString(args, 'pattern') ?? '';
-      try {
-        new RegExp(pattern);
-      } catch (e) {
-        throw new ToolArgumentError(`Invalid regex: ${(e as Error).message}`);
+      const literal = args.literal === true;
+      if (!literal) {
+        try {
+          new RegExp(pattern);
+        } catch (e) {
+          throw new ToolArgumentError(`Invalid regex: ${(e as Error).message}`);
+        }
       }
+      const glob = argString(args, 'glob', false);
+      const context = argNumber(args, 'context');
       const max = Math.min(
         100,
         argNumber(args, 'max_matches') ??
@@ -427,17 +446,47 @@ export function createGrepTool(opts: DocumentToolOptions = {}): Tool {
         docIds,
         ignoreCase,
         maxMatches: max,
+        literal,
+        ...(glob !== undefined && glob !== '' ? { glob } : {}),
+        ...(context !== undefined ? { context } : {}),
       });
-      const head = `grep /${pattern}/: ${r.total} matching lines — ${Object.entries(r.perDoc)
-        .map(([d, n]) => `${d}: ${n}`)
-        .join(', ')}`;
-      const body = r.matches.map((m, idx) => `[${idx + 1}] ${m.docId}:${m.line}| ${m.text}`).join('\n');
+      const nonZeroDocs = Object.entries(r.perDoc)
+        .filter(([, count]) => count > 0)
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      const matchedDocCount = nonZeroDocs.length;
+      const head = `grep /${pattern}/: ${r.total} matching lines across ${matchedDocCount} document(s)`;
+      const bodyParts: string[] = [];
+      for (let i = 0; i < r.matches.length; i++) {
+        const m = r.matches[i];
+        if (!m) continue;
+        if (m.before) {
+          for (const ctxLine of m.before) {
+            bodyParts.push(`  ${m.docId}:${ctxLine.line}: ${ctxLine.text}`);
+          }
+        }
+        bodyParts.push(`[${i + 1}] ${m.docId}:${m.line}| ${m.text}`);
+        if (m.after) {
+          for (const ctxLine of m.after) {
+            bodyParts.push(`  ${m.docId}:${ctxLine.line}: ${ctxLine.text}`);
+          }
+        }
+      }
+      const body = bodyParts.join('\n');
       const more = r.total > r.matches.length ? `\n… ${r.total - r.matches.length} more matching lines omitted` : '';
-      return truncateToTokens(`${head}${body ? `\n${body}` : ''}${more}`, opts.maxReadTokens ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxReadTokens).text;
+      const breakdown =
+        matchedDocCount > 1
+          ? `\nMatches by document (top ${Math.min(20, matchedDocCount)}): ${nonZeroDocs
+              .slice(0, 20)
+              .map(([d, n]) => `${d}: ${n}`)
+              .join(', ')}${matchedDocCount > 20 ? ` (+${matchedDocCount - 20} more)` : ''}`
+          : '';
+      return truncateToTokens(
+        `${head}${body ? `\n${body}` : ''}${more}${breakdown}`,
+        opts.maxReadTokens ?? DEFAULT_DOCUMENT_TOOL_OPTIONS.maxReadTokens,
+      ).text;
     },
   };
 }
-
 export function createTallyTool(opts: DocumentToolOptions = {}): Tool {
   return {
     name: 'tally',

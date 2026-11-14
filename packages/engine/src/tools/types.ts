@@ -19,6 +19,7 @@ export interface ToolContext {
   readonly board?: ResearchBoard;
   readonly callStack?: readonly string[];
   readonly ancestorTasks?: readonly string[];
+  readonly cwd?: string;
 }
 
 export interface Tool {
@@ -64,6 +65,27 @@ export function argStringList(args: Record<string, unknown>, key: string): strin
   throw new ToolArgumentError(`argument "${key}" must be a list of strings`);
 }
 
+function toCamelKey(key: string): string {
+  return key.replace(/_([a-z])/g, (_, ch: string) => ch.toUpperCase());
+}
+
+function toSnakeKey(key: string): string {
+  return key.replace(/([A-Z])/g, (_, ch: string) => `_${ch.toLowerCase()}`);
+}
+
+function resolveSchemaType(prop: JSONSchema): string | undefined {
+  if (Array.isArray(prop.type)) {
+    if (prop.properties !== undefined && Object.keys(prop.properties).length > 0 && prop.type.includes('object')) {
+      return 'object';
+    }
+    if (prop.items !== undefined && prop.type.includes('array')) {
+      return 'array';
+    }
+    return prop.type[0];
+  }
+  return prop.type;
+}
+
 /** Coerce parsed tool arguments to match the tool's JSONSchema property types. */
 export function coerceToolArguments(
   args: Record<string, unknown>,
@@ -72,16 +94,25 @@ export function coerceToolArguments(
   const props = schema?.properties;
   if (!props) return args;
   const out: Record<string, unknown> = { ...args };
+
+  // Map unambiguous snake_case <-> camelCase keys onto declared schema properties.
+  for (const key of Object.keys(out)) {
+    if (key in props) continue;
+    const camel = toCamelKey(key);
+    const snake = toSnakeKey(key);
+    if (camel !== key && camel in props && !(camel in out)) {
+      out[camel] = out[key];
+      delete out[key];
+    } else if (snake !== key && snake in props && !(snake in out)) {
+      out[snake] = out[key];
+      delete out[key];
+    }
+  }
+
   for (const [key, val] of Object.entries(out)) {
     const prop = props[key];
     if (!prop || val === undefined || val === null) continue;
-    const expectedType = Array.isArray(prop.type)
-      ? prop.properties !== undefined && Object.keys(prop.properties).length > 0 && prop.type.includes('object')
-        ? 'object'
-        : prop.items !== undefined && prop.type.includes('array')
-          ? 'array'
-          : prop.type[0]
-      : prop.type;
+    const expectedType = resolveSchemaType(prop);
     if (expectedType === 'string' && typeof val !== 'string' && !Array.isArray(val)) {
       out[key] = String(val);
     } else if ((expectedType === 'number' || expectedType === 'integer') && typeof val === 'string') {
@@ -125,27 +156,136 @@ export function coerceToolArguments(
   return out;
 }
 
+/** Validate coerced tool arguments against JSONSchema and built-in alias-group requirements. */
+export function validateToolArguments(
+  toolName: string,
+  args: Readonly<Record<string, unknown>>,
+  schema?: JSONSchema,
+): readonly string[] {
+  const errors: string[] = [];
+  const baseName = toolName.replace(/^(?:raf|ref)_/, '');
+  const required = Array.isArray(schema?.required) ? schema.required : [];
+
+  if (required.length === 0) {
+    if (baseName === 'read') {
+      const hasTarget =
+        (typeof args.document === 'string' && args.document.trim() !== '') ||
+        (typeof args.path === 'string' && args.path.trim() !== '') ||
+        (typeof args.file_path === 'string' && args.file_path.trim() !== '') ||
+        (typeof args.filePath === 'string' && args.filePath.trim() !== '');
+      if (!hasTarget) {
+        errors.push(`${toolName}: missing required argument "document", "path", or "file_path"`);
+      }
+    } else if (baseName === 'add_document') {
+      const hasSingle =
+        (typeof args.path === 'string' && args.path.trim() !== '') ||
+        (typeof args.source === 'string' && args.source.trim() !== '') ||
+        (typeof args.file_path === 'string' && args.file_path.trim() !== '') ||
+        (typeof args.dir === 'string' && args.dir.trim() !== '');
+      const hasMulti = Array.isArray(args.paths) && args.paths.length > 0;
+      if (!hasSingle && !hasMulti) {
+        errors.push(`${toolName}: missing required argument "path" or non-empty "paths"`);
+      }
+    } else if (baseName === 'branch') {
+      const hasTask = typeof args.task === 'string' && args.task.trim() !== '';
+      const hasTasks = Array.isArray(args.tasks) && args.tasks.length > 0;
+      if (!hasTask && !hasTasks) {
+        errors.push(`${toolName}: missing required argument "task" or non-empty "tasks"`);
+      }
+    }
+  }
+
+  for (const reqKey of required) {
+    const camel = toCamelKey(reqKey);
+    const snake = toSnakeKey(reqKey);
+    const val =
+      args[reqKey] !== undefined
+        ? args[reqKey]
+        : camel !== reqKey && args[camel] !== undefined
+          ? args[camel]
+          : snake !== reqKey && args[snake] !== undefined
+            ? args[snake]
+            : undefined;
+    if (val === undefined || val === null || (typeof val === 'string' && val.trim() === '')) {
+      errors.push(`${toolName}: missing required argument "${reqKey}"`);
+    }
+  }
+
+  const props = schema?.properties;
+  if (props) {
+    for (const [key, val] of Object.entries(args)) {
+      if (val === undefined || val === null) continue;
+      const prop = props[key];
+      if (!prop) continue;
+      const expectedType = resolveSchemaType(prop);
+      if (expectedType === 'integer') {
+        if (typeof val !== 'number' || !Number.isFinite(val) || !Number.isInteger(val)) {
+          errors.push(`${toolName}: argument "${key}" must be an integer`);
+        }
+      } else if (expectedType === 'number') {
+        if (typeof val !== 'number' || !Number.isFinite(val)) {
+          errors.push(`${toolName}: argument "${key}" must be a finite number`);
+        }
+      } else if (expectedType === 'boolean') {
+        if (typeof val !== 'boolean') {
+          errors.push(`${toolName}: argument "${key}" must be a boolean`);
+        }
+      } else if (expectedType === 'array') {
+        if (!Array.isArray(val)) {
+          errors.push(`${toolName}: argument "${key}" must be an array`);
+        }
+      } else if (expectedType === 'object') {
+        if (typeof val !== 'object' || val === null || Array.isArray(val)) {
+          errors.push(`${toolName}: argument "${key}" must be an object`);
+        }
+      } else if (expectedType === 'string') {
+        if (typeof val !== 'string') {
+          errors.push(`${toolName}: argument "${key}" must be a string`);
+        }
+      }
+    }
+
+    if (schema?.additionalProperties === false && Object.keys(props).length > 0) {
+      for (const key of Object.keys(args)) {
+        if (!(key in props)) {
+          errors.push(`${toolName}: unknown argument "${key}"`);
+        }
+      }
+    }
+  }
+
+  return errors;
+}
+
+function escapeXmlText(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 /** Render a tool call in XML tag format for step history display. */
 export function formatToolCallXml(name: string, args: Record<string, unknown>): string {
-  const parts: string[] = [`<tool_call name="${name}">`];
+  const parts: string[] = [`<tool_call name="${escapeXmlText(name).replace(/"/g, '&quot;')}">`];
   for (const [k, v] of Object.entries(args)) {
     if (v === undefined) continue;
     if (k === 'tasks' && Array.isArray(v)) {
       for (const item of v) {
         if (item && typeof item === 'object' && !Array.isArray(item)) {
           const rec = item as Record<string, unknown>;
-          const scopeAttr = typeof rec.scope === 'string' && rec.scope ? ` scope="${rec.scope}"` : '';
-          parts.push(`<task${scopeAttr}>${String(rec.task ?? '')}</task>`);
-        } else {
-          parts.push(`<task>${String(item)}</task>`);
+          const scopeAttr =
+            typeof rec.scope === 'string' && rec.scope
+              ? ` scope="${escapeXmlText(rec.scope).replace(/"/g, '&quot;')}"`
+              : '';
+          parts.push(`<task${scopeAttr}>${escapeXmlText(String(rec.task ?? ''))}</task>`);
+          parts.push(`<task>${escapeXmlText(String(item))}</task>`);
         }
       }
     } else if (Array.isArray(v)) {
-      parts.push(`<${k}>${v.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(', ')}</${k}>`);
+      parts.push(
+        `<${k}>${escapeXmlText(v.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(', '))}</${k}>`,
+      );
     } else if (typeof v === 'object' && v !== null) {
-      parts.push(`<${k}>${JSON.stringify(v)}</${k}>`);
+      parts.push(`<${k}>${escapeXmlText(JSON.stringify(v))}</${k}>`);
     } else {
-      parts.push(`<${k}>${String(v)}</${k}>`);
+      parts.push(`<${k}>${escapeXmlText(String(v))}</${k}>`);
     }
   }
   parts.push('</tool_call>');

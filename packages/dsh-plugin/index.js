@@ -1,11 +1,19 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
+let dshIsAgentLoopRequest;
+const dshLlmProbe = import('@deepseek-ai/dsh-llm')
+  .then((mod) => {
+    if (typeof mod?.isAgentLoopRequest === 'function') {
+      dshIsAgentLoopRequest = mod.isAgentLoopRequest;
+    }
+  })
+  .catch(() => {});
 const ENGINE_STANDARD = 'standard';
 const ENGINE_RAF = 'raf';
 const ENGINE_ROUTE = '/plugins/@raf/dsh-plugin/engine';
@@ -215,9 +223,15 @@ function isHumanUserMessage(message) {
   );
 }
 
+function isInstructionMessage(message) {
+  const kind = message?.source?.kind;
+  return kind === 'agent-instructions' || kind === 'skill-catalog';
+}
+
 function isSyntheticContextMessage(message) {
   if (message === null || typeof message !== 'object' || message.role !== 'user') return false;
   if (isHumanUserMessage(message)) return false;
+  if (isInstructionMessage(message)) return true;
   const text = renderContent(message.content).trim();
   return (
     text.startsWith('<system-reminder') ||
@@ -243,6 +257,46 @@ function hasHumanUserMessage(messages) {
   return messages.some(isHumanUserMessage);
 }
 
+function extractMessageAttachments(message) {
+  if (message === null || typeof message !== 'object' || !Array.isArray(message.content)) return [];
+  const out = [];
+  for (const block of message.content) {
+    if (block === null || typeof block !== 'object') continue;
+    if (block.type === 'image') {
+      out.push({
+        kind: 'image',
+        mimeType: typeof block.mimeType === 'string' ? block.mimeType : 'image/png',
+        ...(typeof block.data === 'string' ? { data: block.data } : {}),
+        hostRef: block,
+      });
+    } else if (block.type === 'file') {
+      const att = block.attachment !== null && typeof block.attachment === 'object' ? block.attachment : undefined;
+      out.push({
+        kind: 'file',
+        name: typeof att?.name === 'string' ? att.name : 'file',
+        ...(typeof att?.mimeType === 'string' ? { mimeType: att.mimeType } : {}),
+        hostRef: block,
+      });
+    }
+  }
+  return out;
+}
+
+function extractHostAddendum(outer, messages) {
+  const parts = [];
+  if (typeof outer?.system === 'string' && outer.system.trim() !== '') {
+    parts.push(outer.system.trim());
+  } else if (Array.isArray(outer?.system)) {
+    const sysText = renderContent(outer.system);
+    if (sysText !== '') parts.push(sysText);
+  }
+  for (const msg of messages) {
+    if (!isInstructionMessage(msg)) continue;
+    const text = renderContent(msg.content).trim();
+    if (text !== '') parts.push(text);
+  }
+  return parts.join('\n\n');
+}
 const PTC_LOCKOUT_RE = /only\s+`?run_code`?\s+is\s+callable\s+directly/i;
 
 function renderTranscript(messages) {
@@ -326,8 +380,15 @@ function questionOf(messages, index) {
   return renderContent(messages[index].content);
 }
 
-function contextWindowOf(ctx, sessionId) {
+function contextWindowOf(ctx, sessionId, outer) {
   try {
+    const llm = ctx.get('llm');
+    if (llm !== undefined && typeof llm.resolveModelInfo === 'function' && outer?.provider && outer?.model) {
+      const info = llm.resolveModelInfo({ provider: outer.provider, model: outer.model });
+      if (info !== null && typeof info === 'object' && Number.isFinite(info.contextWindow) && info.contextWindow > 0) {
+        return info.contextWindow;
+      }
+    }
     const agents = ctx.get('agents');
     const meter = ctx.get('tokenMeter');
     const agent = agents !== undefined && typeof agents.get === 'function' ? agents.get(sessionId) : undefined;
@@ -345,7 +406,28 @@ function contextWindowOf(ctx, sessionId) {
 
 function dshMessage(message, outer) {
   const role = message.role === 'system' ? 'system' : message.role === 'assistant' ? 'assistant' : 'user';
-  const content = [{ type: 'text', text: message.content }];
+  let content;
+  if (Array.isArray(message.segments) && message.segments.length > 0) {
+    content = message.segments
+      .filter((seg) => seg && typeof seg.text === 'string' && seg.text !== '')
+      .map((seg) => ({
+        type: 'text',
+        text: seg.text,
+        ...(seg.cacheBreakpoint === true ? { cacheControl: { type: 'ephemeral' } } : {}),
+      }));
+  } else {
+    content = [{ type: 'text', text: message.content }];
+  }
+  if (content.length === 0) content = [{ type: 'text', text: message.content }];
+  if (role === 'user' && Array.isArray(message.attachments) && message.attachments.length > 0) {
+    for (const att of message.attachments) {
+      if (att?.hostRef !== undefined && att.hostRef !== null && typeof att.hostRef === 'object') {
+        content.push(att.hostRef);
+      } else if (att?.kind === 'image' && typeof att.data === 'string') {
+        content.push({ type: 'image', mimeType: att.mimeType ?? 'image/png', data: att.data });
+      }
+    }
+  }
   if (role === 'system') {
     return { id: randomUUID(), role, content, source: { kind: 'system-prompt' } };
   }
@@ -359,7 +441,6 @@ function dshMessage(message, outer) {
   }
   return { id: randomUUID(), role, content, source: { kind: 'user' } };
 }
-
 function mapUsage(usage) {
   const source = usage !== null && typeof usage === 'object' ? usage : {};
   const inputTokens = typeof source.inputTokens === 'number' ? source.inputTokens : 0;
@@ -695,7 +776,7 @@ function resetRateLimit() {
 }
 
 class DshLlmClient {
-  constructor(ctx, outer, profile, reasoningEffort, target, gate) {
+  constructor(ctx, outer, profile, reasoningEffort, target, gate, onRetry) {
     this.ctx = ctx;
     this.outer = outer;
     this.profile = profile;
@@ -703,6 +784,7 @@ class DshLlmClient {
     this.provider = target?.provider ?? outer.provider;
     this.model = target?.model ?? outer.model;
     this.rateLimitGate = gate ?? rateLimitGate;
+    this.onRetry = onRetry;
     this.onDelta = undefined;
     /** True when the last completed call needed at least one retry. */
     this.retried = false;
@@ -806,8 +888,13 @@ class DshLlmClient {
         }
         continue;
       }
+      const policyMax = this.ctx.get?.('llm')?.retryPolicy?.maxAttempts;
+      const maxRetryAttempts =
+        typeof policyMax === 'number' && Number.isFinite(policyMax) && policyMax >= 1
+          ? Math.floor(policyMax)
+          : RAF_LLM_RETRY_MAX_ATTEMPTS;
       const retryable =
-        attempt < RAF_LLM_RETRY_MAX_ATTEMPTS - 1 &&
+        attempt < maxRetryAttempts - 1 &&
         finishKind !== 'aborted' &&
         signal?.aborted !== true &&
         code !== undefined &&
@@ -817,6 +904,8 @@ class DshLlmClient {
         if (code !== undefined) error.code = code;
         throw error;
       }
+      const delayMs = Math.min(RAF_LLM_RETRY_BASE_DELAY_MS * 2 ** attempt, RAF_LLM_RETRY_MAX_DELAY_MS);
+      this.onRetry?.({ attempt: attempt + 1, code, delayMs });
       await rafRetryDelay(attempt + 1, signal);
     }
     return {
@@ -929,33 +1018,71 @@ function contentText(blocks) {
 function toolResultText(result) {
   const value = result === null || typeof result !== 'object' ? undefined : result.result;
   if (value === null || typeof value !== 'object') return '';
-  const text = contentText(value.content);
+  let text = contentText(value.content);
   if (value.isError === true) {
     const reason = value.error !== null && typeof value.error === 'object' && typeof value.error.message === 'string' ? value.error.message : 'tool failed';
     return text === '' ? `Tool error: ${reason}` : `Tool error: ${text}`;
   }
-  if (text !== '') return text;
-  if (value.value !== undefined) {
+  if (text === '' && value.value !== undefined) {
     try {
-      return typeof value.value === 'string' ? value.value : JSON.stringify(value.value);
+      text = typeof value.value === 'string' ? value.value : JSON.stringify(value.value);
     } catch {
-      return String(value.value);
+      text = String(value.value);
     }
   }
-  return '';
+  if (value.meta !== null && typeof value.meta === 'object') {
+    try {
+      const metaStr = JSON.stringify(value.meta);
+      if (metaStr !== '{}' && metaStr !== '') text = text === '' ? metaStr : `${text}\n[meta: ${metaStr}]`;
+    } catch {
+      // Ignore unserializable meta.
+    }
+  }
+  return text;
+}
+
+function formatBatchResult(batch) {
+  const results = Array.isArray(batch?.results) ? batch.results : [];
+  const parts = [];
+  for (let i = 0; i < results.length; i++) {
+    const res = results[i];
+    const text = toolResultText(res);
+    if (results.length > 1) {
+      parts.push(`[Result ${i + 1}/${results.length}${res?.name ? `: ${res.name}` : ''}]\n${text}`);
+    } else if (text !== '') {
+      parts.push(text);
+    }
+  }
+  if (Array.isArray(batch?.additionalContexts)) {
+    for (const extra of batch.additionalContexts) {
+      if (typeof extra === 'string' && extra.trim() !== '') {
+        parts.push(extra.trim());
+      } else if (extra !== null && typeof extra === 'object') {
+        const extraText = Array.isArray(extra.content) ? contentText(extra.content) : typeof extra.text === 'string' ? extra.text : '';
+        if (extraText !== '') parts.push(extraText);
+      }
+    }
+  }
+  if (batch?.concluded === true) {
+    parts.push('[Tool signaled concluded=true]');
+  }
+  return parts.join('\n\n');
 }
 
 function toDocId(prefix, rawLabel, fallbackIndex) {
-  const cleaned = String(rawLabel ?? '')
+  const raw = String(rawLabel ?? '');
+  const cleaned = raw
     .trim()
     .replace(/^https?:\/\//i, '')
     .replace(/[^A-Za-z0-9_.\-]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(-52);
-  return `${prefix}_${cleaned || String(fallbackIndex)}`;
+    .replace(/^_+|_+$/g, '');
+  if (cleaned === '') return `${prefix}_${String(fallbackIndex)}`;
+  if (cleaned.length <= 96) return `${prefix}_${cleaned}`;
+  const hash = createHash('sha256').update(raw).digest('hex').slice(0, 8);
+  return `${prefix}_${cleaned.slice(0, 96)}_${hash}`;
 }
 
-function normalizeToolArguments(toolName, rawArgs, motivation, schemaParameters) {
+function normalizeToolArguments(toolName, rawArgs, _motivation, schemaParameters) {
   const base =
     rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs) ? { ...rawArgs } : {};
   const props =
@@ -963,6 +1090,18 @@ function normalizeToolArguments(toolName, rawArgs, motivation, schemaParameters)
       ? schemaParameters.properties
       : undefined;
   if (props !== undefined) {
+    for (const key of Object.keys(base)) {
+      if (key in props) continue;
+      const camel = key.replace(/_([a-z])/g, (_, ch) => ch.toUpperCase());
+      const snake = key.replace(/([A-Z])/g, (_, ch) => `_${ch.toLowerCase()}`);
+      if (camel !== key && camel in props && base[camel] === undefined) {
+        base[camel] = base[key];
+        delete base[key];
+      } else if (snake !== key && snake in props && base[snake] === undefined) {
+        base[snake] = base[key];
+        delete base[key];
+      }
+    }
     for (const [key, val] of Object.entries(base)) {
       const prop = props[key];
       if (!prop || val === undefined || val === null) continue;
@@ -987,63 +1126,86 @@ function normalizeToolArguments(toolName, rawArgs, motivation, schemaParameters)
   const needsDescription =
     required.includes('description') || toolName === 'bash' || toolName === 'run_code';
   if (needsDescription && (typeof base.description !== 'string' || base.description.trim() === '')) {
-    const fromMotivation = cleanReasoningText(typeof motivation === 'string' ? motivation : '')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 100);
     const cmdPreview =
       typeof base.command === 'string' && base.command.trim() !== ''
         ? `: ${base.command.replace(/\s+/g, ' ').trim().slice(0, 60)}`
         : '';
-    base.description = fromMotivation !== '' ? fromMotivation : `Run ${toolName}${cmdPreview}`;
+    base.description = `Run ${toolName}${cmdPreview}`;
   }
   return base;
 }
 
-function indexExternalToolResult(toolName, args, text, store, sessionState, workspace, raf) {
+function buildHostFileSystem(ctx) {
+  const dshFs = typeof ctx?.get === 'function' ? ctx.get('fs') : undefined;
+  if (dshFs === undefined || dshFs === null || typeof dshFs !== 'object') {
+    return {
+      stat: (p) => stat(p),
+      readFile: (p, encoding) => readFile(p, encoding),
+    };
+  }
+  return {
+    stat: (p) => (typeof dshFs.stat === 'function' ? dshFs.stat(p) : stat(p)),
+    readFile: (p, encoding) => (typeof dshFs.readFile === 'function' ? dshFs.readFile(p, encoding) : readFile(p, encoding)),
+    ...(typeof dshFs.readdir === 'function' ? { readdir: (p, o) => dshFs.readdir(p, o) } : {}),
+    ...(typeof dshFs.lstat === 'function' ? { lstat: (p) => dshFs.lstat(p) } : {}),
+    ...(typeof dshFs.realpath === 'function' ? { realpath: (p) => dshFs.realpath(p) } : {}),
+  };
+}
+
+async function indexExternalToolResult(toolName, args, text, store, sessionState, workspace, raf, hostFs) {
+  if (toolName === 'read') return text;
   if ((toolName === 'write' || toolName === 'edit') && !text.startsWith('Tool error:')) {
     const rawTarget = args?.file_path ?? args?.path ?? args?.filePath;
     if (typeof rawTarget === 'string' && rawTarget.trim() !== '') {
       try {
         const baseDir = typeof workspace === 'string' && workspace !== '' ? workspace : process.cwd();
         const absPath = isAbsolute(rawTarget) ? resolve(rawTarget) : resolve(baseDir, rawTarget);
-        const fileText = readFileSync(absPath, 'utf8');
+        const fsImpl = hostFs ?? { stat: (p) => stat(p), readFile: (p, enc) => readFile(p, enc) };
+        const s = await fsImpl.stat(absPath).catch(() => undefined);
+        const fileText = await fsImpl.readFile(absPath, 'utf8');
+        const existing = typeof store.findByAbsPath === 'function' ? store.findByAbsPath(absPath) : undefined;
         const rel = relative(baseDir, absPath);
         const rawDocId = rel !== '' && !rel.startsWith('..') && !isAbsolute(rel) ? rel : rawTarget;
         const docId =
-          typeof raf?.sanitizeDocId === 'function'
+          existing?.id ??
+          (typeof raf?.sanitizeDocId === 'function'
             ? raf.sanitizeDocId(rawDocId)
-            : toDocId('file', rawDocId, (sessionState?.docs?.size ?? 0) + 1);
-        store.add(fileText, { id: docId, title: String(rawTarget) });
-        sessionState?.docs?.set(docId, { title: String(rawTarget), text: fileText, persist: true });
+            : toDocId('file', rawDocId, (sessionState?.docs?.size ?? 0) + 1));
+        store.add(fileText, {
+          id: docId,
+          title: String(rawTarget),
+          absPath,
+          ...(s?.mtimeMs !== undefined ? { mtimeMs: s.mtimeMs } : {}),
+          ...(s?.size !== undefined ? { byteSize: s.size } : {}),
+        });
+        sessionState?.docs?.set(docId, { title: String(rawTarget), text: fileText, persist: false });
       } catch {
-        // Non-fatal if file cannot be read synchronously after write/edit.
+        // Non-fatal if file cannot be read after write/edit.
       }
     }
     return text;
   }
-  if (toolName !== 'read' && toolName !== 'web_fetch' && toolName !== 'web_search') return text;
+  if (toolName !== 'web_fetch' && toolName !== 'web_search') return text;
   if (text.startsWith('Tool error:') || text.length < 1200) return text;
   const rawTarget =
-    args?.path ??
-    args?.file_path ??
-    args?.filePath ??
     args?.url ??
     args?.query ??
+    args?.path ??
+    args?.file_path ??
     `${toolName}_${(sessionState?.docs?.size ?? 0) + 1}`;
-  const docPrefix = toolName === 'web_search' ? 'web_search' : toolName === 'web_fetch' ? 'web' : 'file';
+  const docPrefix = toolName === 'web_search' ? 'web_search' : 'web';
   const docId = toDocId(docPrefix, rawTarget, (sessionState?.docs?.size ?? 0) + 1);
   const title = String(rawTarget);
   try {
-    const doc = store.add(text, { id: docId, title });
-    sessionState?.docs?.set(docId, { title, text, persist: true });
+    const doc = store.add(text, { id: docId, title, manifest: false, transient: true });
+    sessionState?.docs?.set(docId, { title, text, persist: false });
     return `[Indexed in ContextStore as document "${docId}" (${doc.lines.length} lines, ~${doc.tokens} tokens) — use search, outline, grep, tally, read, branch(scope="${docId}"), or llm_query on "${docId}"]\n${text}`;
   } catch {
     return text;
   }
 }
 
-async function createDshTools(ctx, sessionId, outer, signal, sessionState, workspace, raf) {
+async function createDshTools(ctx, sessionId, outer, signal, sessionState, workspace, raf, hostFs) {
   const agents = ctx.get('agents');
   const tools = ctx.get('tools');
   if (agents === undefined || tools === undefined) return [];
@@ -1054,33 +1216,40 @@ async function createDshTools(ctx, sessionId, outer, signal, sessionState, works
         ? agents.currentInitiator()
         : undefined;
   if (agent === undefined || typeof tools.definitions !== 'function' || typeof tools.execute !== 'function') return [];
-  let resolvedToolSet;
-  if (typeof tools.resolve === 'function' && outer?.provider && outer?.model) {
+  const resolveToolSet = async (stepSignal) => {
+    if (typeof tools.resolve !== 'function' || !outer?.provider || !outer?.model) return undefined;
     try {
-      resolvedToolSet = await tools.resolve({
+      return await tools.resolve({
         agent,
         modelSelection: {
           provider: outer.provider,
           model: outer.model,
           ...(outer.reasoningEffort ? { reasoningEffort: outer.reasoningEffort } : {}),
         },
-        signal: signal ?? new AbortController().signal,
+        signal: stepSignal ?? signal ?? new AbortController().signal,
       });
     } catch {
-      resolvedToolSet = undefined;
+      return undefined;
     }
-  }
+  };
   const byName = new Map();
-  const withToolSet = resolvedToolSet !== undefined ? tools.definitions(agent, resolvedToolSet) : [];
-  if (Array.isArray(withToolSet)) {
-    for (const def of withToolSet) {
-      if (def && typeof def.name === 'string') byName.set(def.name, def);
+  const initToolSet = await resolveToolSet(signal);
+  try {
+    const withToolSet = initToolSet !== undefined ? tools.definitions(agent, initToolSet) : [];
+    if (Array.isArray(withToolSet)) {
+      for (const def of withToolSet) {
+        if (def && typeof def.name === 'string') byName.set(def.name, def);
+      }
     }
-  }
-  const baseDefs = tools.definitions(agent);
-  if (Array.isArray(baseDefs)) {
-    for (const def of baseDefs) {
-      if (def && typeof def.name === 'string' && !byName.has(def.name)) byName.set(def.name, def);
+    const baseDefs = tools.definitions(agent);
+    if (Array.isArray(baseDefs)) {
+      for (const def of baseDefs) {
+        if (def && typeof def.name === 'string' && !byName.has(def.name)) byName.set(def.name, def);
+      }
+    }
+  } finally {
+    if (initToolSet !== undefined && typeof initToolSet.dispose === 'function') {
+      await Promise.resolve(initToolSet.dispose()).catch(() => {});
     }
   }
   const extra = [];
@@ -1097,8 +1266,10 @@ async function createDshTools(ctx, sessionId, outer, signal, sessionState, works
       description: definition.description,
       parameters: definition.parameters,
       execute: async (args, toolCtx) => {
+        let stepToolSet;
         try {
           const normalizedArgs = normalizeToolArguments(definition.name, args, '', definition.parameters);
+          stepToolSet = await resolveToolSet(toolCtx.signal ?? signal);
           const runBatch = () =>
             tools.execute({
               calls: [
@@ -1111,15 +1282,38 @@ async function createDshTools(ctx, sessionId, outer, signal, sessionState, works
               ],
               signal: toolCtx.signal ?? signal,
               agent,
-              ...(resolvedToolSet !== undefined ? { toolSet: resolvedToolSet } : {}),
+              ...(stepToolSet !== undefined ? { toolSet: stepToolSet } : {}),
             });
-          const batch =
+          let batch =
             typeof agents.withInitiator === 'function' ? await agents.withInitiator(agent, runBatch) : await runBatch();
-          const first = Array.isArray(batch.results) ? batch.results[0] : undefined;
-          const text = toolResultText(first);
-          return indexExternalToolResult(definition.name, normalizedArgs, text, toolCtx.store, sessionState, workspace, raf);
+          const firstText = toolResultText(Array.isArray(batch?.results) ? batch.results[0] : undefined);
+          if (PTC_LOCKOUT_RE.test(firstText) && typeof definition.execute === 'function') {
+            const directCall = () =>
+              definition.execute(normalizedArgs, { agent, signal: toolCtx.signal ?? signal });
+            const directVal =
+              typeof agents.withInitiator === 'function'
+                ? await agents.withInitiator(agent, directCall)
+                : await directCall();
+            const directText = typeof directVal === 'string' ? directVal : JSON.stringify(directVal ?? '');
+            batch = { results: [{ name: definition.name, result: { isError: false, content: [{ type: 'text', text: directText }] } }] };
+          }
+          const text = formatBatchResult(batch);
+          return await indexExternalToolResult(
+            definition.name,
+            normalizedArgs,
+            text,
+            toolCtx.store,
+            sessionState,
+            workspace,
+            raf,
+            hostFs,
+          );
         } catch (error) {
           return `Tool ${definition.name} failed: ${error instanceof Error ? error.message : String(error)}`;
+        } finally {
+          if (stepToolSet !== undefined && typeof stepToolSet.dispose === 'function') {
+            await Promise.resolve(stepToolSet.dispose()).catch(() => {});
+          }
         }
       },
     });
@@ -1335,7 +1529,7 @@ function runUsageOf(result) {
   };
 }
 
-function finishRun(turn, result, signal) {
+async function finishRun(turn, result, signal) {
   const failed = result.terminated === 'error' || typeof result.answer !== 'string' || result.answer === '';
   const status = signal?.aborted ? 'aborted' : failed ? 'error' : 'done';
   if (result?.state !== undefined && turn.sessionState !== undefined) {
@@ -1346,7 +1540,8 @@ function finishRun(turn, result, signal) {
     turn.sessionState.pending = undefined;
   }
   captureNewDocs(turn);
-  persistSessionState(turn.sessionState);
+  markSessionStateDirty(turn.sessionState);
+  await flushSessionState(turn.sessionState);
   if (turn.run === undefined) return;
   turn.finish({
     status,
@@ -1370,6 +1565,10 @@ function errorStream(message) {
   ];
 }
 
+function abortedStream() {
+  return [{ type: 'finish', reason: { kind: 'aborted' } }];
+}
+
 /**
  * Register RAF tool schemas as native DSH tools. The native loop executes the
  * call; the engine receives the observation through the next step's submit().
@@ -1391,117 +1590,17 @@ function registerRafTools(toolsCtx, raf, state) {
     rootLLM: templateLlm,
     queryLLM: templateLlm,
     store: new raf.ContextStore(),
+    documentTools: {
+      maxReadLines: 250,
+      maxReadTokens: 6000,
+      maxGrepMatches: 100,
+    },
     maxDepth: DEPTH_MAX,
   });
   const disposers = [];
   const perAgentDefinitions = [];
   const agentOverrideDisposers = new WeakMap();
   const trackedAgents = new Set();
-
-  if (typeof toolsCtx.tools?.selectExecutor === 'function') {
-    const originalSelectExecutor = toolsCtx.tools.selectExecutor.bind(toolsCtx.tools);
-    const rafExecutors = new WeakMap();
-    toolsCtx.tools.selectExecutor = (scope) => {
-      const baseExecutor = originalSelectExecutor(scope);
-      if (!isRafScope(scope, state) || baseExecutor === null || typeof baseExecutor !== 'object') {
-        return baseExecutor;
-      }
-      const cached = rafExecutors.get(baseExecutor);
-      if (cached !== undefined) return cached;
-      const PipelineCtor = baseExecutor.pipeline?.constructor;
-      const resolveTool = (name, targetScope, toolSet) =>
-        (typeof toolsCtx.tools.executable === 'function'
-          ? toolsCtx.tools.executable(name, targetScope, toolSet)
-          : undefined) ??
-        (typeof toolsCtx.tools.get === 'function'
-          ? toolsCtx.tools.get(name, targetScope, toolSet) ?? toolsCtx.tools.get(name, targetScope)
-          : undefined) ??
-        (typeof baseExecutor.pipeline?.source?.get === 'function'
-          ? baseExecutor.pipeline.source.get(name, targetScope, toolSet)
-          : typeof baseExecutor.requirePtcTransport === 'function' && name === 'run_code'
-            ? baseExecutor.requirePtcTransport()
-            : undefined);
-      const rafPipeline =
-        typeof PipelineCtor === 'function' && PipelineCtor !== Object
-          ? new PipelineCtor(baseExecutor.ctx ?? toolsCtx.tools.ctx ?? toolsCtx, {
-              get: resolveTool,
-            })
-          : baseExecutor.pipeline;
-      const descriptors = {
-        pipeline: { value: rafPipeline, enumerable: true },
-        sections: { value: [], enumerable: true },
-        describe: {
-          value: (definitions) => ({
-            schemas: (Array.isArray(definitions) ? definitions : []).map((d) => ({
-              ...(d.deferLoading === true ? { deferLoading: true } : {}),
-              name: d.name,
-              description: d.description,
-              parameters: d.parameters,
-            })),
-          }),
-          enumerable: true,
-        },
-      };
-      if (typeof PipelineCtor !== 'function' || PipelineCtor === Object) {
-        descriptors.execute = {
-          value: async (batch) => {
-            if (typeof rafPipeline?.execute === 'function') {
-              return rafPipeline.execute(batch);
-            }
-            const calls = Array.isArray(batch?.calls) ? batch.calls : [];
-            const results = [];
-            for (const call of calls) {
-              const tool = resolveTool(call.name, batch?.agent ?? scope, batch?.toolSet);
-              if (tool && typeof tool.execute === 'function') {
-                try {
-                  const parsedArgs =
-                    typeof call.arguments === 'string'
-                      ? JSON.parse(call.arguments || '{}')
-                      : (call.arguments ?? {});
-                  const value = await tool.execute(parsedArgs, {
-                    agent: batch?.agent ?? scope,
-                    signal: batch?.signal,
-                  });
-                  const content =
-                    typeof tool.output?.render === 'function'
-                      ? tool.output.render(parsedArgs, value)
-                      : [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value ?? '') }];
-                  results.push({
-                    callId: call.id,
-                    name: call.name,
-                    result: { isError: false, content, value },
-                  });
-                } catch (err) {
-                  const msg = err instanceof Error ? err.message : String(err);
-                  results.push({
-                    callId: call.id,
-                    name: call.name,
-                    result: {
-                      isError: true,
-                      content: [{ type: 'text', text: msg }],
-                      error: { message: msg },
-                    },
-                  });
-                }
-              } else if (typeof baseExecutor.execute === 'function') {
-                const sub = await baseExecutor.execute({ ...batch, calls: [call] });
-                if (Array.isArray(sub?.results) && sub.results[0]) results.push(sub.results[0]);
-              }
-            }
-            return { results };
-          },
-          enumerable: true,
-        };
-      }
-      const rafExecutor = Object.create(baseExecutor, descriptors);
-      rafExecutors.set(baseExecutor, rafExecutor);
-      return rafExecutor;
-    };
-    disposers.push(() => {
-      toolsCtx.tools.selectExecutor = originalSelectExecutor;
-    });
-  }
-
   function syncAgentOverrides(agent) {
     if (agent === null || typeof agent !== 'object') return;
     const sessionId = agent.session?.id ?? agent.id;
@@ -1582,11 +1681,20 @@ function registerRafTools(toolsCtx, raf, state) {
             board: turn.engine.board,
             ancestorTasks: [turn.question],
           });
+          const callIds = turn.pendingCallIds ?? [];
+          const callIdx = exec?.callId ? callIds.indexOf(exec.callId) : -1;
+          if (callIdx >= 0 && Array.isArray(turn.pendingObservations)) {
+            turn.pendingObservations[callIdx] = observation;
+          } else if (Array.isArray(turn.pendingObservations)) {
+            const matchIdx = (turn.pendingActions ?? []).findIndex(
+              (a, i) => a?.name === tool.name && turn.pendingObservations[i] === undefined,
+            );
+            if (matchIdx >= 0) turn.pendingObservations[matchIdx] = observation;
+          }
           turn.pendingObservation = observation;
-          if (turn.sessionState.pending !== undefined && turn.sessionState.pending.callId === turn.pendingCallId) {
-            turn.sessionState.pending = { ...turn.sessionState.pending, observation };
+          if (turn.sessionState.pending !== undefined) {
             captureNewDocs(turn);
-            persistSessionState(turn.sessionState);
+            markSessionStateDirty(turn.sessionState);
           }
           return observation;
         },
@@ -1605,7 +1713,10 @@ function registerRafTools(toolsCtx, raf, state) {
     }
     syncAllAgents();
     if (typeof toolsCtx.on === 'function') {
-      const offCreated = toolsCtx.on('agent/created', (ev) => syncAgentOverrides(ev?.agent));
+      const offCreated = toolsCtx.on('agent/created', (ev) => {
+        cloneSeededSessionState(ev?.agent, raf);
+        syncAgentOverrides(ev?.agent);
+      });
       if (typeof offCreated === 'function') disposers.push(offCreated);
       const offClaimed = toolsCtx.on('agent/inbox/claimed', (ev) => syncAgentOverrides(ev?.agent));
       if (typeof offClaimed === 'function') disposers.push(offClaimed);
@@ -1665,6 +1776,22 @@ function atomicWriteFileSync(path, content, mode = 0o600) {
   }
 }
 
+async function atomicWriteFile(path, content, mode = 0o600) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${randomBytes(6).toString('hex')}.tmp`;
+  await writeFile(temporary, content, { encoding: 'utf8', mode, flag: 'wx' });
+  try {
+    await rename(temporary, path);
+  } catch (error) {
+    try {
+      await unlink(temporary);
+    } catch {
+      // Best-effort cleanup of temp file.
+    }
+    throw error;
+  }
+}
+
 class SessionCommitBus extends EventEmitter {
   constructor(sessionState) {
     super();
@@ -1692,21 +1819,59 @@ class SessionCommitBus extends EventEmitter {
       event?.type === 'answer'
     ) {
       captureNewDocs(turn);
+      if (event.type === 'fold' && event.agent === 'root' && event.outcome?.directive) {
+        const [from, to] = event.outcome.directive.range ?? [0, 0];
+        const foldLine = `[Fold ${from}-${to}] ${event.outcome.directive.summary}`;
+        if (Array.isArray(turn?.stepFolds)) turn.stepFolds.push(foldLine);
+        if (typeof turn?.appendCustom === 'function') {
+          turn.appendCustom('raf-fold', { range: [from, to], summary: event.outcome.directive.summary });
+        }
+      }
       if (
         event.type === 'branch_report' ||
         (event.agent === 'root' && (event.type === 'fold' || event.type === 'answer'))
       ) {
-        void this.enqueueCommit(() => {
+        void this.enqueueCommit(async () => {
           if (turn?.engine) {
             turn.sessionState.rootState = turn.engine.snapshot();
           }
-          persistSessionState(turn.sessionState);
+          markSessionStateDirty(turn.sessionState);
+          await flushSessionState(turn.sessionState);
         });
       }
     }
   }
 }
 
+function cloneSeededSessionState(agent, raf) {
+  if (agent === null || typeof agent !== 'object') return;
+  const isSeeded = agent.meta?.isSeeded === true || agent.session?.header?.isSeeded === true;
+  if (!isSeeded) return;
+  const childId = agent.session?.id ?? agent.id;
+  const parentId = agent.meta?.parentSessionId ?? agent.meta?.seedSessionId ?? agent.session?.header?.parentId;
+  if (typeof childId !== 'string' || childId === '' || typeof parentId !== 'string' || parentId === '') return;
+  const parent = sessionStates.get(parentId);
+  if (!parent) return;
+  const child = getSessionState(childId, raf);
+  if (parent.rootState !== undefined) {
+    child.rootState = JSON.parse(JSON.stringify(parent.rootState));
+  }
+  try {
+    child.board = raf.ResearchBoard.restore(parent.board.snapshot());
+  } catch {
+    child.board = new raf.ResearchBoard();
+  }
+  child.docs.clear();
+  for (const [k, v] of parent.docs.entries()) {
+    child.docs.set(k, { ...v });
+  }
+  child.initialQuestion = parent.initialQuestion;
+  child.initialManifest = parent.initialManifest;
+  child.initialDocIds = parent.initialDocIds ? new Set(parent.initialDocIds) : undefined;
+  for (const src of parent.sources) child.sources.add(src);
+  child.loaded = true;
+  markSessionStateDirty(child);
+}
 function getSessionState(sessionId, raf) {
   const key = typeof sessionId === 'string' && sessionId !== '' ? sessionId : 'default';
   let state = sessionStates.get(key);
@@ -1731,9 +1896,9 @@ function getSessionState(sessionId, raf) {
       turnStatus: undefined,
       pending: undefined,
       commitBus: undefined,
+      dirty: false,
     };
     state.commitBus = new SessionCommitBus(state);
-    sessionStates.set(key, state);
   } else if (!state.commitBus) {
     state.commitBus = new SessionCommitBus(state);
   }
@@ -1754,8 +1919,7 @@ function captureNewDocs(turn) {
   }
 }
 
-function persistSessionState(state) {
-  if (state === undefined || typeof state.sessionId !== 'string' || state.sessionId === '') return;
+function buildSessionSnapshotJson(state) {
   const docs = Object.create(null);
   let docChars = 0;
   let docCount = 0;
@@ -1782,7 +1946,7 @@ function persistSessionState(state) {
   } catch {
     boardSnapshot = undefined;
   }
-  const snapshot = {
+  return JSON.stringify({
     version: 2,
     sessionId: state.sessionId,
     updatedAt: Date.now(),
@@ -1795,13 +1959,29 @@ function persistSessionState(state) {
     ...(boardSnapshot !== undefined ? { board: boardSnapshot } : {}),
     docs,
     ...(skippedDocs > 0 ? { skippedDocs } : {}),
-  };
-  const path = sessionStatePath(state.sessionId);
+  });
+}
+
+function markSessionStateDirty(state) {
+  if (state !== undefined) state.dirty = true;
+}
+
+async function flushSessionState(state) {
+  if (state === undefined || !state.dirty || typeof state.sessionId !== 'string' || state.sessionId === '') return;
+  state.dirty = false;
   try {
-    // Small, abort-critical file: write it synchronously so a crash or turn
-    // abort cannot lose the fold state that the next turn must resume.
-    const json = JSON.stringify(snapshot);
-    atomicWriteFileSync(path, json, 0o600);
+    await atomicWriteFile(sessionStatePath(state.sessionId), buildSessionSnapshotJson(state), 0o600);
+  } catch (error) {
+    state.dirty = true;
+    console.error('RAF: cannot persist session state', error);
+  }
+}
+
+function persistSessionState(state) {
+  if (state === undefined || typeof state.sessionId !== 'string' || state.sessionId === '') return;
+  state.dirty = false;
+  try {
+    atomicWriteFileSync(sessionStatePath(state.sessionId), buildSessionSnapshotJson(state), 0o600);
   } catch (error) {
     console.error('RAF: cannot persist session state', error);
   }
@@ -1862,15 +2042,19 @@ async function loadSessionState(sessionId, raf) {
       !Array.isArray(pending.action.arguments) &&
       (pending.observation === undefined || typeof pending.observation === 'string')
     ) {
+      const validActions = Array.isArray(pending.actions) && pending.actions.length > 0 ? pending.actions : [pending.action];
+      const validCallIds = Array.isArray(pending.callIds) && pending.callIds.length > 0 ? pending.callIds : [pending.callId];
       state.pending = {
         callId: pending.callId,
+        callIds: validCallIds,
         step: pending.step,
         motivation: pending.motivation,
         action: { name: pending.action.name, arguments: pending.action.arguments },
+        actions: validActions,
         ...(pending.observation !== undefined ? { observation: pending.observation } : {}),
+        ...(Array.isArray(pending.observations) ? { observations: pending.observations } : {}),
       };
     }
-    // Manifests and doc ids are rebuilt after documents and workspace ingest.
     // A persisted manifest can reference a document that the size cap skipped.
     state.initialManifest = undefined;
     state.initialDocIds = undefined;
@@ -1892,10 +2076,16 @@ function latestCheckpointText(messages) {
 }
 
 function sameTurn(turn, position, human, messages) {
-  if (turn === undefined || turn.finished || turn.pendingCallId === undefined) return false;
+  if (turn === undefined || turn.finished) return false;
+  const callIds = Array.isArray(turn.pendingCallIds) && turn.pendingCallIds.length > 0
+    ? turn.pendingCallIds
+    : turn.pendingCallId !== undefined
+      ? [turn.pendingCallId]
+      : [];
+  if (callIds.length === 0) return false;
   if (human?.id !== undefined && turn.userMessageId !== undefined && human.id !== turn.userMessageId) return false;
   if (position !== undefined && turn.nativeTurn !== undefined && turn.nativeTurn !== position.turn) return false;
-  return toolResultFor(messages, turn.pendingCallId) !== undefined || turn.pendingObservation !== undefined;
+  return callIds.some((cid, idx) => toolResultFor(messages, cid) !== undefined || turn.pendingObservations?.[idx] !== undefined) || turn.pendingObservation !== undefined;
 }
 
 function workspaceOf(ctx, session) {
@@ -2011,7 +2201,7 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
       }
     }
   }
-  const contextWindow = contextWindowOf(ctx, outer.sessionId);
+  const contextWindow = contextWindowOf(ctx, outer.sessionId, outer);
   const rootTarget = { provider: outer.provider, model: outer.model };
   const branchTarget = resolveTierTarget(outer, settings, 'BRANCH', rootTarget);
   const queryTarget = resolveTierTarget(outer, settings, 'QUERY', rootTarget);
@@ -2025,17 +2215,32 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
   const branchProfile = { name: branchTarget.model, contextWindow, maxOutputTokens: RAF_ROOT_MAX_OUTPUT };
   const queryProfile = { name: queryTarget.model, contextWindow, maxOutputTokens: RAF_QUERY_MAX_OUTPUT };
   const activeGate = raf.defaultRateLimitGate ?? rateLimitGate;
-  const rootLLM = new DshLlmClient(ctx, outer, rootProfile, outer.reasoningEffort, rootTarget, activeGate);
+  const hostFs = buildHostFileSystem(ctx);
+  const hostAddendum = extractHostAddendum(outer, messages);
+  const userMessage = userIndex >= 0 ? messages[userIndex] : undefined;
+  const initialAttachments = extractMessageAttachments(userMessage);
+  const appendCustom =
+    typeof session?.appendCustom === 'function' ? (type, data) => session.appendCustom(type, data) : undefined;
+  const run = runs.create({
+    sessionId: outer.sessionId,
+    model: `${outer.provider}/${outer.model}`,
+    settings: { ...settings },
+    question: effectiveQuestion,
+  });
+  const onRetry = (info) => {
+    runs.append(run, { type: 'llm_retry', ...info });
+  };
+  const rootLLM = new DshLlmClient(ctx, outer, rootProfile, outer.reasoningEffort, rootTarget, activeGate, onRetry);
   const branchLLM =
     branchConfigured || branchTarget.provider !== rootTarget.provider || branchTarget.model !== rootTarget.model
-      ? new DshLlmClient(ctx, outer, branchProfile, branchEffort, branchTarget, activeGate)
+      ? new DshLlmClient(ctx, outer, branchProfile, branchEffort, branchTarget, activeGate, onRetry)
       : undefined;
-  const queryLLM = new DshLlmClient(ctx, outer, queryProfile, undefined, queryTarget, activeGate);
-  const persistIngested = (res, persist = true) => {
+  const queryLLM = new DshLlmClient(ctx, outer, queryProfile, undefined, queryTarget, activeGate, onRetry);
+  const persistIngested = (res) => {
     if (!res || !Array.isArray(res.files)) return;
     for (const file of res.files) {
       if (file && typeof file.id === 'string' && typeof file.content === 'string') {
-        sessionState.docs.set(file.id, { title: file.title ?? file.id, text: file.content, persist });
+        sessionState.docs.set(file.id, { title: file.title ?? file.id, text: file.content, persist: false });
       }
     }
   };
@@ -2044,13 +2249,14 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     try {
       const res = await store.addPath(workspace, {
         cwd: workspace,
+        fs: hostFs,
         idPrefix: '',
         maxFiles: 1200,
         maxWalkFileBytes: 8 * 1024 * 1024,
         skipRichDocuments: true,
         signal: outer.signal,
       });
-      persistIngested(res, false);
+      persistIngested(res);
       sessionState.sources.add(workspace);
     } catch {
       // Non-fatal if workspace is empty or inaccessible.
@@ -2061,7 +2267,7 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
   for (const promptPath of promptPaths) {
     if (sessionState.sources.has(promptPath)) continue;
     try {
-      const res = await store.addPath(promptPath, { cwd: workspace, signal: outer.signal });
+      const res = await store.addPath(promptPath, { cwd: workspace, fs: hostFs, signal: outer.signal });
       persistIngested(res);
       sessionState.sources.add(promptPath);
       sessionState.board.record({
@@ -2095,12 +2301,6 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     sessionState.initialManifest = store.manifest();
     sessionState.initialDocIds = new Set(store.list().map((d) => d.id));
   }
-  const run = runs.create({
-    sessionId: outer.sessionId,
-    model: `${outer.provider}/${outer.model}`,
-    settings: { ...settings },
-    question: effectiveQuestion,
-  });
   const turn = {
     sessionId: outer.sessionId,
     run,
@@ -2109,6 +2309,7 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     store,
     sessionState,
     workspace,
+    hostFs,
     raf,
     tools: new Map(),
     question: effectiveQuestion,
@@ -2116,9 +2317,14 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     nativeTurn: position?.turn,
     nativeStep: position?.step ?? 0,
     step: 0,
+    stepFolds: [],
+    appendCustom,
     pendingCallId: undefined,
+    pendingCallIds: [],
     pendingObservation: undefined,
+    pendingObservations: [],
     pendingAction: undefined,
+    pendingActions: [],
     finished: false,
     signal: outer.signal,
     emit: (event) => {
@@ -2126,14 +2332,14 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
       sessionState.commitBus?.recordEvent(turn, event);
     },
   };
-  const extraTools = await createDshTools(ctx, outer.sessionId, outer, outer.signal, sessionState, workspace, raf);
+  const extraTools = await createDshTools(ctx, outer.sessionId, outer, outer.signal, sessionState, workspace, raf, hostFs);
   const engine = new raf.RecursiveAgentFold({
     rootLLM,
     ...(branchLLM !== undefined ? { branchLLM } : {}),
     queryLLM,
     store,
     board: sessionState.board,
-    ingest: { cwd: workspace, onIngest: persistIngested },
+    ingest: { cwd: workspace, fs: hostFs, onIngest: persistIngested },
     documentTools: {
       maxReadLines: 250,
       maxReadTokens: 6000,
@@ -2142,7 +2348,6 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     maxDepth: settings.depth,
     agent: {
       temperature: 0,
-      maxToolCallsPerStep: 1,
       maxObservationTokens: 6400,
       maxInvalidSteps: RAF_MAX_INVALID_STEPS,
       maxInvalidTotal: RAF_MAX_INVALID_TOTAL,
@@ -2171,18 +2376,20 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
     turn.tools.set(`raf_${tool.name}`, tool);
     turn.tools.set(`ref_${tool.name}`, tool);
   }
+  const commonBeginOpts = {
+    initialManifest: sessionState.initialManifest,
+    initialDocIds: sessionState.initialDocIds,
+    ...(initialAttachments.length > 0 ? { initialAttachments } : {}),
+    ...(hostAddendum !== '' ? { systemPromptAddendum: hostAddendum } : {}),
+  };
   if (sessionState.rootState !== undefined) {
     engine.begin(sessionState.initialQuestion ?? effectiveQuestion, {
       initialState: sessionState.rootState,
       followUpQuestion: effectiveQuestion,
-      initialManifest: sessionState.initialManifest,
-      initialDocIds: sessionState.initialDocIds,
+      ...commonBeginOpts,
     });
   } else {
-    engine.begin(effectiveQuestion, {
-      initialManifest: sessionState.initialManifest,
-      initialDocIds: sessionState.initialDocIds,
-    });
+    engine.begin(effectiveQuestion, commonBeginOpts);
   }
   if (sessionState.pending !== undefined) {
     const pending = sessionState.pending;
@@ -2190,8 +2397,14 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
       if (sessionState.rootState === undefined) {
         throw new Error('RAF: pending tool call has no fold state to resume; refusing to re-run the tool');
       }
-      const saved = pending.observation ?? toolResultFor(messages, pending.callId)?.text;
-      if (saved === undefined) {
+      const pendingCallIds =
+        Array.isArray(pending.callIds) && pending.callIds.length > 0 ? pending.callIds : [pending.callId];
+      const savedObs = pendingCallIds.map((cid, i) => {
+        const existingObs = Array.isArray(pending.observations) ? pending.observations[i] : pending.observation;
+        const fromMsg = toolResultFor(messages, cid)?.text;
+        return existingObs ?? fromMsg;
+      });
+      if (savedObs.some((obs) => obs === undefined)) {
         throw new Error(
           `RAF: pending tool call "${pending.action.name}" (${pending.callId}) has no saved result; refusing to re-run it`,
         );
@@ -2200,16 +2413,19 @@ async function ensureTurn(ctx, outer, settings, runs, raf) {
         step: pending.step,
         motivation: pending.motivation,
         action: pending.action,
+        ...(Array.isArray(pending.actions) && pending.actions.length > 0 ? { actions: pending.actions } : {}),
       });
-      engine.submit(saved);
+      engine.submit(savedObs.length === 1 ? savedObs[0] : savedObs);
       sessionState.rootState = engine.snapshot();
       sessionState.pending = undefined;
       captureNewDocs({ sessionState, store });
-      persistSessionState(sessionState);
+      markSessionStateDirty(sessionState);
+      await flushSessionState(sessionState);
     } catch (error) {
       sessionState.pending = undefined;
       sessionState.turnStatus = 'error';
-      persistSessionState(sessionState);
+      markSessionStateDirty(sessionState);
+      await flushSessionState(sessionState);
       throw error;
     }
   }
@@ -2233,75 +2449,98 @@ async function* rafStream(ctx, outer, settings, runs) {
     const raf = await loadRaf();
     turn = await ensureTurn(ctx, outer, settings, runs, raf);
   } catch (error) {
-    for (const chunk of errorStream(error instanceof Error ? error.message : String(error))) yield chunk;
+    if (outer.signal?.aborted === true) {
+      for (const chunk of abortedStream()) yield chunk;
+    } else {
+      for (const chunk of errorStream(error instanceof Error ? error.message : String(error))) yield chunk;
+    }
     return;
   }
   try {
-    if (turn.pendingCallId !== undefined) {
-      let result = toolResultFor(outer.messages, turn.pendingCallId);
-      if (
-        result?.isError === true &&
-        PTC_LOCKOUT_RE.test(result.text) &&
-        turn.pendingAction !== undefined
-      ) {
-        const fallbackTool = turn.tools.get(turn.pendingAction.name);
-        if (fallbackTool !== undefined && typeof fallbackTool.execute === 'function') {
-          try {
-            const fallbackOut = await fallbackTool.execute(turn.pendingAction.arguments ?? {}, {
-              store: turn.store,
-              usage: turn.engine.usage,
-              depth: 0,
-              agentName: 'root',
-              step: turn.step,
-              emit: turn.emit,
-              signal: outer.signal,
-              board: turn.engine.board,
-              ancestorTasks: [turn.question],
-            });
-            result = { text: String(fallbackOut ?? ''), isError: false };
-          } catch (fallbackErr) {
-            result = {
-              text: `Tool error: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`,
-              isError: true,
-            };
+    const callIds =
+      Array.isArray(turn.pendingCallIds) && turn.pendingCallIds.length > 0
+        ? turn.pendingCallIds
+        : turn.pendingCallId !== undefined
+          ? [turn.pendingCallId]
+          : [];
+    if (callIds.length > 0) {
+      const actions =
+        Array.isArray(turn.pendingActions) && turn.pendingActions.length > 0
+          ? turn.pendingActions
+          : turn.pendingAction !== undefined
+            ? [turn.pendingAction]
+            : [];
+      const indexedObs = new Array(callIds.length);
+      const errTexts = [];
+      for (let idx = 0; idx < callIds.length; idx++) {
+        const cid = callIds[idx];
+        const act = actions[idx] ?? turn.pendingAction;
+        let result = toolResultFor(outer.messages, cid);
+        if (result?.isError === true && PTC_LOCKOUT_RE.test(result.text) && act !== undefined) {
+          const fallbackTool = turn.tools.get(act.name);
+          if (fallbackTool !== undefined && typeof fallbackTool.execute === 'function') {
+            try {
+              const fallbackOut = await fallbackTool.execute(act.arguments ?? {}, {
+                store: turn.store,
+                usage: turn.engine.usage,
+                depth: 0,
+                agentName: 'root',
+                step: turn.step,
+                emit: turn.emit,
+                signal: outer.signal,
+                board: turn.engine.board,
+                ancestorTasks: [turn.question],
+              });
+              result = { text: String(fallbackOut ?? ''), isError: false };
+            } catch (fallbackErr) {
+              result = {
+                text: `Tool error: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`,
+                isError: true,
+              };
+            }
           }
         }
+        const isError = result?.isError === true;
+        const preObs = turn.pendingObservations?.[idx] ?? (idx === 0 ? turn.pendingObservation : undefined);
+        const observed = isError
+          ? (result?.text ?? '') || (preObs ?? '')
+          : (preObs ?? '') || (result?.text ?? '');
+        const observation =
+          observed !== ''
+            ? observed
+            : result !== undefined || preObs !== undefined
+              ? '(completed with no output)'
+              : 'Error: tool result missing';
+        if (isError) errTexts.push(observation);
+        indexedObs[idx] = isError
+          ? observation
+          : await indexExternalToolResult(
+              act?.name,
+              act?.arguments,
+              observation,
+              turn.store,
+              turn.sessionState,
+              turn.workspace,
+              turn.raf,
+              turn.hostFs,
+            );
       }
-      const isError = result?.isError === true;
-      const observed = isError
-        ? (result?.text ?? '') || (turn.pendingObservation ?? '')
-        : (turn.pendingObservation ?? '') || (result?.text ?? '');
-      const observation =
-        observed !== ''
-          ? observed
-          : result !== undefined || turn.pendingObservation !== undefined
-            ? '(completed with no output)'
-            : 'Error: tool result missing';
-      const indexed = isError
-        ? observation
-        : indexExternalToolResult(
-            turn.pendingAction?.name,
-            turn.pendingAction?.arguments,
-            observation,
-            turn.store,
-            turn.sessionState,
-            turn.workspace,
-            turn.raf,
-          );
-      if (turn.sessionState.pending !== undefined && turn.sessionState.pending.callId === turn.pendingCallId) {
-        turn.sessionState.pending = { ...turn.sessionState.pending, observation: indexed };
-        captureNewDocs(turn);
-        persistSessionState(turn.sessionState);
-      }
-      turn.engine.submit(indexed, isError ? { error: observation } : undefined);
+      turn.engine.submit(
+        indexedObs.length === 1 ? indexedObs[0] : indexedObs,
+        errTexts.length > 0 ? { error: errTexts.join('; ') } : undefined,
+      );
       turn.pendingCallId = undefined;
+      turn.pendingCallIds = [];
       turn.pendingObservation = undefined;
+      turn.pendingObservations = [];
       turn.pendingAction = undefined;
+      turn.pendingActions = [];
       turn.sessionState.pending = undefined;
       const snapshot = typeof turn.engine.snapshot === 'function' ? turn.engine.snapshot() : undefined;
       if (snapshot !== undefined) turn.sessionState.rootState = snapshot;
       captureNewDocs(turn);
-      persistSessionState(turn.sessionState);
+      markSessionStateDirty(turn.sessionState);
+      await flushSessionState(turn.sessionState);
     }
     let liveText = '';
     let liveOpen = false;
@@ -2365,21 +2604,26 @@ async function* rafStream(ctx, outer, settings, runs) {
     const step = stepResult;
     if (step === undefined) throw new Error('RAF step produced no result');
     captureNewDocs(turn);
-    persistSessionState(turn.sessionState);
+    markSessionStateDirty(turn.sessionState);
     const reasoningFallback = typeof step.reasoning === 'string' ? step.reasoning.trim() : '';
     // A retried call never re-streams reasoning, so streamed deltas can be a failed prefix.
     const streamedReasoning = turn.rootLLM.retried === true ? '' : cleanReasoningText(liveText);
+    const foldHeader =
+      Array.isArray(turn.stepFolds) && turn.stepFolds.length > 0 ? turn.stepFolds.splice(0).join('\n') : '';
     const motivation =
       step.kind === 'tool' && typeof step.motivation === 'string'
         ? cleanReasoningText(step.motivation).replace(/^[.,;:!?\-\s]+/u, '')
         : '';
     const visible = capVisibleReasoning(
-      cleanReasoningText([
-        streamedReasoning !== '' ? streamedReasoning : reasoningFallback,
-        motivation !== '' ? `→ ${motivation}` : '',
-      ]
-        .filter(Boolean)
-        .join('\n\n')),
+      cleanReasoningText(
+        [
+          foldHeader,
+          streamedReasoning !== '' ? streamedReasoning : reasoningFallback,
+          motivation !== '' ? `→ ${motivation}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
+      ),
     );
     let index = 0;
     if (liveOpen) {
@@ -2392,32 +2636,50 @@ async function* rafStream(ctx, outer, settings, runs) {
       index = 1;
     }
     if (step.kind === 'tool') {
-      const callId = randomUUID();
-      const targetTool = turn.tools.get(step.action.name);
-      const normalizedArgs = normalizeToolArguments(
-        step.action.name,
-        step.action.arguments,
-        step.motivation,
-        targetTool?.parameters,
-      );
-      const normalizedAction = { name: step.action.name, arguments: normalizedArgs };
-      turn.pendingCallId = callId;
-      turn.pendingAction = normalizedAction;
+      const rawActions = Array.isArray(step.actions) && step.actions.length > 0 ? step.actions : [step.action];
+      const callIds = new Array(rawActions.length);
+      const normalizedActions = new Array(rawActions.length);
+      for (let i = 0; i < rawActions.length; i++) {
+        const act = rawActions[i] ?? step.action;
+        const callId = randomUUID();
+        const targetTool = turn.tools.get(act.name);
+        const normalizedArgs = normalizeToolArguments(
+          act.name,
+          act.arguments,
+          step.motivation,
+          targetTool?.parameters,
+        );
+        callIds[i] = callId;
+        normalizedActions[i] = { name: act.name, arguments: normalizedArgs };
+      }
+      turn.pendingCallId = callIds[0];
+      turn.pendingCallIds = callIds;
+      turn.pendingAction = normalizedActions[0];
+      turn.pendingActions = normalizedActions;
+      turn.pendingObservations = new Array(rawActions.length);
       turn.step = step.step;
       turn.sessionState.pending = {
-        callId,
+        callId: callIds[0],
+        callIds,
         step: step.step,
         motivation: step.motivation,
-        action: normalizedAction,
+        action: normalizedActions[0],
+        actions: normalizedActions,
       };
       const pendingSnapshot = typeof turn.engine.snapshot === 'function' ? turn.engine.snapshot() : undefined;
       if (pendingSnapshot !== undefined) turn.sessionState.rootState = pendingSnapshot;
       captureNewDocs(turn);
-      persistSessionState(turn.sessionState);
-      const args = JSON.stringify(normalizedArgs);
-      yield { type: 'block-start', index, blockType: 'tool-call' };
-      yield { type: 'tool-call-delta', index, id: callId, name: step.action.name, argumentsDelta: args };
-      yield { type: 'block-end', index, block: { type: 'tool-call', id: callId, name: step.action.name, arguments: args } };
+      markSessionStateDirty(turn.sessionState);
+      await flushSessionState(turn.sessionState);
+      for (let i = 0; i < normalizedActions.length; i++) {
+        const callId = callIds[i];
+        const normAct = normalizedActions[i];
+        const args = JSON.stringify(normAct.arguments);
+        yield { type: 'block-start', index, blockType: 'tool-call' };
+        yield { type: 'tool-call-delta', index, id: callId, name: normAct.name, argumentsDelta: args };
+        yield { type: 'block-end', index, block: { type: 'tool-call', id: callId, name: normAct.name, arguments: args } };
+        index += 1;
+      }
       if (step.usage !== undefined) yield stepUsageChunk(step.lastUsage ?? step.usage);
       yield { type: 'finish', reason: { kind: 'stop' } };
       return;
@@ -2431,7 +2693,7 @@ async function* rafStream(ctx, outer, settings, runs) {
       }
       if (step.usage !== undefined) yield stepUsageChunk(step.lastUsage ?? step.usage);
       yield { type: 'finish', reason: { kind: 'stop' } };
-      finishRun(turn, step.result, outer.signal);
+      await finishRun(turn, step.result, outer.signal);
     } else {
       const answer = typeof step.result.answer === 'string' && step.result.answer !== '' ? step.result.answer : '';
       const failure =
@@ -2455,23 +2717,27 @@ async function* rafStream(ctx, outer, settings, runs) {
           yield { type: 'block-end', index, block: { type: 'text', text: fallback } };
           if (step.usage !== undefined) yield stepUsageChunk(step.lastUsage ?? step.usage);
           yield { type: 'finish', reason: { kind: 'stop' } };
-          finishRun(turn, result, outer.signal);
+          await finishRun(turn, result, outer.signal);
           turn.finished = true;
           activeTurns.delete(outer.sessionId);
           return;
         }
-        // A failed engine run must fail the step. Reporting its error as answer text hides the failure.
-        finishRun(turn, step.result, outer.signal);
+        // A failed engine run must fail the step unless the outer request was aborted.
+        await finishRun(turn, step.result, outer.signal);
         turn.finished = true;
         activeTurns.delete(outer.sessionId);
-        yield { type: 'finish', reason: { kind: 'error', failure: { message: failure, code: 'ERROR' } } };
+        if (outer.signal?.aborted === true) {
+          for (const chunk of abortedStream()) yield chunk;
+        } else {
+          yield { type: 'finish', reason: { kind: 'error', failure: { message: failure, code: 'ERROR' } } };
+        }
         return;
       }
       yield { type: 'block-start', index, blockType: 'text' };
       yield { type: 'text-delta', index, text: answer };
       yield { type: 'block-end', index, block: { type: 'text', text: answer } };
       yield { type: 'finish', reason: { kind: 'stop' } };
-      finishRun(turn, step.result, outer.signal);
+      await finishRun(turn, step.result, outer.signal);
     }
     turn.finished = true;
     activeTurns.delete(outer.sessionId);
@@ -2487,7 +2753,7 @@ async function* rafStream(ctx, outer, settings, runs) {
         yield { type: 'text-delta', index: 0, text: fallback };
         yield { type: 'block-end', index: 0, block: { type: 'text', text: fallback } };
         yield { type: 'finish', reason: { kind: 'stop' } };
-        finishRun(
+        await finishRun(
           turn,
           { state: snapshot, answer: fallback, terminated: 'forced_answer', usage: turn.engine?.usage },
           outer.signal,
@@ -2505,7 +2771,8 @@ async function* rafStream(ctx, outer, settings, runs) {
       const status = outer.signal?.aborted ? 'aborted' : 'error';
       if (turn.sessionState !== undefined) turn.sessionState.turnStatus = status;
       captureNewDocs(turn);
-      persistSessionState(turn.sessionState);
+      markSessionStateDirty(turn.sessionState);
+      await flushSessionState(turn.sessionState);
       if (turn.run !== undefined) {
         turn.finish({ status, answer: '', error: message, usage: null });
         turn.run = undefined;
@@ -2513,7 +2780,11 @@ async function* rafStream(ctx, outer, settings, runs) {
       turn.finished = true;
       activeTurns.delete(outer.sessionId);
     }
-    for (const chunk of errorStream(message)) yield chunk;
+    if (outer.signal?.aborted === true) {
+      for (const chunk of abortedStream()) yield chunk;
+    } else {
+      for (const chunk of errorStream(message)) yield chunk;
+    }
   }
 }
 
@@ -2544,38 +2815,55 @@ async function readBody(req) {
 }
 
 function admissionRejection(ctx, req) {
+  if (ctx?._isRafMockHost === true) return undefined;
   try {
     const connection = ctx.get('connection');
-    if (connection === undefined || typeof connection.admit !== 'function') return undefined;
+    if (connection === undefined || typeof connection.admit !== 'function') return 403;
     const admission = connection.admit(req);
     return 'rejection' in admission ? admission.rejection : undefined;
   } catch {
-    return undefined;
+    return 403;
   }
 }
+
+const compactionOriginals = new WeakMap();
 
 export function apply(ctx) {
   const state = loadState();
   const runs = createRunRegistry();
   let disposed = false;
 
-  ctx.effect(() => () => activeTurns.clear(), 'raf: active turns');
+  ctx.effect(() => () => {
+    for (const s of sessionStates.values()) {
+      if (s.dirty) persistSessionState(s);
+    }
+    activeTurns.clear();
+  }, 'raf: active turns');
 
   const wrapCompaction = (compaction) => {
-    if (!compaction || typeof compaction.compactIfNeeded !== 'function' || compaction._rafWrapped) {
+    if (!compaction || typeof compaction.compactIfNeeded !== 'function' || compactionOriginals.has(compaction)) {
       return () => {};
     }
-    const original = compaction.compactIfNeeded.bind(compaction);
-    compaction._rafWrapped = true;
+    const rawDescriptor = Object.getOwnPropertyDescriptor(compaction, 'compactIfNeeded');
+    const originalFn = compaction.compactIfNeeded;
+    const boundOriginal = originalFn.bind(compaction);
+    compactionOriginals.set(compaction, { rawDescriptor, originalFn });
     compaction.compactIfNeeded = (agent, trigger, signal) => {
       if (trigger === 'pressure' && isRafScope(agent, state)) {
         return Promise.resolve(null);
       }
-      return original(agent, trigger, signal);
+      return boundOriginal(agent, trigger, signal);
     };
     return () => {
-      compaction.compactIfNeeded = original;
-      delete compaction._rafWrapped;
+      const saved = compactionOriginals.get(compaction);
+      if (saved !== undefined) {
+        if (saved.rawDescriptor !== undefined) {
+          Object.defineProperty(compaction, 'compactIfNeeded', saved.rawDescriptor);
+        } else {
+          delete compaction.compactIfNeeded;
+        }
+        compactionOriginals.delete(compaction);
+      }
     };
   };
   ctx.effect(() => wrapCompaction(ctx.get?.('compaction')), 'raf: suppress pressure compaction');
@@ -2624,11 +2912,15 @@ export function apply(ctx) {
   ctx.on('llm/stream', (options, next) => {
     if (rafInternal.getStore() === true) return next();
     if (options === null || typeof options !== 'object') return next();
-    // Internal DSH calls set purpose. RAF owns only the main agent call.
-    if (options.purpose !== undefined) return next();
-    // RAF answers a human request. A live RAF turn continues after tool results.
-    const messages = Array.isArray(options.messages) ? options.messages : [];
-    if (!hasHumanUserMessage(messages) && !activeTurns.has(options.sessionId)) return next();
+    if (typeof dshIsAgentLoopRequest === 'function') {
+      if (!dshIsAgentLoopRequest(options)) return next();
+    } else {
+      // Internal DSH calls set purpose. RAF owns only the main agent call.
+      if (options.purpose !== undefined) return next();
+      // RAF answers a human request. A live RAF turn continues after tool results.
+      const messages = Array.isArray(options.messages) ? options.messages : [];
+      if (!hasHumanUserMessage(messages) && !activeTurns.has(options.sessionId)) return next();
+    }
     if (engineOf(state, options.sessionId) !== ENGINE_RAF) return next();
     return rafStream(ctx, options, state.settings, runs);
   });

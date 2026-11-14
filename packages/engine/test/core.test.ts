@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { AgentFoldAgent } from '../src/agent/agent-fold.js';
+import { ContextStore } from '../src/context/store.js';
 import { FoldState } from '../src/fold/state.js';
+import { ScriptedLLM } from '../src/llm/mock.js';
 import { parseAgentResponse } from '../src/protocol/parser.js';
 import { defaultEstimator, truncateToTokens } from '../src/tokens.js';
 import { evaluateExpression } from '../src/tools/calculator.js';
+import { coerceToolArguments, formatToolCallXml, validateToolArguments } from '../src/tools/types.js';
 import { parseLooseJSON } from '../src/util/json.js';
 const act = (step: number) => ({
   step,
@@ -359,6 +363,153 @@ PY</command>
     );
     expect(pAnswer.errors).toEqual([]);
     expect(pAnswer.answer).toBe(answerText);
+  });
+
+  it('rejects unclosed <parameter>, unclosed multiline tags, unescaped protocol markup, duplicate scalars, <param_name>, and multi-value shorthand (B1, B2, B5, B6, PI-2)', () => {
+    // B1: unclosed <parameter> must not swallow next parameter into pattern
+    const pB1 = parseAgentResponse(
+      '<motivation>grep</motivation><tool_call name="grep"><parameter name="pattern">foo<parameter name="documents">["a.ts"]</parameter></tool_call>',
+      { expectFolding: false },
+    );
+    expect(pB1.errors.length).toBeGreaterThan(0);
+    expect(pB1.toolCall).toBeUndefined();
+
+    // B2: unclosed <new_string> followed by </old_string> must fail instead of writing </old_string> into file
+    const pB2 = parseAgentResponse(
+      '<motivation>edit</motivation><tool_call name="edit"><old_string>a</old_string><new_string>b</old_string></tool_call>',
+      { expectFolding: false },
+    );
+    expect(pB2.errors.some((e) => e.includes('unclosed <new_string>'))).toBe(true);
+    expect(pB2.toolCall).toBeUndefined();
+
+    // B2 CDATA escape succeeds cleanly
+    const pB2Cdata = parseAgentResponse(
+      '<motivation>edit</motivation><tool_call name="edit"><old_string>a</old_string><new_string><![CDATA[x</old_string>]]></new_string></tool_call>',
+      { expectFolding: false },
+    );
+    expect(pB2Cdata.errors).toEqual([]);
+    expect(pB2Cdata.toolCall?.arguments.new_string).toBe('x</old_string>');
+
+    // Raw unescaped protocol markup inside parameter is rejected unless CDATA or entity-escaped
+    const pRawMarkup = parseAgentResponse(
+      '<motivation>write</motivation><tool_call name="write"><path>a.txt</path><content><tool_call>x</tool_call></content></tool_call>',
+      { expectFolding: false },
+    );
+    expect(pRawMarkup.errors.some((e) => e.includes('unescaped protocol markup'))).toBe(true);
+    const pEscapedMarkup = parseAgentResponse(
+      '<motivation>write</motivation><tool_call name="write"><path>a.txt</path><content>&lt;tool_call&gt;x&lt;/tool_call&gt;</content></tool_call>',
+      { expectFolding: false },
+    );
+    expect(pEscapedMarkup.errors).toEqual([]);
+
+    // Duplicate scalar parameter in single tool_call is rejected
+    const pDupScalar = parseAgentResponse(
+      '<motivation>read</motivation><tool_call name="read"><document>a.ts</document><start_line>1</start_line><start_line>10</start_line></tool_call>',
+      { expectFolding: false },
+    );
+    expect(pDupScalar.errors.some((e) => e.includes('duplicate scalar parameter "start_line"'))).toBe(true);
+
+    // Placeholder <param_name> is rejected
+    const pPlaceholder = parseAgentResponse(
+      '<motivation>read</motivation><tool_call name="read"><param_name>a.ts</param_name></tool_call>',
+      { expectFolding: false },
+    );
+    expect(pPlaceholder.errors.some((e) => e.includes('<param_name>'))).toBe(true);
+
+    // PI-2: single-tag external tool arguments and key-value custom keys are preserved
+    const pTaskGetXml = parseAgentResponse(
+      '<motivation>get task</motivation><tool_call name="TaskGet"><taskId>4</taskId></tool_call>',
+      { expectFolding: false },
+    );
+    expect(pTaskGetXml.errors).toEqual([]);
+    expect(pTaskGetXml.toolCall).toEqual({ name: 'TaskGet', arguments: { taskId: 4 } });
+
+    const pTaskGetKv = parseAgentResponse(
+      '<motivation>get task</motivation><tool_call name="TaskGet">taskId: 4</tool_call>',
+      { expectFolding: false },
+    );
+    expect(pTaskGetKv.errors).toEqual([]);
+    expect(pTaskGetKv.toolCall).toEqual({ name: 'TaskGet', arguments: { taskId: 4 } });
+
+    const pSearchXml = parseAgentResponse(
+      '<motivation>search</motivation><tool_call name="google_search"><q>rust</q></tool_call>',
+      { expectFolding: false },
+    );
+    expect(pSearchXml.errors).toEqual([]);
+    expect(pSearchXml.toolCall).toEqual({ name: 'google_search', arguments: { q: 'rust' } });
+
+    // Shorthand scalar rejects multi-line / trailing line numbers
+    const pReadRangeShorthand = parseAgentResponse(
+      '<motivation>read</motivation><tool_call name="read">docs/GDD.md 1 140</tool_call>',
+      { expectFolding: false },
+    );
+    expect(pReadRangeShorthand.errors.some((e) => e.includes('untagged multi-value body'))).toBe(true);
+    const pBashMultiline = parseAgentResponse(
+      '<motivation>bash</motivation><tool_call name="bash">List files\nls -la</tool_call>',
+      { expectFolding: false },
+    );
+    expect(pBashMultiline.errors.some((e) => e.includes('untagged multi-value body'))).toBe(true);
+    const pSingleRead = parseAgentResponse(
+      '<motivation>read</motivation><tool_call name="read">docs/GDD.md</tool_call>',
+      { expectFolding: false },
+    );
+    expect(pSingleRead.errors).toEqual([]);
+    expect(pSingleRead.toolCall).toEqual({ name: 'read', arguments: { document: 'docs/GDD.md' } });
+  });
+});
+
+describe('tool argument validation and XML step escaping (B13)', () => {
+  it('escapes XML characters in formatToolCallXml and validates schemas before execution', async () => {
+    const xml = formatToolCallXml('edit', { old_string: 'a < b & c > d', new_string: 'x' });
+    expect(xml).toContain('a &lt; b &amp; c &gt; d');
+    expect(xml).not.toContain('a < b');
+
+    const taskGetSchema = {
+      type: 'object',
+      properties: { taskId: { type: 'string' } },
+      required: ['taskId'],
+      additionalProperties: false,
+    };
+    const coerced = coerceToolArguments({ task_id: 7 }, taskGetSchema);
+    expect(coerced).toEqual({ taskId: '7' });
+    expect(validateToolArguments('TaskGet', {}, taskGetSchema)).toEqual(['TaskGet: missing required argument "taskId"']);
+    expect(validateToolArguments('TaskGet', { taskId: '7', bogus: 1 }, taskGetSchema)).toEqual([
+      'TaskGet: unknown argument "bogus"',
+    ]);
+
+    // AgentFoldAgent.next() intercepts invalid args via FORMAT_REPAIR before executing tool
+    const store = new ContextStore();
+    const executed: Array<Record<string, unknown>> = [];
+    let callCount = 0;
+    const llm = new ScriptedLLM((req) => {
+      callCount++;
+      if (callCount === 1) {
+        return '<motivation>get task</motivation><tool_call name="TaskGet"></tool_call>';
+      }
+      if (callCount === 2) {
+        expect(req.messages.map((m) => m.content).join('\n')).toContain('missing required argument "taskId"');
+        return '<motivation>get task</motivation><tool_call name="TaskGet"><taskId>7</taskId></tool_call>';
+      }
+      return '<folding range="0-0">got 7</folding><motivation>done</motivation><answer>OK</answer>';
+    });
+    const agent = new AgentFoldAgent({
+      llm,
+      store,
+      tools: [
+        {
+          name: 'TaskGet',
+          description: 'Get task',
+          parameters: taskGetSchema,
+          async execute(args) {
+            executed.push(args);
+            return 'task 7';
+          },
+        },
+      ],
+    });
+    const res = await agent.run('Get task 7');
+    expect(res.answer).toBe('OK');
+    expect(executed).toEqual([{ taskId: '7' }]);
   });
 });
 

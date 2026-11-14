@@ -23,11 +23,14 @@ Emit tags in this exact order:
 Plain-text summary of step(s) k..n. Do not use JSON braces or escape quotes.
 </folding>
 <motivation>State verified facts, your current hypothesis, and why the next action is decisive.</motivation>
-<tool_call name="tool_name">
-<param_name>value</param_name>
+<tool_call name="read">
+<document>src/index.ts</document>
+<start_line>1</start_line>
+<end_line>60</end_line>
 </tool_call>
 
 Protocol rules:
+- **Literal XML/HTML in arguments**: Wrap literal XML/HTML or protocol-like tags inside \`edit\` or \`write\` parameters in \`<![CDATA[...]]>\` or escape as \`&lt;/tag&gt;\`.
 - **Parallel tool batching**: Emit multiple <tool_call name="...">...</tool_call> blocks in one step whenever calls are independent (for example reading multiple files, running parallel searches, or checking independent expressions).
 - **Final answer**: Replace <tool_call> with <answer>final answer</answer>. Always emit <motivation>...</motivation> before <answer>...</answer>.
 - **Answer purity**: Put ONLY the requested output inside <answer>...</answer> in the required format and language. Never echo the <folding> summary, never emit protocol tags inside <answer>, and never output placeholder text.
@@ -60,7 +63,7 @@ export const TOOL_GUIDANCE: Readonly<Record<string, string>> = Object.freeze({
   grep:
     '- **grep**: 0-token exact regex search across stored documents or workspace paths; returns total matching lines per document and numbered match lines.',
   read:
-    '- **read**: Read a 1-based line range from a document ID or workspace path (20-80 lines per window). Batch multiple `<tool_call name="read">` blocks in one step when inspecting several locations.',
+    '- **read**: Read a 1-based line range from a document ID or workspace path (follow the max line limit in the `read` tool schema). Batch multiple `<tool_call name="read">` blocks in one step when inspecting several locations.',
   tally:
     '- **tally**: 0-token exact regex and capture-group frequency counter. Never count regex matches manually. Set `<case_sensitive>true</case_sensitive>` when exact case matters.',
   branch:

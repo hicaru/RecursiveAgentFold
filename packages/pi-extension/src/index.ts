@@ -25,9 +25,11 @@ import { resolveRoutes, type Routes } from './routes.js';
 import { geminiSafeSchema } from './schema.js';
 import {
   asPersistedState,
+  buildCompactionSummary,
   ENTRY_MODE,
   ENTRY_RUN,
   ENTRY_STATE,
+  extractHostInstructions,
   messageText,
   SessionState,
   type TurnStatus,
@@ -196,7 +198,11 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
             const rawTarget = typeof record.path === 'string' ? record.path : undefined;
             const activeCwd = ctx.cwd ?? cwd;
             if (current === undefined || current.done || isNativeReadableFile(rawTarget, activeCwd)) {
-              return fallbackExecute('read', toolCallId, record, signal, ctx, HOTKEY_TOGGLE);
+              const result = await fallbackExecute('read', toolCallId, record, signal, ctx, HOTKEY_TOGGLE);
+              if (current !== undefined && !current.done && rawTarget !== undefined) {
+                current.refreshFile(rawTarget);
+              }
+              return result;
             }
             return current.executeTool('read', record, toolCallId, signal, onUpdate, ctx);
           },
@@ -415,6 +421,8 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
     const tail = projected[end - 1];
     if (tail?.role === 'user' && messageText(tail).trim() === prompt.trim()) end -= 1;
     const history = projected.slice(0, end);
+    const instr = extractHostInstructions(history, event.systemPromptOptions);
+    if (instr !== '') session.hostInstructions = instr;
     try {
       turn = await RafTurn.create({
         ctx,
@@ -426,6 +434,7 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
         nativeTools: bridgeableTools(pi.getAllTools(), pi.getActiveTools()),
         getSubagentTools: () => bridgeableTools(pi.getAllTools(), pi.getActiveTools(), { forSubagent: true }),
         history,
+        ...(event.images !== undefined && event.images.length > 0 ? { images: event.images } : {}),
       });
       refreshChrome(ctx);
     } catch (error) {
@@ -490,8 +499,21 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
   });
 
   pi.on('session_before_compact', async (event) => {
-    if (turn !== undefined && !turn.done) return { cancel: true };
-    if (enabled && event.reason !== 'manual') return { cancel: true };
+    if (!enabled) return;
+    const prep = 'preparation' in event ? event.preparation : undefined;
+    if (prep === undefined || typeof prep.firstKeptEntryId !== 'string' || prep.firstKeptEntryId === '') {
+      if (turn !== undefined && !turn.done) return { cancel: true };
+      return;
+    }
+    const summary = buildCompactionSummary(session);
+    if (summary === '') return;
+    return {
+      compaction: {
+        summary,
+        firstKeptEntryId: prep.firstKeptEntryId,
+        tokensBefore: typeof prep.tokensBefore === 'number' ? prep.tokensBefore : 0,
+      },
+    };
   });
 
   pi.registerMarkdownTransformer(
@@ -503,8 +525,12 @@ export default function rafExtension(pi: ExtensionAPI, options?: RafExtensionOpt
   );
 
   pi.on('before_provider_request', async (event) => {
-    if (!enabled || turn === undefined || turn.done) return undefined;
-    return turn.decorateProviderPayload(event.payload);
+    if (!enabled) return undefined;
+    const current = turn;
+    if (current !== undefined && !current.done) {
+      return current.decorateProviderPayload(event.payload);
+    }
+    return session.decorateCachedPayload(event.payload);
   });
 
   pi.registerEntryRenderer(ENTRY_RUN, (entry, { expanded }, theme: Theme) => {

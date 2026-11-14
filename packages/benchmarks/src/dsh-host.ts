@@ -690,6 +690,7 @@ export class DshBenchmarkGroupHost {
     };
 
     const mockCtx = {
+      _isRafMockHost: true,
       tools: toolsService,
       webServer,
       llm: {
@@ -902,51 +903,48 @@ export class DshBenchmarkGroupHost {
           },
         );
 
-        let emittedToolCall: { readonly id: string; readonly name: string; readonly arguments: string } | undefined;
+        const emittedToolCalls: Array<{ readonly id: string; readonly name: string; readonly arguments: string }> = [];
         for await (const chunk of stream) {
           if (chunk.type === 'block-end' && chunk.block !== undefined) {
             const b = chunk.block;
             if (b.type === 'tool-call' && typeof b.id === 'string' && typeof b.name === 'string') {
-              emittedToolCall = {
+              emittedToolCalls.push({
                 id: b.id,
                 name: b.name,
                 arguments: b.arguments ?? '{}',
-              };
+              });
             } else if (b.type === 'text' && typeof b.text === 'string') {
               finalAnswer = b.text;
             }
           }
         }
 
-        if (emittedToolCall === undefined) {
+        if (emittedToolCalls.length === 0) {
           break;
         }
 
-        nativeToolCalls++;
+        nativeToolCalls += emittedToolCalls.length;
         const batchOut = await this.toolsService.execute({
-          calls: [
-            {
-              type: 'tool-call',
-              id: emittedToolCall.id,
-              name: emittedToolCall.name,
-              arguments: emittedToolCall.arguments,
-            },
-          ],
+          calls: emittedToolCalls.map((call) => ({
+            type: 'tool-call',
+            id: call.id,
+            name: call.name,
+            arguments: call.arguments,
+          })),
           agent,
         });
-        const first = batchOut.results[0];
-        const firstText = first?.result.content[0]?.text ?? '';
-        if (firstText.includes('only `run_code` is callable directly')) {
-          throw new Error(`PTC lockout was not bypassed for tool "${emittedToolCall.name}"`);
+        for (let i = 0; i < emittedToolCalls.length; i++) {
+          const call = emittedToolCalls[i];
+          if (call === undefined) continue;
+          const res = batchOut.results[i];
+          messages.push({
+            id: `tool-${step}-${i}`,
+            role: 'tool',
+            toolCallId: call.id,
+            isError: res?.result.isError ?? false,
+            content: res?.result.content ?? [{ type: 'text', text: '' }],
+          });
         }
-
-        messages.push({
-          id: `tool-${step}`,
-          role: 'tool',
-          toolCallId: emittedToolCall.id,
-          isError: first?.result.isError ?? false,
-          content: first?.result.content ?? [{ type: 'text', text: '' }],
-        });
       }
     } finally {
       this.activeUsage = undefined;

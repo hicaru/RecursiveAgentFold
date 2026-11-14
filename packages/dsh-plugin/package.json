@@ -21,6 +21,9 @@
   "scripts": {
     "typecheck": "node --check index.js && node --check client.js"
   },
+  "engines": {
+    "dsh": ">=0.2.2-rc.0"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

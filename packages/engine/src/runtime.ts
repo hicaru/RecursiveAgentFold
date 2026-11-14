@@ -25,11 +25,10 @@ import {
 } from './tools/document-tools.js';
 import { createLLMQueryTool, LLMQueryEngine, type LLMQueryOptions } from './tools/llm-query.js';
 import type { Tool } from './tools/types.js';
-import type { ChatMessage, LLMClient } from './types.js';
-
+import type { ChatAttachment, ChatMessage, LLMClient } from './types.js';
 export const DEFAULT_MAX_DEPTH = 2;
 export const DEFAULT_BRANCH_MAX_STEPS = 30;
-
+export const DEFAULT_BRANCH_MAX_STEPS_CAP = 100;
 export interface RecursiveAgentFoldOptions {
   /** Root agent model. */
   readonly rootLLM: LLMClient;
@@ -48,6 +47,8 @@ export interface RecursiveAgentFoldOptions {
   readonly maxDepth?: number;
   readonly rootMaxSteps?: number;
   readonly branchMaxSteps?: number;
+  readonly branchMaxStepsCap?: number;
+  readonly maxBranchStepsCap?: number;
   /** Maximum branch specialists that run concurrently per branch call. */
   readonly branchConcurrency?: number;
   /** Prefix applied to built-in tool names. */
@@ -87,6 +88,8 @@ export interface RootBeginOptions {
   readonly initialManifest?: string;
   readonly initialDocIds?: Iterable<string>;
   readonly initialDocRevs?: Readonly<Record<string, number>>;
+  readonly initialAttachments?: readonly ChatAttachment[];
+  readonly systemPromptAddendum?: string;
 }
 
 /**
@@ -116,7 +119,7 @@ export class RecursiveAgentFold {
   }
 
   /** Return tools exposed to an agent at the given depth. */
-  toolsFor(depth: number, ownScope?: string): Tool[] {
+  toolsFor(depth: number, ownScope?: string, ownCwd?: string): Tool[] {
     const en = this.opts.enable ?? {};
     const maxDepth = this.opts.maxDepth ?? DEFAULT_MAX_DEPTH;
     const docToolOpts: DocumentToolOptions = {
@@ -137,8 +140,15 @@ export class RecursiveAgentFold {
       builtins.push(
         createBranchTool((task, o) => this.runAgent(task, o), {
           maxBranchSteps: this.opts.branchMaxSteps ?? DEFAULT_BRANCH_MAX_STEPS,
+          maxBranchStepsCap: this.opts.branchMaxStepsCap ?? this.opts.maxBranchStepsCap ?? DEFAULT_BRANCH_MAX_STEPS_CAP,
+          maxResultTokens: this.opts.agent?.maxObservationTokens ?? 6400,
           consultOnly: depth === maxDepth,
           ...(ownScope !== undefined ? { ownScope } : {}),
+          ...(ownCwd !== undefined
+            ? { defaultCwd: ownCwd }
+            : this.opts.ingest?.cwd !== undefined
+              ? { defaultCwd: this.opts.ingest.cwd }
+              : {}),
           ...(this.opts.branchConcurrency !== undefined ? { concurrency: this.opts.branchConcurrency } : {}),
         }),
       );
@@ -168,6 +178,8 @@ export class RecursiveAgentFold {
       readonly initialManifest?: string;
       readonly initialDocIds?: Iterable<string>;
       readonly initialDocRevs?: Readonly<Record<string, number>>;
+      readonly initialAttachments?: readonly ChatAttachment[];
+      readonly systemPromptAddendum?: string;
     },
   ): AgentFoldAgent {
     const {
@@ -183,20 +195,25 @@ export class RecursiveAgentFold {
       initialManifest,
       initialDocIds,
       initialDocRevs,
+      initialAttachments,
+      systemPromptAddendum,
       agentName,
       callStack,
       ancestorTasks,
+      cwd,
       signal,
     } = opts;
     const llm = depth === 0 ? this.opts.rootLLM : (this.opts.branchLLM ?? this.opts.rootLLM);
     const maxDepth = this.opts.maxDepth ?? DEFAULT_MAX_DEPTH;
+    const resolvedCwd = cwd ?? this.opts.ingest?.cwd;
     const resolvedMaxSteps =
       maxSteps ??
       (depth === 0 ? (this.opts.rootMaxSteps ?? 100) : (this.opts.branchMaxSteps ?? DEFAULT_BRANCH_MAX_STEPS));
     return new AgentFoldAgent({
       ...this.opts.agent,
       llm,
-      tools: this.toolsFor(depth, scope),
+      tools: this.toolsFor(depth, scope, resolvedCwd),
+      ...(resolvedCwd !== undefined ? { cwd: resolvedCwd } : {}),
       store: this.opts.store,
       depth,
       maxDepth,
@@ -218,6 +235,8 @@ export class RecursiveAgentFold {
       ...(initialDocRevs !== undefined ? { initialDocRevs } : {}),
       ...(callStack !== undefined ? { callStack } : {}),
       ...(ancestorTasks !== undefined ? { ancestorTasks } : {}),
+      ...(initialAttachments !== undefined ? { initialAttachments } : {}),
+      ...(systemPromptAddendum !== undefined ? { systemPromptAddendum } : {}),
     });
   }
 
@@ -241,6 +260,8 @@ export class RecursiveAgentFold {
       ...(opts?.initialManifest !== undefined ? { initialManifest: opts.initialManifest } : {}),
       ...(opts?.initialDocIds !== undefined ? { initialDocIds: opts.initialDocIds } : {}),
       ...(opts?.initialDocRevs !== undefined ? { initialDocRevs: opts.initialDocRevs } : {}),
+      ...(opts?.initialAttachments !== undefined ? { initialAttachments: opts.initialAttachments } : {}),
+      ...(opts?.systemPromptAddendum !== undefined ? { systemPromptAddendum: opts.systemPromptAddendum } : {}),
     });
     this.rootAgent.begin(question);
   }

@@ -288,7 +288,8 @@ describe('RafTurn end-to-end', () => {
 
     expect(callsByModel.get(ROOT_MODEL.id)).toBe(1);
     expect(outcome.result.answer).toBe('Repaired 42');
-    expect(outcome.replacement.usage.input).toBe(220);
+    expect(outcome.replacement.usage.input).toBe(120);
+    expect(outcome.replacement.usage.cacheRead).toBe(100);
     expect(outcome.replacement.usage.cost.total).toBeCloseTo(0.05);
     turn.finish('done');
   });
@@ -553,5 +554,105 @@ describe('RafTurn end-to-end', () => {
     expect(idA).not.toBe(idB);
 
     turn.finish('done');
+  });
+
+  it('preserves byte-identical Zone 1 across Turn 1 -> Turn 2 with 300 workspace files under 64KB state and isolates subagent cwd', async () => {
+    const cwd = createWorkspace();
+    const subDir = mkdtempSync(join(tmpdir(), 'raf-pi-subcwd-'));
+    tempDirs.push(subDir);
+    for (let i = 0; i < 300; i++) {
+      writeFileSync(join(cwd, `mod_${String(i).padStart(3, '0')}.ts`), `export const V_${i} = ${i};\n`, 'utf8');
+    }
+
+    const { registry } = createScriptedRegistry({
+      [BRANCH_MODEL.id]: [
+        () =>
+          makeAssistant(
+            BRANCH_MODEL,
+            '<motivation>Write file in subDir</motivation><tool_call name="write"><path>src/mod.py</path><content>x=1</content></tool_call>',
+          ),
+        () =>
+          makeAssistant(
+            BRANCH_MODEL,
+            '<folding range="0-0">Wrote src/mod.py</folding><motivation>done</motivation><answer>Wrote file inside subDir.</answer>',
+          ),
+      ],
+    });
+    const ctx = createExtensionContext(cwd, registry);
+    const config = sanitizeConfig({
+      ...DEFAULT_CONFIG,
+      branchModel: 'zai-coding-cn/glm-5.3-branch',
+      readerModel: 'zai-coding-cn/glm-5.3-reader',
+    });
+    const routes = resolveRoutes(ctx, config);
+    expect(routes).toBeDefined();
+    if (routes === undefined) return;
+
+    const session1 = new SessionState();
+    const writeTool = makeToolInfo('write', {
+      type: 'object',
+      properties: { path: { type: 'string' }, content: { type: 'string' } },
+      required: ['path', 'content'],
+    });
+    const turn1 = await RafTurn.create({
+      ctx,
+      config,
+      routes,
+      session: session1,
+      tracker: new RunTracker(),
+      prompt: 'Analyze workspace',
+      nativeTools: [writeTool],
+      history: [],
+    });
+    const t1Messages = turn1.prepareRequest([]);
+    const t1Zone1 = t1Messages[1]?.content;
+
+    const writtenCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const toolCtx: ExtensionToolContext = {
+      ...ctx,
+      tools: [],
+      executeTool: vi.fn(async (name, args) => {
+        writtenCalls.push({ name, args });
+        return { content: [{ type: 'text', text: 'ok' }], details: {}, isError: false };
+      }),
+    } as unknown as ExtensionToolContext;
+
+    await turn1.executeTool(
+      'branch',
+      { tasks: [{ scope: 'pkg', cwd: subDir, task: 'write file' }] },
+      'tc_branch',
+      undefined,
+      undefined,
+      toolCtx,
+    );
+    expect(writtenCalls).toEqual([
+      { name: 'write', args: { path: join(subDir, 'src/mod.py'), content: 'x=1' } },
+    ]);
+
+    const t1Ans = makeAssistant(ROOT_MODEL, '<motivation>done</motivation><answer>Turn 1 complete</answer>');
+    await turn1.acceptResponse(t1Ans, undefined);
+    turn1.finish('done');
+
+    const persisted = session1.snapshot('done');
+    expect(JSON.stringify(persisted).length).toBeLessThan(65_536);
+
+    const session2 = new SessionState();
+    session2.restore(persisted);
+    const turn2 = await RafTurn.create({
+      ctx,
+      config,
+      routes,
+      session: session2,
+      tracker: new RunTracker(),
+      prompt: 'continue',
+      nativeTools: [writeTool],
+      history: [],
+    });
+    const t2Messages = turn2.prepareRequest([]);
+    const t2User = typeof t2Messages[1]?.content === 'string' ? t2Messages[1].content : '';
+    const zone1Prefix1 = typeof t1Zone1 === 'string' ? t1Zone1.split('### Previous Steps')[0] : '';
+    const zone1Prefix2 = t2User.split('### Previous Steps')[0];
+    expect(zone1Prefix2).toBe(zone1Prefix1);
+    turn2.finish('done');
   });
 });

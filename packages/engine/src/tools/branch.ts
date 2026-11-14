@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { stat } from 'node:fs/promises';
+import { isAbsolute, resolve } from 'node:path';
 import { isPlaceholderAnswer } from '../agent/agent-fold.js';
 import { isAncestorEcho, normalizeScopeKey, normalizeTaskKey } from '../context/board.js';
 import type { ContextStore } from '../context/store.js';
@@ -130,6 +132,7 @@ export interface BranchRunnerOptions {
   readonly agentName?: string;
   readonly callStack?: readonly string[];
   readonly ancestorTasks?: readonly string[];
+  readonly cwd?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -147,9 +150,11 @@ export interface BranchRunner {
 
 export interface BranchToolOptions {
   maxBranchSteps?: number;
+  readonly maxBranchStepsCap?: number;
   maxResultTokens?: number;
   consultOnly?: boolean;
   readonly ownScope?: string;
+  readonly defaultCwd?: string;
   /** Maximum independent tasks in one branch call. Default 200. */
   readonly maxSpecialists?: number;
   /** Maximum branch specialists that execute concurrently. Omit for unlimited. */
@@ -162,42 +167,55 @@ function escapeRegExp(s: string): string {
 
 export function inferScope(explicitScope: string | undefined, taskText: string, store: ContextStore): string {
   if (explicitScope && explicitScope.trim() !== '') {
-    return normalizeScopeKey(explicitScope);
+    const raw = explicitScope.trim();
+    if (/[<>{}\[\]`]/.test(raw)) {
+      const cleaned = raw.replace(/<[^>]*>/g, ' ').replace(/[{}\[\]"'`]+/g, ' ');
+      const norm = normalizeScopeKey(cleaned).slice(0, 64).trim();
+      if (norm !== '') return norm;
+    }
+    return normalizeScopeKey(raw);
   }
+  const sanitizedTask = taskText
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[{}\[\]"'`]+/g, ' ');
   const docs = store.list();
   if (docs.length > 1) {
     const matchedDocs = docs.filter((d) => {
       const pat = new RegExp(`(?:^|[^a-z0-9_./-])${escapeRegExp(d.id)}(?:$|[^a-z0-9_./-])`, 'i');
-      return pat.test(taskText);
+      return pat.test(sanitizedTask);
     });
     if (matchedDocs.length === 1 && matchedDocs[0]) {
       return normalizeScopeKey(matchedDocs[0].id);
     }
   }
-  const structMatches = [...taskText.matchAll(/\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_./-]+|[a-z][a-z0-9]*_[a-z0-9_-]+)\b/g)];
+  const structMatches = [...sanitizedTask.matchAll(/\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_./-]+|[a-z][a-z0-9]*_[a-z0-9_-]+)\b/g)];
   if (structMatches.length > 0) {
     const uniqueIds = new Set(structMatches.map((m) => normalizeScopeKey(m[1] ?? '')));
     uniqueIds.delete('');
     if (uniqueIds.size === 1) {
       const first = [...uniqueIds][0];
-      if (first) return first;
+      if (first) return first.slice(0, 64).trim();
     }
   }
-  return normalizeTaskKey(taskText);
+  return normalizeTaskKey(sanitizedTask).slice(0, 64).trim();
 }
 
 export function mergeSubTasksByScope(specs: readonly SubTaskSpec[], store: ContextStore): SubTaskSpec[] {
   if (specs.length <= 1) return [...specs];
-  const groups = new Map<string, { firstScope: string | undefined; tasks: string[]; seenTasks: Set<string> }>();
+  const groups = new Map<
+    string,
+    { firstScope: string | undefined; firstCwd: string | undefined; tasks: string[]; seenTasks: Set<string> }
+  >();
   for (const spec of specs) {
     const scopeKey = inferScope(spec.scope, spec.task, store);
     const normT = normalizeTaskKey(spec.task);
     let g = groups.get(scopeKey);
     if (!g) {
-      g = { firstScope: spec.scope, tasks: [], seenTasks: new Set<string>() };
+      g = { firstScope: spec.scope, firstCwd: spec.cwd, tasks: [], seenTasks: new Set<string>() };
       groups.set(scopeKey, g);
-    } else if (!g.firstScope && spec.scope) {
-      g.firstScope = spec.scope;
+    } else {
+      if (!g.firstScope && spec.scope) g.firstScope = spec.scope;
+      if (!g.firstCwd && spec.cwd) g.firstCwd = spec.cwd;
     }
     if (!g.seenTasks.has(normT)) {
       g.seenTasks.add(normT);
@@ -210,9 +228,38 @@ export function mergeSubTasksByScope(specs: readonly SubTaskSpec[], store: Conte
     const combinedTask =
       g.tasks.length === 1 ? (g.tasks[0] ?? '') : g.tasks.map((t, i) => `(${i + 1}) ${t}`).join('; ');
     const finalScope = g.firstScope ?? (g.tasks.length > 1 ? scopeKey : undefined);
-    merged[idx++] = finalScope ? { scope: finalScope, task: combinedTask } : { task: combinedTask };
+    merged[idx++] = {
+      ...(finalScope !== undefined ? { scope: finalScope } : {}),
+      task: combinedTask,
+      ...(g.firstCwd !== undefined ? { cwd: g.firstCwd } : {}),
+    };
   }
   return merged;
+}
+
+async function resolveSubtaskCwd(
+  subCwd: string | undefined,
+  subScope: string | undefined,
+  baseCwd: string | undefined,
+): Promise<string | undefined> {
+  if (subCwd !== undefined && subCwd.trim() !== '') {
+    const trimmed = subCwd.trim();
+    return baseCwd !== undefined ? resolve(baseCwd, trimmed) : resolve(trimmed);
+  }
+  if (subScope !== undefined && subScope.trim() !== '') {
+    const trimmed = subScope.trim();
+    if (trimmed.includes('/') || trimmed.includes('\\') || trimmed.startsWith('.')) {
+      const candidate = baseCwd !== undefined ? resolve(baseCwd, trimmed) : isAbsolute(trimmed) ? trimmed : undefined;
+      if (candidate !== undefined) {
+        try {
+          if ((await stat(candidate)).isDirectory()) return candidate;
+        } catch {
+          // Not an existing directory on disk; keep baseCwd.
+        }
+      }
+    }
+  }
+  return baseCwd;
 }
 
 interface BranchSubtaskResult {
@@ -263,11 +310,16 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
             properties: {
               scope: { type: 'string', description: 'Document id or module/library scope for this subtask.' },
               task: { type: 'string', description: 'Subtask instruction or follow-up question.' },
+              cwd: { type: 'string', description: 'Optional working directory for this subtask.' },
             },
           },
           description: 'Optional: dispatch multiple independent subtasks in parallel ({scope, task} objects or task strings; same scope is merged and deduplicated).',
         },
-        max_steps: { type: 'integer', description: `Step budget (default ${opts.maxBranchSteps ?? 20}).` },
+        cwd: { type: 'string', description: 'Optional working directory for the specialist sub-agent.' },
+        max_steps: {
+          type: 'integer',
+          description: `Step budget (default ${opts.maxBranchSteps ?? 30}, max ${Math.max(opts.maxBranchSteps ?? 30, opts.maxBranchStepsCap ?? 100)}).`,
+        },
       },
       required: [],
     },
@@ -287,10 +339,22 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
       if (!task && tasks.length === 0) {
         throw new ToolArgumentError('must provide "task" or "tasks"');
       }
-      const maxSteps = Math.min(argNumber(args, 'max_steps') ?? opts.maxBranchSteps ?? 20, opts.maxBranchSteps ?? 20);
+      const defaultSteps = opts.maxBranchSteps ?? 30;
+      const stepCap = Math.max(defaultSteps, opts.maxBranchStepsCap ?? 100);
+      const requestedSteps = argNumber(args, 'max_steps');
+      const maxSteps = Math.max(
+        1,
+        Math.min(requestedSteps !== undefined ? Math.floor(requestedSteps) : defaultSteps, stepCap),
+      );
+      const explicitCwd =
+        argString(args, 'cwd', false) ??
+        argString(args, 'workdir', false) ??
+        argString(args, 'working_directory', false) ??
+        argString(args, 'workingDirectory', false);
 
-      const runSingle = async (subTask: string, subScope?: string): Promise<BranchSubtaskResult> => {
+      const runSingle = async (subTask: string, subScope?: string, subCwd?: string): Promise<BranchSubtaskResult> => {
         const scopeKey = inferScope(subScope, subTask, ctx.store);
+        const effectiveCwd = await resolveSubtaskCwd(subCwd, subScope, ctx.cwd ?? opts.defaultCwd);
         const leaveWorker = defaultRateLimitGate.enterWorker();
         const childController = new AbortController();
         const outerSignal = ctx.signal;
@@ -391,6 +455,7 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
                   agentName: sInput.agentName,
                   callStack: nextStack,
                   ancestorTasks: nextAncestors,
+                  ...(effectiveCwd !== undefined ? { cwd: effectiveCwd } : {}),
                   signal: childController.signal,
                 });
                 const outcome = outcomeOf(r);
@@ -418,6 +483,7 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
             scope: scopeKey,
             callStack: nextStack,
             ancestorTasks: nextAncestors,
+            ...(effectiveCwd !== undefined ? { cwd: effectiveCwd } : {}),
             signal: childController.signal,
           });
           return commitIfComplete(outcomeOf(r));
@@ -449,11 +515,13 @@ export function createBranchTool(run: BranchRunner, opts: BranchToolOptions = {}
             ? createLimiter(Math.floor(effectiveConcurrency))
             : undefined;
         const outcomes = await Promise.all(
-          mergedTasks.map((t) => (limit !== undefined ? limit(() => runSingle(t.task, t.scope)) : runSingle(t.task, t.scope))),
+          mergedTasks.map((t) =>
+            limit !== undefined ? limit(() => runSingle(t.task, t.scope, t.cwd)) : runSingle(t.task, t.scope, t.cwd),
+          ),
         );
         return buildReportIndex(outcomes, mergedTasks, ctx.store, opts.maxResultTokens ?? 6000);
       }
-      const single = await runSingle(task ?? '', explicitScope);
+      const single = await runSingle(task ?? '', explicitScope, explicitCwd);
       if (single.failed) {
         const priorSummary = ctx.board?.getSpecialist(single.scope)?.latestSummary;
         if (priorSummary !== undefined && priorSummary !== '') {

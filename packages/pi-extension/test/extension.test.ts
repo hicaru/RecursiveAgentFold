@@ -546,4 +546,104 @@ describe('rafExtension integration', () => {
       error: 'Unexpected streamSimple call',
     });
   });
+
+  it('handles session_before_compact, forwards images & systemPromptOptions, syncs shadowed read, and decorates idle CacheWarmer payloads', async () => {
+    const cwd = createTempDir();
+    writeFileSync(join(cwd, 'notes.txt'), 'INITIAL_LINE = 1\n', 'utf8');
+    const configPath = join(cwd, 'raf.json');
+    const harness = createHarness(cwd, configPath);
+
+    await harness.emit('session_start', { type: 'session_start' });
+    await harness.runCommand('raf', 'on');
+
+    // Switch ctx model to Anthropic-messages with image support to test CacheWarmer + image blocks
+    const anthropicModel = {
+      id: 'claude-sonnet-4',
+      name: 'Claude Sonnet 4',
+      provider: 'anthropic',
+      api: 'anthropic-messages',
+      reasoning: false,
+      input: ['text', 'image'],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200_000,
+      maxTokens: 16_000,
+    } as unknown as ChatModel;
+    (harness.ctx as unknown as { model: ChatModel }).model = anthropicModel;
+
+    const userMsg: AgentMessage = {
+      role: 'user',
+      content: [{ type: 'text', text: 'Inspect screenshot and notes.txt' }],
+      timestamp: Date.now(),
+    };
+    harness.messages.push(userMsg);
+    await harness.emit('before_agent_start', {
+      type: 'before_agent_start',
+      messageType: 'user',
+      prompt: 'Inspect screenshot and notes.txt',
+      images: [{ type: 'image', data: 'QUJD', mimeType: 'image/png' }],
+      systemPromptOptions: {
+        sections: { project_context: '# AGENTS.md\nAlways use pnpm.' },
+      },
+    });
+
+    const ctxRes = (await harness.emit('context_with_system', {
+      type: 'context_with_system',
+      messages: [...harness.messages],
+    })) as { messages: Array<{ role: string; content: unknown }> } | undefined;
+    expect(ctxRes?.messages[0]?.content).toContain('Always use pnpm.');
+    expect(Array.isArray(ctxRes?.messages[1]?.content)).toBe(true);
+    expect(JSON.stringify(ctxRes?.messages[1]?.content)).toContain('"type":"image"');
+
+    // Modify notes.txt on disk and run shadowed read; verify ContextStore gets refreshed
+    writeFileSync(join(cwd, 'notes.txt'), 'UPDATED_LINE = 2\n', 'utf8');
+    const toolCtx = { ...harness.ctx, tools: [], executeTool: vi.fn() } as unknown as ExtensionToolContext;
+    await harness.tools.get('read')?.execute('tc_sync', { path: 'notes.txt' } as never, undefined, undefined, toolCtx);
+    const grepAfter = await harness.tools.get('grep')?.execute(
+      'tc_grep_sync',
+      { pattern: 'UPDATED_LINE', documents: ['notes.txt'] } as never,
+      undefined,
+      undefined,
+      toolCtx,
+    );
+    const grepText = grepAfter?.content[0]?.type === 'text' ? grepAfter.content[0].text : '';
+    expect(grepText).toContain('UPDATED_LINE = 2');
+
+    // Finish turn with an answer so rootState is populated
+    const finalMsg: AssistantMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: '<motivation>done</motivation><answer>OK</answer>' }],
+      api: anthropicModel.api,
+      provider: anthropicModel.provider,
+      model: anthropicModel.id,
+      usage: emptyUsage(),
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+    await harness.emit('message_end', { type: 'message_end', message: finalMsg });
+
+    // Idle CacheWarmer before_provider_request still decorates payload via session.decorateCachedPayload
+    const userTextBlocks = (ctxRes?.messages[1]?.content as Array<{ type: string; text?: string }>)
+      .filter((b) => b.type === 'text')
+      .map((b) => ({ type: 'text', text: b.text ?? '' }));
+    const warmPayload = {
+      system: [{ type: 'text', text: 'SYS' }],
+      tools: [],
+      messages: [{ role: 'user', content: userTextBlocks }],
+    };
+    const decorated = (await harness.emit('before_provider_request', {
+      type: 'before_provider_request',
+      payload: warmPayload,
+    })) as typeof warmPayload | undefined;
+    expect(decorated?.messages[0]?.content[0]).toHaveProperty('cache_control');
+
+    // session_before_compact returns RAF-native compaction summary without canceling
+    const compactRes = (await harness.emit('session_before_compact', {
+      type: 'session_before_compact',
+      reason: 'threshold',
+      preparation: { firstKeptEntryId: 'e5', tokensBefore: 185_000 },
+    })) as { compaction?: { summary: string; firstKeptEntryId: string; tokensBefore: number } } | undefined;
+    expect(compactRes?.compaction?.firstKeptEntryId).toBe('e5');
+    expect(compactRes?.compaction?.tokensBefore).toBe(185_000);
+    expect(compactRes?.compaction?.summary).toContain('Folded History');
+  });
 });

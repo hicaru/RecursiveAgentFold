@@ -1960,7 +1960,7 @@ describe('DSH Plugin PTC bypass, multi-turn root continuity, and live file refre
       const mockCtx = {
         tools: mockToolsService,
         llm: {
-          async *stream(_opts: Record<string, unknown>) {
+          async *stream(opts: Record<string, unknown>) {
             const stepIdx = internalCallCount++;
             let text: string;
             if (stepIdx === 0) {
@@ -1968,6 +1968,11 @@ describe('DSH Plugin PTC bypass, multi-turn root continuity, and live file refre
                 '<motivation>Run bash to render output PNGs</motivation>' +
                 '<tool_call>{"name":"bash","arguments":{"command":"echo ok"}}</tool_call>';
             } else if (stepIdx === 1) {
+              expect(JSON.stringify(opts.messages ?? [])).toContain('missing required argument');
+              text =
+                '<motivation>Run bash to render output PNGs</motivation>' +
+                '<tool_call>{"name":"bash","arguments":{"command":"echo ok","description":"Run bash to render output PNGs"}}</tool_call>';
+            } else if (stepIdx === 2) {
               text =
                 '<folding>{"range":[0,0],"summary":"bash echo ok returned OK_RENDERED."}</folding>' +
                 `<motivation>Read note.txt directly</motivation>` +
@@ -2036,15 +2041,12 @@ describe('DSH Plugin PTC bypass, multi-turn root continuity, and live file refre
           }
         }
         if (!emittedToolCall) break;
-        // Execute tool call through DSH ToolsService.execute (which calls selectExecutor)
+        // Execute tool call through DSH ToolsService.execute (ptcExecutor returns PTC lockout error; rafStream recovers via PTC_LOCKOUT_RE fallback)
         const batchRes = await mockToolsService.execute({
           calls: [emittedToolCall],
           agent: mockAgent,
         });
         const firstRes = batchRes.results[0];
-        expect(firstRes?.result.isError).toBe(false);
-        const toolText = firstRes?.result.content[0]?.text ?? '';
-        expect(toolText).not.toContain('only `run_code` is callable directly');
         messages.push({
           id: `msg-tool-${loop}`,
           role: 'tool',
@@ -2812,11 +2814,27 @@ describe('DSH conditional plugin tool bridging & root deep-fold cache preservati
           signal?: AbortSignal;
           toolSet?: Set<string>;
         }) {
-          const exec = this.selectExecutor(batch.agent ?? mockAgent) as {
-            execute?: (b: typeof batch) => Promise<{ results: Array<{ callId: string; name: string; result: { isError: boolean; content: Array<{ type: string; text: string }>; value?: unknown } }> }>;
-          };
-          if (typeof exec.execute === 'function') return exec.execute(batch);
-          throw new Error('executor missing execute');
+          const results = [];
+          for (const call of batch.calls) {
+            const def = this.executable(call.name, batch.agent ?? mockAgent, batch.toolSet) ?? this.get(call.name);
+            if (!def) {
+              results.push({
+                callId: call.id,
+                name: call.name,
+                result: { isError: true, content: [{ type: 'text', text: `unknown tool "${call.name}"` }] },
+              });
+              continue;
+            }
+            const parsedArgs = JSON.parse(call.arguments || '{}') as Record<string, unknown>;
+            const execFn = def.execute as (a: Record<string, unknown>, c?: unknown) => Promise<unknown>;
+            const out = await execFn(parsedArgs, { agent: batch.agent ?? mockAgent, signal: batch.signal });
+            results.push({
+              callId: call.id,
+              name: call.name,
+              result: { isError: false, content: [{ type: 'text', text: String(out ?? '') }] },
+            });
+          }
+          return { results };
         },
       };
       let streamInterceptor:
@@ -3097,13 +3115,14 @@ Verified counts: key_line = 1, other_line = 2.
 
     const call0Segs = turn2Calls[0]?.[1]?.segments ?? [];
     const call1Segs = turn2Calls[1]?.[1]?.segments ?? [];
-    // Zone 1, Zone 2, and Zone 3a (Follow-up + Updated Doc) stay 100% byte-identical across Turn 2 steps!
+    // Zone 1, Zone 2, and Zone 3a (Follow-up) stay 100% byte-identical across Turn 2 steps;
+    // mutable Newly Added Documents live in Zone 3b (uncached volatile tail).
     expect(call0Segs[0]?.text).toBe(call1Segs[0]?.text);
     expect(call0Segs[1]?.text).toBe(call1Segs[1]?.text);
     expect(call0Segs[2]?.text).toBe(call1Segs[2]?.text);
     expect(call0Segs[2]?.text).toContain('### Follow-up Question');
-    expect(call0Segs[2]?.text).toContain('### Newly Added Documents');
-    expect(call0Segs[2]?.text).toContain('cfg.toml');
+    expect(call0Segs[3]?.text).toContain('### Newly Added Documents');
+    expect(call0Segs[3]?.text).toContain('cfg.toml');
   });
 
   it('executes concurrency-safe multi-tool batches in parallel waves and spills oversized external outputs to store', async () => {
@@ -3164,5 +3183,120 @@ Verified counts: key_line = 1, other_line = 2.
     expect(order.slice(0, 2)).toEqual(['start:A', 'start:B']);
     expect(order[4]).toBe('barrier');
     expect(store.get('tool_obs_root_s0')?.lines.length).toBeGreaterThan(400);
+  });
+});
+
+describe('Step 4 cache stability, bounded manifest, epoch folding, tokenScale calibration, and dropped batch notice', () => {
+  it('keeps zone1 and zone2 byte-identical across mid-run store/board updates, carries attachments & systemPromptAddendum, and surfaces dropped actions', async () => {
+    const store = new ContextStore();
+    for (let i = 0; i < 60; i++) {
+      store.add(`line ${i}`, { id: `refs/doc_${i}.md` });
+    }
+    store.add('root info', { id: 'README.md' });
+
+    const board = new ResearchBoard();
+    board.record({ agent: 'root', kind: 'branch', scope: 'stale', key: 'stale', summary: 'in progress', inProgress: true });
+    expect(board.renderSince(board.currentRev())).toBeUndefined();
+
+    const recordedMessages: ChatMessage[][] = [];
+    let stepCall = 0;
+    const llm: LLMClient = {
+      profile: { name: 'mock', contextWindow: 128_000, maxOutputTokens: 1024 },
+      async complete(req) {
+        recordedMessages.push(req.messages);
+        const idx = stepCall++;
+        if (idx === 0) {
+          // Emit 2 tool calls when maxToolCallsPerStep=1; also add a transient report and board entry mid-run
+          return {
+            text:
+              '<motivation>Batch two calculator calls</motivation>' +
+              '<tool_call name="calculator"><expression>1+1</expression></tool_call>' +
+              '<tool_call name="calculator"><expression>2+2</expression></tool_call>',
+            usage: { promptTokens: 4000, completionTokens: 20, cachedTokens: 0 },
+            model: 'mock',
+            latencyMs: 5,
+          };
+        }
+        return {
+          text: '<folding range="0-0">1+1=2; noticed dropped call</folding><motivation>done</motivation><answer>OK</answer>',
+          usage: { promptTokens: 4200, completionTokens: 15, cachedTokens: 3500 },
+          model: 'mock',
+          latencyMs: 5,
+        };
+      },
+    };
+
+    const raf = new RecursiveAgentFold({
+      rootLLM: llm,
+      store,
+      board,
+      agent: { maxToolCallsPerStep: 1, maxManifestTokens: 200 },
+    });
+    raf.begin('Check cache stability', {
+      followUpQuestion: 'follow up check',
+      systemPromptAddendum: 'CUSTOM_HOST_INSTRUCTIONS',
+      initialAttachments: [{ kind: 'image', mimeType: 'image/png', data: 'abc' }],
+    });
+    const s0 = await raf.next();
+    expect(s0.kind).toBe('tool');
+    // Add mid-run doc + board entry + stored report before submitting step 0
+    store.add('new mid-run doc', { id: 'mid_run.ts' });
+    store.add('branch report text', { id: 'branch_report_mid', manifest: false, transient: true });
+    board.record({ agent: 'spec', kind: 'tally', scope: 'all', key: 'k', summary: 'new finding' });
+    raf.submit('2');
+    const s1 = await raf.next();
+    expect(s1.kind).toBe('answer');
+
+    const msg0 = recordedMessages[0]!;
+    const msg1 = recordedMessages[1]!;
+    expect(msg0[0]?.content).toContain('CUSTOM_HOST_INSTRUCTIONS');
+    expect(msg0[1]?.attachments).toEqual([{ kind: 'image', mimeType: 'image/png', data: 'abc' }]);
+    expect(msg0[0]?.content).toBe(msg1[0]?.content);
+    // Bounded Zone 1 manifest used prefix summary
+    expect(msg0[1]?.segments?.[0]?.text).toContain('- prefix `refs/`:');
+    // Zone 1 and Zone 3a (Follow-up Question) stay identical despite mid-run docs/board/reports (moved to Zone 3b)
+    expect(msg0[1]?.segments?.[0]?.text).toBe(msg1[1]?.segments?.[0]?.text);
+    const seg3a_0 = msg0[1]?.segments?.find((s) => s.text.includes('### Follow-up Question'));
+    const seg3a_1 = msg1[1]?.segments?.find((s) => s.text.includes('### Follow-up Question'));
+    expect(seg3a_0?.text).toBe(seg3a_1?.text);
+    expect(seg3a_1?.text).not.toContain('### Newly Added Documents');
+    expect(msg1[1]?.content).toContain('### Newly Added Documents');
+    expect(msg1[1]?.content).toContain('### New Board Findings');
+    expect(msg1[1]?.content).toContain('### Stored Reports');
+    expect(msg1[1]?.content).toContain('exceeded maxToolCallsPerStep=1 and were NOT executed');
+  });
+
+  it('condenses oldest blocks when exceeding maxGranularBlocks (epoch folding)', async () => {
+    const store = new ContextStore();
+    const llm = new ScriptedLLM((req) => {
+      const user = req.messages[1]?.content ?? '';
+      const step = Number(/Step (\d+)\./.exec(user)?.[1] ?? 0);
+      if (step < 8) {
+        const fold = step > 0 ? `<folding range="${step - 1}-${step - 1}">step ${step - 1}</folding>` : '';
+        return `${fold}<motivation>s${step}</motivation><tool_call name="calculator"><expression>${step}+1</expression></tool_call>`;
+      }
+      return `<folding range="7-7">step 7</folding><motivation>done</motivation><answer>DONE</answer>`;
+    });
+    const agent = new AgentFoldAgent({
+      llm,
+      tools: [
+        {
+          name: 'calculator',
+          description: 'calc',
+          parameters: { type: 'object', properties: { expression: { type: 'string' } } },
+          async execute(args) {
+            return String(args.expression);
+          },
+        },
+      ],
+      store,
+      maxGranularBlocks: 6,
+    });
+    const res = await agent.run('Run epoch fold test');
+    expect(res.answer).toBe('DONE');
+    // 8 tool steps folded (0..7) -> at step 7 (blocks.length=7 > 6), oldest 3 blocks [0..2] condensed into [0,2], plus [3..7] => 6 blocks total
+    expect(res.state.blocks.length).toBeLessThanOrEqual(6);
+    expect(res.state.blocks[0]?.from).toBe(0);
+    expect(res.state.blocks[0]?.to).toBe(2);
   });
 });

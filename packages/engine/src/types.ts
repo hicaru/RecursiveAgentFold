@@ -9,6 +9,10 @@ export interface ChatContentSegment {
   readonly cacheBreakpoint?: boolean;
 }
 
+export type ChatAttachment =
+  | { readonly kind: 'image'; readonly mimeType: string; readonly data?: string; readonly hostRef?: unknown }
+  | { readonly kind: 'file'; readonly name: string; readonly mimeType?: string; readonly data?: string; readonly hostRef?: unknown };
+
 export interface ChatMessage {
   readonly role: Role;
   readonly content: string;
@@ -23,6 +27,7 @@ export interface ChatMessage {
    * `cache_control`). Providers with automatic prefix caching ignore it.
    */
   readonly cacheBreakpoint?: boolean;
+  readonly attachments?: readonly ChatAttachment[];
 }
 
 export interface LLMUsage {

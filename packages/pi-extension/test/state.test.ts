@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { ResearchBoard } from '@raf/engine/source';
 import {
   asPersistedState,
+  buildCompactionSummary,
   contentText,
   ENTRY_STATE,
+  extractHostInstructions,
   messageText,
   renderTranscript,
   seedPriorTurns,
@@ -60,10 +62,18 @@ describe('state', () => {
     first.board.record({ agent: 'root', kind: 'tool', scope: 'doc', key: 'k', summary: 'found' });
     first.docs.set('branch_report_x', { title: 'report', text: 'body', persist: true });
     first.docs.set('packages/a', { title: 'a', text: 'code', persist: false });
-    first.initialManifest = 'huge manifest that must stay out of jsonl';
+    first.initialManifest = 'frozen manifest for KV cache';
+    first.initialDocIds = new Set(['packages/a']);
+    first.initialDocRevs = { 'packages/a': 1 };
+    first.initialBoardSnapshot = '- [#1] found';
+    first.initialBoardRev = 1;
+    first.sources.add('/ws');
     first.docSeq = 7;
     const saved = first.snapshot('done');
-    expect(saved.initialManifest).toBeUndefined();
+    expect(saved.initialManifest).toBe('frozen manifest for KV cache');
+    expect(saved.initialDocIds).toEqual(['packages/a']);
+    expect(saved.initialDocRevs).toEqual({ 'packages/a': 1 });
+    expect(saved.sources).toEqual(['/ws']);
     expect(saved.docSeq).toBe(7);
 
     const second = new SessionState();
@@ -74,10 +84,11 @@ describe('state', () => {
     expect(second.docs.has('branch_report_x')).toBe(true);
     expect(second.docs.has('packages/a')).toBe(false);
     expect(second.workspaceIngested).toBe(false);
-    expect(second.initialManifest).toBeUndefined();
-    expect(second.initialDocIds).toBeUndefined();
+    expect(second.initialManifest).toBe('frozen manifest for KV cache');
+    expect(second.initialDocIds).toEqual(new Set(['packages/a']));
+    expect(second.initialDocRevs).toEqual({ 'packages/a': 1 });
+    expect(second.sources.has('/ws')).toBe(true);
     expect(second.docSeq).toBe(7);
-
     const withoutReports = new SessionState();
     withoutReports.restore(asPersistedState({ version: 1, status: 'aborted' }));
     expect(withoutReports.rootState).toBeUndefined();
@@ -110,5 +121,33 @@ describe('state', () => {
 
   it('exports stable entry type names', () => {
     expect(ENTRY_STATE).toBe('raf-state');
+  });
+
+  it('builds compaction summary and extracts host instructions cleanly', () => {
+    const state = new SessionState();
+    state.board.record({ agent: 'root', kind: 'tally', scope: 'all', key: 'k', summary: 'COUNT=5' });
+    state.rootState = {
+      blocks: [{ from: 0, to: 1, summary: 'Verified COUNT=5' }],
+      latest: { step: 2, motivation: 'check', action: { name: 'read', arguments: { document: 'a.ts' } }, observation: 'line 1' },
+    };
+    const summary = buildCompactionSummary(state);
+    expect(summary).toContain('COUNT=5');
+    expect(summary).toContain('[Steps 0-1] Verified COUNT=5');
+    expect(summary).toContain('Step 2: read');
+
+    const instr = extractHostInstructions([
+      {
+        role: 'system',
+        content: 'base',
+        sections: {
+          project_context: '# AGENTS\nUse pnpm only.',
+          skills: '<available_skills>- skill-a</available_skills>',
+          addendum: 'Extra note',
+        },
+      },
+    ]);
+    expect(instr).toContain('# AGENTS\nUse pnpm only.');
+    expect(instr).toContain('<available_skills>- skill-a</available_skills>');
+    expect(instr).toContain('Extra note');
   });
 });

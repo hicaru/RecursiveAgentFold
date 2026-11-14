@@ -2,6 +2,7 @@ import {
   isRetryableAssistantError,
   type Api,
   type AssistantMessage,
+  type ImageContent,
   type Message,
   type Model,
   type ModelThinkingLevel,
@@ -103,7 +104,8 @@ export function toEngineResponse(message: AssistantMessage): LLMResponse {
 /** Return true when the model API uses explicit block-level cache_control markers. */
 export function supportsExplicitCacheBlocks(model: ChatModel): boolean {
   if (model.api === 'anthropic-messages' || model.api === 'bedrock-converse-stream') return true;
-  return model.provider === 'openrouter' && /anthropic|claude/i.test(model.id);
+  if (!('compat' in model) || model.compat === null || typeof model.compat !== 'object') return false;
+  return 'cacheControlFormat' in model.compat && model.compat.cacheControlFormat === 'anthropic';
 }
 
 function effectiveUserSegments(message: ChatMessage): readonly ChatContentSegment[] {
@@ -127,8 +129,9 @@ export function toPiMessages(messages: readonly ChatMessage[], model: ChatModel)
       continue;
     }
     if (m.role === 'user') {
+      const supportsImages = Array.isArray(model.input) && model.input.includes('image');
       if (explicitBlocks) {
-        const blocks: TextContent[] = [];
+        const blocks: Array<TextContent | ImageContent> = [];
         let j = i;
         while (j < messages.length && messages[j]?.role === 'user') {
           const u = messages[j];
@@ -138,17 +141,36 @@ export function toPiMessages(messages: readonly ChatMessage[], model: ChatModel)
               const seg = segs[k];
               if (seg) blocks.push({ type: 'text', text: seg.text });
             }
+            if (supportsImages && u.attachments !== undefined) {
+              for (const att of u.attachments) {
+                if (att.kind === 'image' && att.data !== undefined) {
+                  blocks.push({ type: 'image', data: att.data, mimeType: att.mimeType });
+                }
+              }
+            }
           }
           j++;
         }
         i = j - 1;
-        if (blocks.length > 1) {
-          out.push({ role: 'user', content: blocks, timestamp });
-        } else {
-          out.push({ role: 'user', content: blocks[0]?.text ?? m.content, timestamp });
-        }
+        out.push({
+          role: 'user',
+          content: blocks.length > 0 ? blocks : [{ type: 'text', text: m.content }],
+          timestamp,
+        });
       } else {
-        out.push({ role: 'user', content: m.content, timestamp });
+        const imgBlocks: ImageContent[] = [];
+        if (supportsImages && m.attachments !== undefined) {
+          for (const att of m.attachments) {
+            if (att.kind === 'image' && att.data !== undefined) {
+              imgBlocks.push({ type: 'image', data: att.data, mimeType: att.mimeType });
+            }
+          }
+        }
+        out.push({
+          role: 'user',
+          content: imgBlocks.length > 0 ? [{ type: 'text', text: m.content }, ...imgBlocks] : m.content,
+          timestamp,
+        });
       }
       continue;
     }
@@ -175,6 +197,18 @@ function countBlockBreakpoints(value: unknown): number {
     }
   }
   return count;
+}
+
+function hasLongTtlMarker(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  for (const item of value) {
+    if (item === null || typeof item !== 'object' || !('cache_control' in item)) continue;
+    const cc: unknown = item.cache_control;
+    if (cc !== null && typeof cc === 'object' && 'ttl' in cc && cc.ttl === '1h') {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -243,10 +277,15 @@ export function applyCacheBreakpointsToPayload(
         ? [desired[desired.length - 1] ?? 0]
         : [desired[0] ?? 0, ...desired.slice(desired.length - (budget - 1))];
 
+  const cacheMarker =
+    hasLongTtlMarker(rec.system) || hasLongTtlMarker(rec.tools)
+      ? { type: 'ephemeral', ttl: '1h' }
+      : { type: 'ephemeral' };
+
   for (const idx of chosen) {
     const target = wireUserBlocks[idx];
     if (target !== undefined) {
-      target.cache_control = { type: 'ephemeral' };
+      target.cache_control = { ...cacheMarker };
     }
   }
   return payload;

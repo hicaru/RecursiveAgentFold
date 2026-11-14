@@ -1,9 +1,15 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ResearchBoard } from '../src/context/board.js';
 import { ContextStore } from '../src/context/store.js';
+import { ScriptedLLM } from '../src/llm/mock.js';
 import { UsageTracker } from '../src/llm/usage.js';
+import { parseAgentResponse } from '../src/protocol/parser.js';
+import { RecursiveAgentFold } from '../src/runtime.js';
 import { normalizeBranchArguments } from '../src/tools/branch-args.js';
-import { BRANCH_REPORT_ID_PREFIX, createBranchTool, type BranchRunner, type BranchRunnerResult } from '../src/tools/branch.js';
+import { BRANCH_REPORT_ID_PREFIX, createBranchTool, inferScope, type BranchRunner, type BranchRunnerResult } from '../src/tools/branch.js';
 import type { ToolContext } from '../src/tools/types.js';
 import { defaultEstimator } from '../src/tokens.js';
 
@@ -445,5 +451,96 @@ tasks:
     expect(peak).toBe(2);
     expect(out).toContain('[scope=docs]');
     expect(out).toContain('[scope=packages/dsh-plugin]');
+  });
+
+  it('unpacks nested <tasks> containers in JSON/XML, sanitizes fallback scopes, honors max_steps cap, and propagates subagent cwd (P-B2..P-B5)', async () => {
+    // 1. P-B2 JSON/XML string inside task field
+    const normJson = normalizeBranchArguments({
+      task: '<tasks>[{"scope":"gdd_and_refs","task":"Audit GDD"},{"scope":"ichno","task":"Audit ichno"}]</tasks>',
+    });
+    expect(normJson).toEqual({
+      tasks: [
+        { scope: 'gdd_and_refs', task: 'Audit GDD' },
+        { scope: 'ichno', task: 'Audit ichno' },
+      ],
+    });
+
+    // 2. P-B2 nested <tasks> inside <task> in XML <tool_call name="branch">
+    const parsedXml = parseAgentResponse(
+      '<motivation>dispatch</motivation><tool_call name="branch"><task><tasks><task scope="a">T1</task><task scope="b">T2</task></tasks></task></tool_call>',
+      { expectFolding: false },
+    );
+    expect(parsedXml.errors).toEqual([]);
+    expect(parsedXml.toolCall).toEqual({
+      name: 'branch',
+      arguments: {
+        tasks: [
+          { scope: 'a', task: 'T1' },
+          { scope: 'b', task: 'T2' },
+        ],
+      },
+    });
+
+    // 3. P-B3 inferScope strips XML/JSON markup and caps fallback scope to 64 chars
+    const store = new ContextStore();
+    const mangledScope = inferScope(undefined, '<tasks>[{"scope":"very_long_scope_that_should_be_sanitized_and_capped_without_markup"}]</tasks>', store);
+    expect(mangledScope.length).toBeLessThanOrEqual(64);
+    expect(mangledScope).not.toMatch(/[<>{}\[\]]/);
+
+    // 4. P-B5 max_steps uses caller request up to maxBranchStepsCap
+    const seenMaxSteps: number[] = [];
+    const toolSteps = createBranchTool(
+      async (_task, opts) => {
+        if (opts.maxSteps !== undefined) seenMaxSteps.push(opts.maxSteps);
+        return answer('Verified step budget.');
+      },
+      { maxBranchSteps: 30, maxBranchStepsCap: 100 },
+    );
+    await toolSteps.execute({ scope: 'a', task: 'check 50', max_steps: 50 }, contextFor(store));
+    await toolSteps.execute({ scope: 'b', task: 'check 150', max_steps: 150 }, contextFor(store));
+    expect(seenMaxSteps).toEqual([50, 100]);
+
+    // 5. P-B4 subagent cwd propagation via spec.cwd and directory scope fallback
+    const subDir = await mkdtemp(join(tmpdir(), 'raf-branch-cwd-'));
+    const rootDir = await mkdtemp(join(tmpdir(), 'raf-root-cwd-'));
+    try {
+      const seenToolCwds: Array<string | undefined> = [];
+      let callIdx = 0;
+      const llm = new ScriptedLLM(() => {
+        callIdx++;
+        if (callIdx === 1) {
+          return `<motivation>branch</motivation><tool_call name="branch"><tasks><task scope="pkg" cwd="${subDir}">check cwd</task></tasks></tool_call>`;
+        }
+        if (callIdx === 2) {
+          return '<motivation>probe</motivation><tool_call name="probe_cwd"></tool_call>';
+        }
+        if (callIdx === 3) {
+          return '<folding range="0-0">probed</folding><motivation>done</motivation><answer>Subagent completed cwd check successfully.</answer>';
+        }
+        return '<folding range="0-0">done</folding><motivation>done</motivation><answer>Root complete.</answer>';
+      });
+      const raf = new RecursiveAgentFold({
+        rootLLM: llm,
+        store,
+        ingest: { cwd: rootDir },
+        extraTools: [
+          {
+            name: 'probe_cwd',
+            description: 'Report ToolContext.cwd',
+            parameters: { type: 'object', properties: {} },
+            async execute(_args, ctx) {
+              seenToolCwds.push(ctx.cwd);
+              return ctx.cwd ?? 'none';
+            },
+          },
+        ],
+      });
+      const res = await raf.run('Check subagent cwd');
+      expect(res.answer).toBe('Root complete.');
+      expect(seenToolCwds).toEqual([subDir]);
+    } finally {
+      await rm(subDir, { recursive: true, force: true });
+      await rm(rootDir, { recursive: true, force: true });
+    }
   });
 });
