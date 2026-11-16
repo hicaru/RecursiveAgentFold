@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.3 — 2026-11-17 — Prune benchmark results to the 2026-11-11 RAF series
+
+`results/` held 99 entries from five weeks of experiments. Only the last RAF campaign stays.
+
+### Changes
+
+- **`results/`**: removed 80 entries (653 tracked files): the first agentfold runs
+  (`2026-11-04T*`, `2026-11-05-*`), the `h1`–`h4`, `r1`/`r4`/`r5`, `j*`, `exp-*`, `en-*`,
+  `rlm-port-*`, `mock-*`, `smoke-*`, and `verify-*` series, plus `vanilla-full-bench.log`.
+  Kept the 19 `2026-11-11T*` RAF runs. `results/` goes from 37 MB to 6.5 MB.
+- **`docs/RLM_PI_HYPOTHESES.md`**: the worktree deletion that was pending before this
+  change set is committed here.
+
+### Known breakage
+
+- `README.md` and `docs/EXPERIMENTS.md` still cite removed run directories (`exp-*`,
+  `en-*`, `rlm-port-*`, `verify-*`, `j*`). `img/` keeps the rendered cards, but the
+  provenance text and `img/render_overview.py` no longer reproduce them.
+- `pnpm test` stays red from the plugin removal in 0.1.2 (9 engine failures).
+
 ## 0.1.2 — 2026-11-17 — Remove the legacy DSH plugin package
 
 The DSH plugin is rebuilt from scratch. The old implementation leaves the tree.
