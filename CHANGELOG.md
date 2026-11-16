@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.2 — 2026-11-17 — Remove the legacy DSH plugin package
+
+The DSH plugin is rebuilt from scratch. The old implementation leaves the tree.
+
+### Changes
+
+- **`packages/dsh-plugin` (`@raf/dsh-plugin`)**: removed every file (`index.js`, `client.js`,
+  `locale/en.json`, `locale/ru.json`, `icon.svg`, `cordis.patch.yml`, `package.json`,
+  `README.md`). Git keeps the old code: `git checkout 91cd483 -- packages/dsh-plugin`.
+- **Desktop profile**: `plugin_manager` `remove_bundle` returned `application: applied`.
+  No `raf` rows remain in the profile `package.json`, `cordis.patch.yml`, or
+  `pnpm-lock.yaml`. The dangling `node_modules/@raf/dsh-plugin` symlink is removed.
+- **`pnpm-lock.yaml`**: the `packages/dsh-plugin` importer is dropped.
+
+### Known breakage until the rebuild
+
+- `packages/engine/test/runtime.test.ts`, `packages/engine/test/plugin-retry.test.ts`,
+  `packages/benchmarks/src/dsh-host.ts`, `packages/benchmarks/test/dsh-plugin.test.ts`,
+  and `packages/benchmarks/test/scoring.test.ts` import `../../dsh-plugin/*`.
+- `pnpm typecheck` passes. `pnpm test` fails at module load (engine: 9 failed, 104 passed).
+  The host-contract tests are rewritten together with the new plugin.
+
 ## 0.1.1 — 2026-11-15 — Fix fatal host crash on RAF session start (introduced in 0.1.0)
 
 `session-713f288d-75b8-4e67-8359-2f57381428ea` (and two sibling sessions) died at turn 1:

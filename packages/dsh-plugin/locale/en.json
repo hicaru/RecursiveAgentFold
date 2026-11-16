@@ -1,6 +1,0 @@
-{
-  "meta": {
-    "title": "RAF engine",
-    "description": "Runs the Recursive AgentFold engine for selected Sessions and adds its settings panel and composer engine switch."
-  }
-}

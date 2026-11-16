@@ -1,6 +1,6 @@
 {
   "name": "@raf/engine",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Recursive AgentFold engine: proactive context folding, llm_query chunk scanner, recursive branches, cache-preserving prompt layout.",
   "type": "module",
   "main": "./dist/index.js",

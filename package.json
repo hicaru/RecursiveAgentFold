@@ -1,7 +1,7 @@
 {
   "name": "recursive-agentfold",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "Recursive AgentFold: proactive context folding + llm_query chunk scanning for mega-large contexts without losing the prompt cache.",
   "packageManager": "pnpm@11.5.2",
