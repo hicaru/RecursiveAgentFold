@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.4 — 2026-11-17 — Remove the Pi extension
+
+The Pi surface leaves the tree. The engine and benchmarks stay.
+
+### Changes
+
+- **`packages/pi-extension` (`@raf/pi-extension`)**: removed every file (30 files, about
+  8.2k lines): `raf.ts`, `src/*`, `test/*`, `README.md`, `package.json`, tsconfigs.
+- **Pi profile**: removed the extension path from `~/.pi/agent/settings.json` `packages`,
+  and deleted `~/.pi/agent/raf.json` (its saved settings).
+- **`pnpm-lock.yaml`**: the `packages/pi-extension` importer and its devDependencies
+  (`@earendil-works/pi-*`, `typebox`) are gone (1127 lines).
+
+### Notes
+
+- `packages/engine/test/branch.test.ts` and `core.test.ts` keep `packages/pi-extension`
+  only as literal scope strings in fixtures. They are not imports.
+- `bun.lock` stays stale: it already referenced the removed `dsh-plugin`. The workspace
+  uses pnpm.
+- `pnpm typecheck` passes. `pnpm test` stays red from the 0.1.2 plugin removal
+  (9 engine failures).
+
 ## 0.1.3 — 2026-11-17 — Prune benchmark results to the 2026-11-11 RAF series
 
 `results/` held 99 entries from five weeks of experiments. Only the last RAF campaign stays.
